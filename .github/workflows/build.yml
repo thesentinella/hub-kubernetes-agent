@@ -30,7 +30,9 @@ jobs:
 
       - name: Set image tags
         id: vars
-        run: echo "sha_short=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+        run: |
+          echo "sha_short=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+          echo "commit_msg=$(git log -1 --pretty=%s)" >> $GITHUB_OUTPUT
 
       - name: Build and push
         uses: docker/build-push-action@v6
@@ -42,3 +44,50 @@ jobs:
             ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE }}:${{ steps.vars.outputs.sha_short }}
           cache-from: type=registry,ref=${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE }}:latest
           cache-to: type=inline
+
+      - name: Notify Slack — success
+        if: success()
+        uses: slackapi/slack-github-action@v2
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: "${{ secrets.SLACK_CHANNEL_ID }}"
+            text: ":white_check_mark: *${{ github.repository }}* image pushed"
+            attachments:
+              - color: "good"
+                fields:
+                  - title: "Branch"
+                    value: "${{ github.ref_name }}"
+                    short: true
+                  - title: "Commit"
+                    value: "<${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}|${{ steps.vars.outputs.sha_short }}> ${{ steps.vars.outputs.commit_msg }}"
+                    short: false
+                  - title: "Image"
+                    value: "`${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE }}:${{ steps.vars.outputs.sha_short }}`"
+                    short: false
+                  - title: "By"
+                    value: "${{ github.actor }}"
+                    short: true
+
+      - name: Notify Slack — failure
+        if: failure()
+        uses: slackapi/slack-github-action@v2
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: "${{ secrets.SLACK_CHANNEL_ID }}"
+            text: ":x: *${{ github.repository }}* build failed"
+            attachments:
+              - color: "danger"
+                fields:
+                  - title: "Branch"
+                    value: "${{ github.ref_name }}"
+                    short: true
+                  - title: "Run"
+                    value: "<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|Ver logs>"
+                    short: true
+                  - title: "By"
+                    value: "${{ github.actor }}"
+                    short: true
