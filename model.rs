@@ -157,6 +157,7 @@ pub struct Command {
 /// by the Hub-side serializer; on the agent side we treat omission as "leave
 /// as-is" and presence as "set to this exact value or remove if string is empty".
 #[derive(Deserialize, Debug)]
+#[allow(dead_code)]
 pub struct WorkloadResourcesSpec {
     /// Workload kind: "Deployment", "StatefulSet", or "DaemonSet".
     pub workload_kind: String,
@@ -177,6 +178,7 @@ pub struct WorkloadResourcesSpec {
 /// Resource quantity map, e.g. `{"cpu": "500m", "memory": "512Mi"}`.
 /// Values follow the standard Kubernetes Quantity format.
 #[derive(Deserialize, Debug, Default)]
+#[allow(dead_code)]
 pub struct ResourceMap {
     #[serde(default)]
     pub cpu: Option<String>,
