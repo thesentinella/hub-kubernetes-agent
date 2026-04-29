@@ -116,17 +116,19 @@ mod tests {
             "NODE_NAME",
             "LEASE_NAME",
         ] {
-            env::remove_var(var);
+            unsafe { env::remove_var(var) };
         }
     }
 
     unsafe fn set_required(hub_url: &str, cluster_id: &str) {
-        env::set_var("HUB_URL", hub_url);
-        env::set_var("CLUSTER_ID", cluster_id);
+        unsafe {
+            env::set_var("HUB_URL", hub_url);
+            env::set_var("CLUSTER_ID", cluster_id);
+        }
     }
 
     unsafe fn clear_required() {
-        reset_env();
+        unsafe { reset_env() };
     }
 
     #[test]
