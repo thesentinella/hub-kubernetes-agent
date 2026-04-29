@@ -17,7 +17,7 @@
 
 use anyhow::Result;
 use kube::Client;
-use kube_leader_election::{LeaseLock, LeaseLockParams};
+use kube_leader_election::{LeaseLock, LeaseLockParams, LeaseLockResult};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -87,7 +87,7 @@ pub async fn run_leader_loop(
     loop {
         match lock.try_acquire_or_renew().await {
             Ok(result) => {
-                state.set(result.acquired_lease);
+                state.set(matches!(result, LeaseLockResult::Acquired(_)));
             }
             Err(e) => {
                 warn!("lease acquire/renew failed: {:#}", e);
