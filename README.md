@@ -1,0 +1,211 @@
+# Sentinella Hub Kubernetes Agent
+
+Inventory collector and (future) action executor for Kubernetes and OpenShift clusters, part of the **Sentinella Hub** ecosystem. Designed to live alongside future sibling agents (VMware Agent, OpenStack Agent, etc.) under the same Hub.
+
+## What it does in this release (v0.1)
+
+- Connects to the Kubernetes API using its `ServiceAccount` (cluster-wide read-only RBAC).
+- Runs as a **DaemonSet** with **leader election** via a `coordination.k8s.io/Lease`. Only the leader collects and ships inventory; non-leaders idle on that loop. All pods poll for commands.
+- Every minute the leader collects and sends to the Hub an inventory **snapshot**:
+  - **Cluster**: Kubernetes version, detected platform (vanilla / openshift / eks / gke / aks), nodes with capacity/allocatable, kubelet version, container runtime, OS image, roles.
+  - **Namespaces** with labels and phase.
+  - **Workloads**: deployments, statefulsets, daemonsets (name, namespace, desired/ready replicas).
+  - **Pods**: each container with image, **detected technology** (vendor/product/version inferred from the image), `requests` and `limits` (CPU and memory).
+- Maintains an open long-poll against the Hub for command delivery. **Action execution is disabled by default** (`ACTIONS_ENABLED=false`); the agent replies with `skipped` and an explanatory message to any command received. The framework is in place to enable execution once the Hub-side command contracts are defined.
+
+## Architecture
+
+### DaemonSet with leader election
+
+The agent runs on every node, but only one pod at a time — the leader — collects cluster inventory. This gives you:
+
+- **Resilience**: if the leader's node goes down, another pod takes over within `LEASE_TTL_SECS`.
+- **Forward compatibility with node-local work**: when future versions need per-node data (kubelet stats, host filesystem reads, in-cluster sidecar coordination), every pod is already in place — no need to deploy a second workload.
+- **Forward compatibility with node-targeted commands**: when actions are enabled, a command like "patch this pod's resources" can be routed to the agent on the node where the target pod lives.
+
+Leader election uses the standard Kubernetes `Lease` resource — no external dependency. The lease lives in the agent's own namespace. Holder identity is the node name, so `kubectl describe lease -n sentinella` immediately tells you which node is leading.
+
+**Note on fencing**: Lease-based election is non-fencing. Under heavy clock skew or network partitions, two pods could briefly both believe they hold the lease. For inventory collection this only causes a duplicate snapshot — harmless; the Hub should be idempotent on `(cluster_id, timestamp_ms)`. When action execution is enabled, the executor still tolerates this: every command has an `id`, the Hub deduplicates acks, and operations should be idempotent.
+
+### Hub → Agent channel: long-polling over HTTPS
+
+Considered alternatives:
+
+- **Persistent WebSocket**: cleaner for bidirectional traffic, but corporate load balancers sometimes terminate them. Reconnection adds complexity.
+- **gRPC streaming**: same story, worse compatibility with proxies.
+- **Short polling (every N seconds)**: high latency for actions, unnecessary pressure on the Hub.
+- **Long-polling**: the agent opens `GET /v1/clusters/{id}/commands/poll?wait=30s`; the Hub holds the connection until a command arrives or the wait expires. ✅
+
+Chosen because:
+
+- Only outbound HTTPS is required — works behind any corporate proxy or firewall (relevant for banking and telco clients).
+- The agent never exposes inbound ports.
+- Reconnection is trivial (it's just HTTP).
+
+If heavy bidirectional streaming is needed later (live logs, interactive exec), that case is solved with a separate channel without touching this transport.
+
+### Image-based technology detection
+
+`src/tech.rs` holds a rules table (image name → vendor/product) plus light version normalization (`v1.30.2-alpine` → `1.30.2`). Initial coverage:
+
+- **Web/proxy**: nginx, httpd, haproxy, envoy, traefik, caddy
+- **Databases**: postgres, mysql, mariadb, mongo, redis, elasticsearch, kibana, influxdb, cockroach
+- **Messaging**: rabbitmq, kafka, nats
+- **Runtimes**: openjdk/temurin/corretto/semeru, node, python, golang, rust, dotnet, ruby, php
+- **Observability**: prometheus, grafana, logstash, fluentd, fluent-bit
+- **K8s/OpenShift control plane**: kube-apiserver, controller-manager, scheduler, kube-proxy, coredns, etcd, ose-*
+- **Service mesh**: istio-proxy, linkerd-proxy
+
+Unknown images are not discarded — they return `vendor=null`, `product=<image-name>`, `version=<tag>` so the Hub can group and surface frequently seen images for promotion to vendor/product later.
+
+Unit tests are included in `tech.rs`. Extending coverage is one entry in the `RULES` table.
+
+### Actions — designed for gradual rollout
+
+`src/executor.rs` implements the dispatch pattern but rejects everything while `ACTIONS_ENABLED=false`. The **v0.2 command contract is already frozen** in `src/model.rs` and the dispatch table in `src/executor.rs`, so Hub developers can start generating commands against this v0.1 build today and verify the round-trip works — they will just come back with `status: "not_implemented"`.
+
+#### v0.2 commands: setting requests and limits
+
+Two command kinds form the resource-patch flow:
+
+- **`preview_workload_resources`** — server-side dry-run. Computes the patch, runs it against the apiserver with `?dryRun=All`, returns the would-be state plus any admission webhook output. Cluster state is unchanged.
+- **`apply_workload_resources`** — applies the patch for real. The rolling restart that follows is the workload controller's responsibility; the agent does not wait for it.
+
+The two-command pattern is intentional. Each artifact (preview, approval, apply) is a separate Hub record with its own `command_id`, timestamp, and audit trail — easier for dashboards, easier for compliance reviews. Cluster state can change between preview and apply (HPA scaled, new pods); the apply re-validates against fresh state rather than relying on a stale preview.
+
+**Target is a workload controller**, not a Pod. A `Pod`-targeted patch is futile — its ReplicaSet/StatefulSet recreates it with the original spec in seconds. Supported kinds: `Deployment`, `StatefulSet`, `DaemonSet`. In-place pod resize via the `pods/resize` subresource (Kubernetes 1.33+, beta) is on the v0.3 roadmap.
+
+**Spec shape** (`WorkloadResourcesSpec`):
+
+```json
+{
+  "workload_kind": "Deployment",
+  "namespace": "production",
+  "name": "api-server",
+  "container": "api",
+  "requests": { "cpu": "500m", "memory": "512Mi" },
+  "limits":   { "cpu": "1000m", "memory": "1Gi" }
+}
+```
+
+Either `requests` or `limits` may be omitted to leave that side untouched.
+
+**Result shape** (`CommandResult`) for both kinds includes:
+
+- `applied_patch` — the strategic-merge patch the agent computed.
+- `observed_before` — the targeted container's resources block before the operation.
+- `observed_after` — what the apiserver returned (dry-run for preview, actual persisted state for apply).
+- `warnings` — non-fatal safety findings (HPA managing the workload, VPA in Auto mode, LimitRange margins, ResourceQuota headroom, PodDisruptionBudget concerns).
+
+The agent uses **strategic-merge patch**, not JSON-merge — JSON-merge would clobber the entire `containers` array. Strategic-merge addresses just `spec.template.spec.containers[name=X].resources`.
+
+**Pre-flight safety checks** (planned for v0.2 — accumulated into `warnings`, not fatal unless dangerous):
+- HPA targeting this workload (CPU/memory autoscaling targets interact with requests).
+- VPA in `Auto` or `Recreate` mode (we would fight the VPA).
+- Namespace `LimitRange` admits the new values.
+- Namespace `ResourceQuota` has headroom for the delta.
+- `PodDisruptionBudget` would block the rolling restart.
+
+**RBAC required to enable**:
+
+```yaml
+- apiGroups: ["apps"]
+  resources: ["deployments", "statefulsets", "daemonsets"]
+  verbs: ["patch"]
+```
+
+This is intentionally a separate ClusterRole, applied only when `ACTIONS_ENABLED=true`. The read-only ClusterRole stays untouched. **No `*` on `*/*`**.
+
+Recommendation when enabling: only grant `patch` after the Hub has dashboard approval flow in place. The preview-then-apply pattern is the technical mechanism; the Hub-side approval workflow is what makes it safe for regulated clients.
+
+## Agent endpoints
+
+- `:9090/livez`, `:9090/readyz` — kubelet probes.
+- `:9090/metrics` — Prometheus:
+  - `agent_snapshots_total{outcome="ok|error|skipped_not_leader"}`
+  - `agent_commands_received_total`
+  - `agent_commands_executed_total{status="ok|error|skipped|not_implemented|unknown"}`
+  - `agent_is_leader` (gauge: 1 if this pod holds the lease, 0 otherwise)
+
+## Hub contract
+
+### POST `/v1/clusters/{cluster_id}/inventory`
+
+Body: `InventorySnapshot` (see `src/model.rs`). Respond `2xx` to accept. `4xx` is not retried (except `408`/`429`); `5xx` and network errors are (3 attempts: 0s/2s/5s).
+
+### GET `/v1/clusters/{cluster_id}/commands/poll?wait=30s`
+
+Long-poll. The Hub holds the connection until it has a `CommandBatch` or until `wait` expires. Valid responses:
+
+- `200` with body `{"commands":[...]}` — work to do.
+- `204`, or `200` with `{"commands":[]}` — normal timeout; the agent reopens.
+
+### POST `/v1/clusters/{cluster_id}/commands/{command_id}/ack`
+
+Body: `CommandResult` with `status` (`ok` | `error` | `skipped` | `not_implemented` | `unknown`) and an optional message. For resource-patch kinds the body also carries `dry_run`, `applied_patch`, `observed_before`, `observed_after`, and `warnings` for full audit.
+
+## Configuration (env vars from ConfigMap/Secret)
+
+| Variable | Source | Default |
+|---|---|---|
+| `HUB_URL` | ConfigMap | required |
+| `CLUSTER_ID` | ConfigMap | required |
+| `HUB_BEARER_TOKEN` | Secret | optional |
+| `COLLECT_INTERVAL_SECS` | ConfigMap | `60` |
+| `POLL_WAIT_SECS` | ConfigMap | `30` |
+| `HTTP_TIMEOUT_SECS` | ConfigMap | `20` |
+| `LEASE_TTL_SECS` | ConfigMap | `30` |
+| `LEASE_NAME` | ConfigMap | `sentinella-hub-k8s-agent-leader` |
+| `ACTIONS_ENABLED` | ConfigMap | `false` |
+| `RUST_LOG` | ConfigMap | `info` |
+| `POD_NAME`, `POD_NAMESPACE`, `NODE_NAME` | downward API | auto |
+
+## Build
+
+```bash
+docker build -t ghcr.io/sentinella/sentinella-hub-k8s-agent:0.1.0 .
+docker push  ghcr.io/sentinella/sentinella-hub-k8s-agent:0.1.0
+```
+
+## Deploy
+
+1. Edit `deploy/agent.yaml`:
+   - `CLUSTER_ID` unique per cluster.
+   - `bearer-token` (`echo -n 'token' | base64`).
+   - `image:` pointing to your registry.
+   - Toleration block — current value runs on every node including control plane; trim if you want a smaller footprint.
+2. `kubectl apply -f deploy/agent.yaml`
+3. Verify:
+   ```bash
+   kubectl -n sentinella get ds,po
+   kubectl -n sentinella get lease
+   kubectl -n sentinella logs ds/sentinella-hub-k8s-agent --tail=50
+   kubectl -n sentinella port-forward ds/sentinella-hub-k8s-agent 9090:9090
+   curl localhost:9090/metrics
+   ```
+
+The `Lease` object will appear once the first pod is up; its `holderIdentity` is the leader node's name.
+
+## Project layout
+
+```
+src/
+  main.rs        # entrypoint, loops, shutdown
+  config.rs      # env -> Config
+  model.rs       # wire format DTOs
+  collector.rs   # reads Kubernetes API and builds the snapshot
+  hub.rs         # HTTP client to the Hub (snapshot + long-poll + ack)
+  executor.rs    # command dispatch (disabled by flag)
+  leader.rs      # leader election via Kubernetes Lease
+  tech.rs        # image-based technology detection + tests
+  health.rs      # /livez /readyz /metrics
+deploy/agent.yaml  # ServiceAccount, RBAC (ClusterRole + Role), ConfigMap, Secret, DaemonSet
+```
+
+## Suggested roadmap
+
+1. **v0.1 (this)** — read-only collection, leader election, command framework wired with v0.2 contract frozen but not yet executing. Hub developers can already integrate.
+2. **v0.2** — `preview_workload_resources` and `apply_workload_resources` handlers fully implemented: workload resolution, container lookup, pre-flight safety checks (HPA/VPA/LimitRange/ResourceQuota/PDB), strategic-merge patch with optional `?dryRun=All`, full audit fields in the result. Separate ClusterRole adds `patch` on `apps/deployments|statefulsets|daemonsets` and is applied only when `ACTIONS_ENABLED=true`.
+3. **v0.3** — additional commands: `scale_workload`, `restart_workload` (rollout restart annotation), `cordon_node`, `drain_node`. In-place pod resize via `pods/resize` subresource (Kubernetes 1.33+) for containers with a compatible `resizePolicy`.
+4. **v0.4** — incremental collection (watches instead of full lists every minute) once snapshots get costly on large clusters.
+5. **v0.5** — node-local data collection (kubelet stats, host filesystem) using the existing per-node pod presence.

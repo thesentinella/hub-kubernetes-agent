@@ -1,0 +1,214 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sentinella
+  labels:
+    app.kubernetes.io/part-of: sentinella
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sentinella-hub-k8s-agent
+  namespace: sentinella
+---
+# Cluster-wide READ-ONLY permissions for inventory collection.
+# When ACTIONS_ENABLED=true is introduced, add a separate ClusterRole/Binding
+# scoped to the specific verbs and resources you want to mutate (e.g. patch on
+# pods). Do not expand this role with mutating verbs.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sentinella-hub-k8s-agent-reader
+rules:
+  - apiGroups: [""]
+    resources:
+      - nodes
+      - namespaces
+      - pods
+      - services
+      - configmaps
+      - persistentvolumeclaims
+      - persistentvolumes
+      - events
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources:
+      - deployments
+      - statefulsets
+      - daemonsets
+      - replicasets
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["batch"]
+    resources:
+      - jobs
+      - cronjobs
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources:
+      - ingresses
+      - networkpolicies
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources:
+      - storageclasses
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: sentinella-hub-k8s-agent-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: sentinella-hub-k8s-agent-reader
+subjects:
+  - kind: ServiceAccount
+    name: sentinella-hub-k8s-agent
+    namespace: sentinella
+---
+# Namespace-scoped RBAC for the Lease used in leader election.
+# This is intentionally a Role (not ClusterRole) — the lease lives only in the
+# agent's own namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sentinella-hub-k8s-agent-leader-election
+  namespace: sentinella
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sentinella-hub-k8s-agent-leader-election
+  namespace: sentinella
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: sentinella-hub-k8s-agent-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: sentinella-hub-k8s-agent
+    namespace: sentinella
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sentinella-hub-k8s-agent-config
+  namespace: sentinella
+data:
+  HUB_URL: "https://hub.sentinel.la"
+  CLUSTER_ID: "REPLACE_ME"           # unique per cluster
+  COLLECT_INTERVAL_SECS: "60"
+  POLL_WAIT_SECS: "30"
+  HTTP_TIMEOUT_SECS: "20"
+  LEASE_TTL_SECS: "30"
+  ACTIONS_ENABLED: "false"           # read-only by default
+  RUST_LOG: "info"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: sentinella-hub-k8s-agent-auth
+  namespace: sentinella
+type: Opaque
+data:
+  bearer-token: BASE64_TOKEN_HERE    # echo -n 'your-token' | base64
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: sentinella-hub-k8s-agent
+  namespace: sentinella
+  labels:
+    app.kubernetes.io/name: sentinella-hub-k8s-agent
+    app.kubernetes.io/part-of: sentinella
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sentinella-hub-k8s-agent
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: sentinella-hub-k8s-agent
+        app.kubernetes.io/part-of: sentinella
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: sentinella-hub-k8s-agent
+      terminationGracePeriodSeconds: 30
+      # Schedule on every node, including control plane and tainted nodes.
+      # Trim this if you want a smaller footprint.
+      tolerations:
+        - operator: Exists
+          effect: NoSchedule
+        - operator: Exists
+          effect: NoExecute
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: agent
+          image: ghcr.io/sentinella/sentinella-hub-k8s-agent:0.1.0   # replace with your registry
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: sentinella-hub-k8s-agent-config
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: HUB_BEARER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: sentinella-hub-k8s-agent-auth
+                  key: bearer-token
+                  optional: true
+          ports:
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: metrics
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 20m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
