@@ -1,0 +1,32 @@
+name: PR Notify
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, reopened]
+
+jobs:
+  notify:
+    name: Slack notification
+    runs-on: ubuntu-latest
+    steps:
+      - name: Notify Slack — PR opened
+        uses: slackapi/slack-github-action@v2
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: "${{ secrets.SLACK_CHANNEL_ID }}"
+            text: ":pr: *PR abierto en ${{ github.repository }}*"
+            attachments:
+              - color: "#0075db"
+                fields:
+                  - title: "PR"
+                    value: "<${{ github.event.pull_request.html_url }}|#${{ github.event.pull_request.number }} ${{ github.event.pull_request.title }}>"
+                    short: false
+                  - title: "Autor"
+                    value: "${{ github.actor }}"
+                    short: true
+                  - title: "Branch"
+                    value: "`${{ github.head_ref }}` → `${{ github.base_ref }}`"
+                    short: true
