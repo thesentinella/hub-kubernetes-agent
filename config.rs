@@ -92,3 +92,122 @@ fn parse_secs(var: &str, default: u64) -> Duration {
             .unwrap_or(default),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::env;
+
+    fn set_required(hub_url: &str, cluster_id: &str) {
+        env::set_var("HUB_URL", hub_url);
+        env::set_var("CLUSTER_ID", cluster_id);
+    }
+
+    fn clear_required() {
+        env::remove_var("HUB_URL");
+        env::remove_var("CLUSTER_ID");
+    }
+
+    #[test]
+    fn from_env_ok() {
+        set_required("https://hub.example.com", "cluster-1");
+        let cfg = Config::from_env().unwrap();
+        assert_eq!(cfg.hub_url, "https://hub.example.com");
+        assert_eq!(cfg.cluster_id, "cluster-1");
+        clear_required();
+    }
+
+    #[test]
+    fn from_env_missing_hub_url() {
+        env::remove_var("HUB_URL");
+        env::set_var("CLUSTER_ID", "cluster-1");
+        assert!(Config::from_env().is_err());
+        clear_required();
+    }
+
+    #[test]
+    fn from_env_missing_cluster_id() {
+        env::set_var("HUB_URL", "https://hub.example.com");
+        env::remove_var("CLUSTER_ID");
+        assert!(Config::from_env().is_err());
+        clear_required();
+    }
+
+    #[test]
+    fn hub_url_trailing_slash_stripped() {
+        set_required("https://hub.example.com///", "cluster-1");
+        let cfg = Config::from_env().unwrap();
+        assert_eq!(cfg.hub_url, "https://hub.example.com");
+        clear_required();
+    }
+
+    #[test]
+    fn bearer_token_empty_string_becomes_none() {
+        set_required("https://hub.example.com", "cluster-1");
+        env::set_var("HUB_BEARER_TOKEN", "");
+        let cfg = Config::from_env().unwrap();
+        assert!(cfg.bearer_token.is_none());
+        env::remove_var("HUB_BEARER_TOKEN");
+        clear_required();
+    }
+
+    #[test]
+    fn bearer_token_set() {
+        set_required("https://hub.example.com", "cluster-1");
+        env::set_var("HUB_BEARER_TOKEN", "secret");
+        let cfg = Config::from_env().unwrap();
+        assert_eq!(cfg.bearer_token.as_deref(), Some("secret"));
+        env::remove_var("HUB_BEARER_TOKEN");
+        clear_required();
+    }
+
+    #[test]
+    fn actions_enabled_true_values() {
+        set_required("https://hub.example.com", "cluster-1");
+        for val in ["true", "1"] {
+            env::set_var("ACTIONS_ENABLED", val);
+            let cfg = Config::from_env().unwrap();
+            assert!(cfg.actions_enabled, "expected true for ACTIONS_ENABLED={val}");
+        }
+        env::remove_var("ACTIONS_ENABLED");
+        clear_required();
+    }
+
+    #[test]
+    fn actions_enabled_defaults_false() {
+        set_required("https://hub.example.com", "cluster-1");
+        env::remove_var("ACTIONS_ENABLED");
+        let cfg = Config::from_env().unwrap();
+        assert!(!cfg.actions_enabled);
+        clear_required();
+    }
+
+    #[test]
+    fn parse_secs_default_on_invalid() {
+        env::set_var("__TEST_SECS", "not_a_number");
+        let d = parse_secs("__TEST_SECS", 42);
+        assert_eq!(d, Duration::from_secs(42));
+        env::remove_var("__TEST_SECS");
+    }
+
+    #[test]
+    fn parse_secs_reads_value() {
+        env::set_var("__TEST_SECS", "99");
+        let d = parse_secs("__TEST_SECS", 42);
+        assert_eq!(d, Duration::from_secs(99));
+        env::remove_var("__TEST_SECS");
+    }
+
+    #[test]
+    fn pod_defaults() {
+        set_required("https://hub.example.com", "cluster-1");
+        env::remove_var("POD_NAME");
+        env::remove_var("POD_NAMESPACE");
+        env::remove_var("NODE_NAME");
+        let cfg = Config::from_env().unwrap();
+        assert_eq!(cfg.pod_name, "unknown");
+        assert_eq!(cfg.pod_namespace, "default");
+        assert_eq!(cfg.node_name, "unknown-node");
+        clear_required();
+    }
+}
