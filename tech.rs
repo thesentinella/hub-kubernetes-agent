@@ -87,7 +87,7 @@ struct Rule {
 
 impl Rule {
     fn matches(&self, name: &str) -> bool {
-        if self.names.iter().any(|n| *n == name) {
+        if self.names.contains(&name) {
             return true;
         }
         self.prefixes.iter().any(|p| name.starts_with(p))
