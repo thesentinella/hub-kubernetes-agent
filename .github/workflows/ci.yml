@@ -10,7 +10,7 @@ env:
 
 jobs:
   check:
-    name: Check
+    name: Lint & Test
     runs-on: ubuntu-latest
 
     steps:
