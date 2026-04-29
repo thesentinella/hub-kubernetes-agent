@@ -97,20 +97,45 @@ fn parse_secs(var: &str, default: u64) -> Duration {
 mod tests {
     use super::*;
     use std::env;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    unsafe fn reset_env() {
+        for var in [
+            "HUB_URL",
+            "CLUSTER_ID",
+            "HUB_BEARER_TOKEN",
+            "COLLECT_INTERVAL_SECS",
+            "POLL_WAIT_SECS",
+            "HTTP_TIMEOUT_SECS",
+            "LEASE_TTL_SECS",
+            "ACTIONS_ENABLED",
+            "POD_NAME",
+            "POD_NAMESPACE",
+            "NODE_NAME",
+            "LEASE_NAME",
+        ] {
+            unsafe { env::remove_var(var) };
+        }
+    }
 
     unsafe fn set_required(hub_url: &str, cluster_id: &str) {
-        env::set_var("HUB_URL", hub_url);
-        env::set_var("CLUSTER_ID", cluster_id);
+        unsafe {
+            env::set_var("HUB_URL", hub_url);
+            env::set_var("CLUSTER_ID", cluster_id);
+        }
     }
 
     unsafe fn clear_required() {
-        env::remove_var("HUB_URL");
-        env::remove_var("CLUSTER_ID");
+        unsafe { reset_env() };
     }
 
     #[test]
     fn from_env_ok() {
+        let _lock = ENV_LOCK.lock().unwrap();
         unsafe {
+            reset_env();
             set_required("https://hub.example.com", "cluster-1");
             let cfg = Config::from_env().unwrap();
             assert_eq!(cfg.hub_url, "https://hub.example.com");
@@ -121,8 +146,9 @@ mod tests {
 
     #[test]
     fn from_env_missing_hub_url() {
+        let _lock = ENV_LOCK.lock().unwrap();
         unsafe {
-            env::remove_var("HUB_URL");
+            reset_env();
             env::set_var("CLUSTER_ID", "cluster-1");
             assert!(Config::from_env().is_err());
             clear_required();
@@ -131,9 +157,10 @@ mod tests {
 
     #[test]
     fn from_env_missing_cluster_id() {
+        let _lock = ENV_LOCK.lock().unwrap();
         unsafe {
+            reset_env();
             env::set_var("HUB_URL", "https://hub.example.com");
-            env::remove_var("CLUSTER_ID");
             assert!(Config::from_env().is_err());
             clear_required();
         }
@@ -141,7 +168,9 @@ mod tests {
 
     #[test]
     fn hub_url_trailing_slash_stripped() {
+        let _lock = ENV_LOCK.lock().unwrap();
         unsafe {
+            reset_env();
             set_required("https://hub.example.com///", "cluster-1");
             let cfg = Config::from_env().unwrap();
             assert_eq!(cfg.hub_url, "https://hub.example.com");
@@ -151,7 +180,9 @@ mod tests {
 
     #[test]
     fn bearer_token_empty_string_becomes_none() {
+        let _lock = ENV_LOCK.lock().unwrap();
         unsafe {
+            reset_env();
             set_required("https://hub.example.com", "cluster-1");
             env::set_var("HUB_BEARER_TOKEN", "");
             let cfg = Config::from_env().unwrap();
@@ -163,7 +194,9 @@ mod tests {
 
     #[test]
     fn bearer_token_set() {
+        let _lock = ENV_LOCK.lock().unwrap();
         unsafe {
+            reset_env();
             set_required("https://hub.example.com", "cluster-1");
             env::set_var("HUB_BEARER_TOKEN", "secret");
             let cfg = Config::from_env().unwrap();
@@ -175,7 +208,9 @@ mod tests {
 
     #[test]
     fn actions_enabled_true_values() {
+        let _lock = ENV_LOCK.lock().unwrap();
         unsafe {
+            reset_env();
             set_required("https://hub.example.com", "cluster-1");
             for val in ["true", "1"] {
                 env::set_var("ACTIONS_ENABLED", val);
@@ -192,9 +227,10 @@ mod tests {
 
     #[test]
     fn actions_enabled_defaults_false() {
+        let _lock = ENV_LOCK.lock().unwrap();
         unsafe {
+            reset_env();
             set_required("https://hub.example.com", "cluster-1");
-            env::remove_var("ACTIONS_ENABLED");
             let cfg = Config::from_env().unwrap();
             assert!(!cfg.actions_enabled);
             clear_required();
@@ -203,7 +239,9 @@ mod tests {
 
     #[test]
     fn parse_secs_default_on_invalid() {
+        let _lock = ENV_LOCK.lock().unwrap();
         unsafe {
+            reset_env();
             env::set_var("__TEST_SECS", "not_a_number");
             let d = parse_secs("__TEST_SECS", 42);
             assert_eq!(d, Duration::from_secs(42));
@@ -213,7 +251,9 @@ mod tests {
 
     #[test]
     fn parse_secs_reads_value() {
+        let _lock = ENV_LOCK.lock().unwrap();
         unsafe {
+            reset_env();
             env::set_var("__TEST_SECS", "99");
             let d = parse_secs("__TEST_SECS", 42);
             assert_eq!(d, Duration::from_secs(99));
@@ -223,11 +263,10 @@ mod tests {
 
     #[test]
     fn pod_defaults() {
+        let _lock = ENV_LOCK.lock().unwrap();
         unsafe {
+            reset_env();
             set_required("https://hub.example.com", "cluster-1");
-            env::remove_var("POD_NAME");
-            env::remove_var("POD_NAMESPACE");
-            env::remove_var("NODE_NAME");
             let cfg = Config::from_env().unwrap();
             assert_eq!(cfg.pod_name, "unknown");
             assert_eq!(cfg.pod_namespace, "default");
