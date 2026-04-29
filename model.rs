@@ -262,3 +262,98 @@ fn now_ms() -> u128 {
         .map(|d| d.as_millis())
         .unwrap_or(0)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::Value;
+
+    #[test]
+    fn command_result_simple_fields() {
+        let r = CommandResult::simple("cmd-1".into(), "ok", None);
+        assert_eq!(r.command_id, "cmd-1");
+        assert_eq!(r.status, "ok");
+        assert!(r.message.is_none());
+        assert!(r.dry_run.is_none());
+        assert!(r.applied_patch.is_none());
+        assert!(r.warnings.is_empty());
+        assert!(r.finished_at_ms > 0);
+    }
+
+    #[test]
+    fn command_result_simple_with_message() {
+        let r = CommandResult::simple("cmd-2".into(), "error", Some("boom".into()));
+        assert_eq!(r.message.as_deref(), Some("boom"));
+    }
+
+    #[test]
+    fn command_result_serialization_omits_none_fields() {
+        let r = CommandResult::simple("cmd-3".into(), "skipped", None);
+        let v: Value = serde_json::to_value(&r).unwrap();
+        assert!(!v.as_object().unwrap().contains_key("message"));
+        assert!(!v.as_object().unwrap().contains_key("dry_run"));
+        assert!(!v.as_object().unwrap().contains_key("applied_patch"));
+        assert!(!v.as_object().unwrap().contains_key("warnings"));
+    }
+
+    #[test]
+    fn command_result_serialization_includes_warnings() {
+        let mut r = CommandResult::simple("cmd-4".into(), "ok", None);
+        r.warnings.push("HPA detected".into());
+        let v: Value = serde_json::to_value(&r).unwrap();
+        let warnings = v["warnings"].as_array().unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0], "HPA detected");
+    }
+
+    #[test]
+    fn command_batch_deserializes_empty() {
+        let json = r#"{}"#;
+        let batch: CommandBatch = serde_json::from_str(json).unwrap();
+        assert!(batch.commands.is_empty());
+    }
+
+    #[test]
+    fn command_batch_deserializes_commands() {
+        let json = r#"{
+            "commands": [
+                {"id": "c1", "type": "preview_workload_resources", "spec": {}}
+            ]
+        }"#;
+        let batch: CommandBatch = serde_json::from_str(json).unwrap();
+        assert_eq!(batch.commands.len(), 1);
+        assert_eq!(batch.commands[0].id, "c1");
+        assert_eq!(batch.commands[0].kind, "preview_workload_resources");
+    }
+
+    #[test]
+    fn workload_resources_spec_deserializes() {
+        let json = r#"{
+            "workload_kind": "Deployment",
+            "namespace": "prod",
+            "name": "api",
+            "container": "app",
+            "requests": {"cpu": "500m", "memory": "256Mi"},
+            "limits": null
+        }"#;
+        let spec: WorkloadResourcesSpec = serde_json::from_str(json).unwrap();
+        assert_eq!(spec.workload_kind, "Deployment");
+        assert_eq!(spec.namespace, "prod");
+        let req = spec.requests.unwrap();
+        assert_eq!(req.cpu.as_deref(), Some("500m"));
+        assert_eq!(req.memory.as_deref(), Some("256Mi"));
+    }
+
+    #[test]
+    fn workload_resources_spec_omitted_requests_is_none() {
+        let json = r#"{
+            "workload_kind": "StatefulSet",
+            "namespace": "default",
+            "name": "db",
+            "container": "postgres"
+        }"#;
+        let spec: WorkloadResourcesSpec = serde_json::from_str(json).unwrap();
+        assert!(spec.requests.is_none());
+        assert!(spec.limits.is_none());
+    }
+}
