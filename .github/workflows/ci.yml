@@ -31,10 +31,6 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
-      # Source files live at repo root; Cargo.toml expects src/
-      - name: Prepare src layout
-        run: mkdir -p src && cp *.rs src/
-
       - name: Format check
         run: cargo fmt --check
 
