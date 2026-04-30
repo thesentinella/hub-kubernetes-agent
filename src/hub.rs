@@ -5,7 +5,7 @@ use crate::model::*;
 use anyhow::Result;
 use reqwest::{Client, StatusCode};
 use std::time::Duration;
-use tracing::warn;
+use tracing::{warn, error};
 
 pub struct HubClient {
     http: Client,
@@ -14,6 +14,14 @@ pub struct HubClient {
 
 impl HubClient {
     pub fn new(cfg: Config) -> Result<Self> {
+        if let Some(key) = &cfg.api_key {
+            if !key.starts_with("shub_") {
+                error!("HUB_API_KEY does not have the expected 'shub_' prefix; requests will likely be rejected");
+            }
+        } else {
+            warn!("HUB_API_KEY is not set; requests will be sent unauthenticated");
+        }
+
         let http = Client::builder()
             .gzip(true)
             .timeout(cfg.http_timeout)
@@ -28,8 +36,8 @@ impl HubClient {
     }
 
     fn auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        match &self.cfg.bearer_token {
-            Some(t) => req.bearer_auth(t),
+        match &self.cfg.api_key {
+            Some(key) => req.bearer_auth(key),
             None => req,
         }
     }

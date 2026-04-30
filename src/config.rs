@@ -10,8 +10,8 @@ pub struct Config {
     /// Identifier this cluster registers as in the Hub.
     pub cluster_id: String,
 
-    /// Bearer token for Hub authentication.
-    pub bearer_token: Option<String>,
+    /// API key for Hub authentication. Must have the `shub_` prefix.
+    pub api_key: Option<String>,
 
     /// How often the leader collects and ships cluster inventory.
     pub collect_interval: Duration,
@@ -48,7 +48,7 @@ impl Config {
         let hub_url = env::var("HUB_URL").context("HUB_URL not set")?;
         let cluster_id = env::var("CLUSTER_ID").context("CLUSTER_ID not set")?;
 
-        let bearer_token = env::var("HUB_BEARER_TOKEN").ok().filter(|s| !s.is_empty());
+        let api_key = env::var("HUB_API_KEY").ok().filter(|s| !s.is_empty());
 
         let collect_interval = parse_secs("COLLECT_INTERVAL_SECS", 60);
         let poll_wait = parse_secs("POLL_WAIT_SECS", 30);
@@ -70,7 +70,7 @@ impl Config {
         Ok(Self {
             hub_url: hub_url.trim_end_matches('/').to_string(),
             cluster_id,
-            bearer_token,
+            api_key,
             collect_interval,
             poll_wait,
             actions_enabled,
@@ -105,7 +105,7 @@ mod tests {
         for var in [
             "HUB_URL",
             "CLUSTER_ID",
-            "HUB_BEARER_TOKEN",
+            "HUB_API_KEY",
             "COLLECT_INTERVAL_SECS",
             "POLL_WAIT_SECS",
             "HTTP_TIMEOUT_SECS",
@@ -179,29 +179,29 @@ mod tests {
     }
 
     #[test]
-    fn bearer_token_empty_string_becomes_none() {
+    fn api_key_empty_string_becomes_none() {
         let _lock = ENV_LOCK.lock().unwrap();
         unsafe {
             reset_env();
             set_required("https://hub.example.com", "cluster-1");
-            env::set_var("HUB_BEARER_TOKEN", "");
+            env::set_var("HUB_API_KEY", "");
             let cfg = Config::from_env().unwrap();
-            assert!(cfg.bearer_token.is_none());
-            env::remove_var("HUB_BEARER_TOKEN");
+            assert!(cfg.api_key.is_none());
+            env::remove_var("HUB_API_KEY");
             clear_required();
         }
     }
 
     #[test]
-    fn bearer_token_set() {
+    fn api_key_set() {
         let _lock = ENV_LOCK.lock().unwrap();
         unsafe {
             reset_env();
             set_required("https://hub.example.com", "cluster-1");
-            env::set_var("HUB_BEARER_TOKEN", "secret");
+            env::set_var("HUB_API_KEY", "shub_test123");
             let cfg = Config::from_env().unwrap();
-            assert_eq!(cfg.bearer_token.as_deref(), Some("secret"));
-            env::remove_var("HUB_BEARER_TOKEN");
+            assert_eq!(cfg.api_key.as_deref(), Some("shub_test123"));
+            env::remove_var("HUB_API_KEY");
             clear_required();
         }
     }
