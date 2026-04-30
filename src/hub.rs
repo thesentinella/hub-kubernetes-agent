@@ -5,7 +5,7 @@ use crate::model::*;
 use anyhow::Result;
 use reqwest::{Client, StatusCode};
 use std::time::Duration;
-use tracing::{warn, error};
+use tracing::{error, warn};
 
 pub struct HubClient {
     http: Client,
@@ -16,7 +16,9 @@ impl HubClient {
     pub fn new(cfg: Config) -> Result<Self> {
         if let Some(key) = &cfg.api_key {
             if !key.starts_with("shub_") {
-                error!("HUB_API_KEY does not have the expected 'shub_' prefix; requests will likely be rejected");
+                error!(
+                    "HUB_API_KEY does not have the expected 'shub_' prefix; requests will likely be rejected"
+                );
             }
         } else {
             warn!("HUB_API_KEY is not set; requests will be sent unauthenticated");
