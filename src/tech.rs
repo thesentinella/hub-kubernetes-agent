@@ -30,6 +30,11 @@ pub fn detect(image: &str) -> Technology {
                 vendor: Some(rule.vendor.to_string()),
                 product: Some(rule.product.to_string()),
                 version: tag.map(normalize_version),
+                language: if rule.language.is_empty() {
+                    None
+                } else {
+                    Some(rule.language.to_string())
+                },
                 source: "image",
             };
         }
@@ -40,6 +45,7 @@ pub fn detect(image: &str) -> Technology {
         vendor: None,
         product: Some(name),
         version: tag.map(normalize_version),
+        language: None,
         source: "image",
     }
 }
@@ -80,6 +86,7 @@ fn normalize_version(tag: &str) -> String {
 struct Rule {
     vendor: &'static str,
     product: &'static str,
+    language: &'static str,
     /// Match if the image name equals any of these, OR starts_with any prefix.
     names: &'static [&'static str],
     prefixes: &'static [&'static str],
@@ -99,36 +106,42 @@ const RULES: &[Rule] = &[
     Rule {
         vendor: "nginx",
         product: "nginx",
+        language: "C",
         names: &["nginx", "nginx-unprivileged"],
         prefixes: &[],
     },
     Rule {
         vendor: "apache",
         product: "httpd",
+        language: "C",
         names: &["httpd"],
         prefixes: &[],
     },
     Rule {
         vendor: "haproxy",
         product: "haproxy",
+        language: "C",
         names: &["haproxy"],
         prefixes: &[],
     },
     Rule {
         vendor: "envoy",
         product: "envoy",
+        language: "C++",
         names: &["envoy"],
         prefixes: &[],
     },
     Rule {
         vendor: "traefik",
         product: "traefik",
+        language: "Go",
         names: &["traefik"],
         prefixes: &[],
     },
     Rule {
         vendor: "caddy",
         product: "caddy",
+        language: "Go",
         names: &["caddy"],
         prefixes: &[],
     },
@@ -136,54 +149,63 @@ const RULES: &[Rule] = &[
     Rule {
         vendor: "postgresql",
         product: "postgres",
+        language: "C",
         names: &["postgres", "postgresql"],
         prefixes: &["postgres-"],
     },
     Rule {
         vendor: "mysql",
         product: "mysql",
+        language: "C++",
         names: &["mysql"],
         prefixes: &[],
     },
     Rule {
         vendor: "mariadb",
         product: "mariadb",
+        language: "C++",
         names: &["mariadb"],
         prefixes: &[],
     },
     Rule {
         vendor: "mongodb",
         product: "mongodb",
+        language: "C++",
         names: &["mongo", "mongodb"],
         prefixes: &[],
     },
     Rule {
         vendor: "redis",
         product: "redis",
+        language: "C",
         names: &["redis"],
         prefixes: &[],
     },
     Rule {
         vendor: "elastic",
         product: "elasticsearch",
+        language: "Java",
         names: &["elasticsearch"],
         prefixes: &[],
     },
     Rule {
         vendor: "elastic",
         product: "kibana",
+        language: "JavaScript",
         names: &["kibana"],
         prefixes: &[],
     },
     Rule {
         vendor: "influxdata",
         product: "influxdb",
+        language: "Go",
         names: &["influxdb"],
         prefixes: &[],
     },
     Rule {
         vendor: "cockroachdb",
         product: "cockroachdb",
+        language: "Go",
         names: &["cockroach"],
         prefixes: &[],
     },
@@ -191,18 +213,21 @@ const RULES: &[Rule] = &[
     Rule {
         vendor: "rabbitmq",
         product: "rabbitmq",
+        language: "Erlang",
         names: &["rabbitmq"],
         prefixes: &[],
     },
     Rule {
         vendor: "apache",
         product: "kafka",
+        language: "Java",
         names: &["kafka"],
         prefixes: &["cp-kafka", "confluent"],
     },
     Rule {
         vendor: "nats",
         product: "nats",
+        language: "Go",
         names: &["nats"],
         prefixes: &[],
     },
@@ -210,48 +235,56 @@ const RULES: &[Rule] = &[
     Rule {
         vendor: "oracle",
         product: "java",
+        language: "Java",
         names: &["openjdk"],
         prefixes: &["eclipse-temurin", "amazoncorretto", "ibm-semeru-runtimes"],
     },
     Rule {
         vendor: "nodejs",
         product: "node",
+        language: "JavaScript",
         names: &["node"],
         prefixes: &[],
     },
     Rule {
         vendor: "python",
         product: "python",
+        language: "Python",
         names: &["python"],
         prefixes: &[],
     },
     Rule {
         vendor: "golang",
         product: "go",
+        language: "Go",
         names: &["golang"],
         prefixes: &[],
     },
     Rule {
         vendor: "rust-lang",
         product: "rust",
+        language: "Rust",
         names: &["rust"],
         prefixes: &[],
     },
     Rule {
         vendor: "microsoft",
         product: "dotnet",
+        language: "C#",
         names: &[],
         prefixes: &["dotnet"],
     },
     Rule {
         vendor: "ruby",
         product: "ruby",
+        language: "Ruby",
         names: &["ruby"],
         prefixes: &[],
     },
     Rule {
         vendor: "php",
         product: "php",
+        language: "PHP",
         names: &["php"],
         prefixes: &[],
     },
@@ -259,67 +292,85 @@ const RULES: &[Rule] = &[
     Rule {
         vendor: "prometheus",
         product: "prometheus",
+        language: "Go",
         names: &["prometheus"],
         prefixes: &[],
     },
     Rule {
         vendor: "grafana",
         product: "grafana",
+        language: "Go",
         names: &["grafana"],
         prefixes: &[],
     },
     Rule {
         vendor: "elastic",
         product: "logstash",
+        language: "Java",
         names: &["logstash"],
         prefixes: &[],
     },
     Rule {
         vendor: "fluent",
         product: "fluentd",
-        names: &["fluentd", "fluent-bit"],
+        language: "Ruby",
+        names: &["fluentd"],
+        prefixes: &[],
+    },
+    Rule {
+        vendor: "fluent",
+        product: "fluent-bit",
+        language: "C",
+        names: &["fluent-bit"],
         prefixes: &[],
     },
     // Kubernetes / OpenShift control plane and components
     Rule {
         vendor: "kubernetes",
         product: "kube-apiserver",
+        language: "Go",
         names: &["kube-apiserver"],
         prefixes: &[],
     },
     Rule {
         vendor: "kubernetes",
         product: "kube-controller-manager",
+        language: "Go",
         names: &["kube-controller-manager"],
         prefixes: &[],
     },
     Rule {
         vendor: "kubernetes",
         product: "kube-scheduler",
+        language: "Go",
         names: &["kube-scheduler"],
         prefixes: &[],
     },
     Rule {
         vendor: "kubernetes",
         product: "kube-proxy",
+        language: "Go",
         names: &["kube-proxy"],
         prefixes: &[],
     },
     Rule {
         vendor: "kubernetes",
         product: "coredns",
+        language: "Go",
         names: &["coredns"],
         prefixes: &[],
     },
     Rule {
         vendor: "kubernetes",
         product: "etcd",
+        language: "Go",
         names: &["etcd"],
         prefixes: &[],
     },
     Rule {
         vendor: "openshift",
         product: "ose",
+        language: "Go",
         names: &[],
         prefixes: &["ose-"],
     },
@@ -327,12 +378,14 @@ const RULES: &[Rule] = &[
     Rule {
         vendor: "istio",
         product: "istio-proxy",
+        language: "C++",
         names: &["proxyv2"],
         prefixes: &[],
     },
     Rule {
         vendor: "linkerd",
         product: "linkerd-proxy",
+        language: "Rust",
         names: &["proxy"],
         prefixes: &["linkerd2-proxy"],
     },
@@ -347,6 +400,7 @@ mod tests {
         let t = detect("nginx:1.25-alpine");
         assert_eq!(t.product.as_deref(), Some("nginx"));
         assert_eq!(t.version.as_deref(), Some("1.25"));
+        assert_eq!(t.language.as_deref(), Some("C"));
     }
 
     #[test]
@@ -354,6 +408,7 @@ mod tests {
         let t = detect("docker.io/library/postgres:15.4");
         assert_eq!(t.product.as_deref(), Some("postgres"));
         assert_eq!(t.version.as_deref(), Some("15.4"));
+        assert_eq!(t.language.as_deref(), Some("C"));
     }
 
     #[test]
@@ -361,6 +416,7 @@ mod tests {
         let t = detect("registry.k8s.io/kube-apiserver:v1.30.2");
         assert_eq!(t.vendor.as_deref(), Some("kubernetes"));
         assert_eq!(t.version.as_deref(), Some("1.30.2"));
+        assert_eq!(t.language.as_deref(), Some("Go"));
     }
 
     #[test]
@@ -376,6 +432,7 @@ mod tests {
         assert_eq!(t.vendor, None);
         assert_eq!(t.product.as_deref(), Some("internal-tool"));
         assert_eq!(t.version.as_deref(), Some("2.0"));
+        assert_eq!(t.language, None);
     }
 
     #[test]
@@ -383,5 +440,32 @@ mod tests {
         let t = detect("registry.local:5000/team/redis:7.2");
         assert_eq!(t.product.as_deref(), Some("redis"));
         assert_eq!(t.version.as_deref(), Some("7.2"));
+        assert_eq!(t.language.as_deref(), Some("C"));
+    }
+
+    #[test]
+    fn detects_language_java_runtime() {
+        let t = detect("eclipse-temurin:21-jre");
+        assert_eq!(t.language.as_deref(), Some("Java"));
+    }
+
+    #[test]
+    fn detects_language_erlang_rabbitmq() {
+        let t = detect("rabbitmq:3.13-management");
+        assert_eq!(t.language.as_deref(), Some("Erlang"));
+    }
+
+    #[test]
+    fn detects_language_go_traefik() {
+        let t = detect("traefik:v3.0");
+        assert_eq!(t.language.as_deref(), Some("Go"));
+    }
+
+    #[test]
+    fn detects_fluent_bit_vs_fluentd() {
+        let fb = detect("fluent/fluent-bit:3.0");
+        assert_eq!(fb.language.as_deref(), Some("C"));
+        let fd = detect("fluent/fluentd:v1.16");
+        assert_eq!(fd.language.as_deref(), Some("Ruby"));
     }
 }
