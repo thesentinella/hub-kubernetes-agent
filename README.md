@@ -202,6 +202,42 @@ src/
 deploy/agent.yaml  # ServiceAccount, RBAC (ClusterRole + Role), ConfigMap, Secret, DaemonSet
 ```
 
+## Contributing
+
+### Branching
+
+Work on a feature branch and open a PR against `main`. All merges use **squash merge** — the PR title becomes the commit on `main`.
+
+### PR title conventions
+
+Releases are automated via [release-please](https://github.com/googleapis/release-please). The PR title determines whether a release is created and what version bump it triggers:
+
+| Prefix | Effect | Example |
+|--------|--------|---------|
+| `feat:` | minor bump (`v0.1.0` → `v0.2.0`) | `feat: collect NetworkPolicies` |
+| `fix:` | patch bump (`v0.1.0` → `v0.1.1`) | `fix: correct timeout on hub reconnect` |
+| `perf:` | patch bump | `perf: skip unchanged nodes in snapshot` |
+| `feat!:` / `fix!:` | major bump (`v0.1.0` → `v1.0.0`) | `feat!: redesign inventory payload format` |
+| `chore:` | no release | `chore: update Cargo dependencies` |
+| `ci:` | no release | `ci: add Docker layer cache` |
+| `docs:` | no release | `docs: document action contract` |
+| `refactor:` | no release | `refactor: split collector into modules` |
+
+Rules:
+- English, imperative mood ("add" not "added").
+- No trailing period.
+- Breaking changes append `!` after the type: `feat!:`.
+
+### Release process
+
+Releases are fully automated:
+
+1. Merge a `feat:` or `fix:` PR → release-please opens (or updates) a release PR that bumps `Cargo.toml` and updates `CHANGELOG.md`.
+2. Merge the release PR → release-please creates the git tag (e.g. `v0.2.0`).
+3. The `release` workflow triggers: builds the Docker image, pushes `:v0.2.0` + `:latest` to Artifact Registry, updates `agent.yaml` with the new image tag, and notifies Slack.
+
+No manual tagging required.
+
 ## Suggested roadmap
 
 1. **v0.1 (this)** — read-only collection, leader election, command framework wired with v0.2 contract frozen but not yet executing. Hub developers can already integrate.
