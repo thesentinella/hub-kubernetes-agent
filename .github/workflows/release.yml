@@ -2,7 +2,7 @@ name: Release
 
 on:
   push:
-    tags: ['v*.*.*']
+    tags: ['v*.*.*', 'sentinella-hub-k8s-agent-v*.*.*']
 
 env:
   PROJECT_ID: sentinella-hub
@@ -32,6 +32,7 @@ jobs:
         id: vars
         run: |
           VERSION="${{ github.ref_name }}"
+          VERSION="${VERSION#sentinella-hub-k8s-agent-}"
           BASE="${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE }}"
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "image_version=${BASE}:${VERSION}" >> $GITHUB_OUTPUT

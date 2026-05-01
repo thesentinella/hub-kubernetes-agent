@@ -13,6 +13,7 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
+    if: ${{ !startsWith(github.event.head_commit.message, 'chore(main): release') }}
     permissions:
       contents: read
 
@@ -35,16 +36,13 @@ jobs:
           echo "commit_msg=$(git log -1 --pretty=%s)" >> $GITHUB_OUTPUT
           BASE="${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE }}"
           echo "image_sha=${BASE}:${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
-          echo "image_latest=${BASE}:latest" >> $GITHUB_OUTPUT
 
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
-          tags: |
-            ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE }}:latest
-            ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE }}:${{ steps.vars.outputs.sha_short }}
+          tags: ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE }}:${{ steps.vars.outputs.sha_short }}
           cache-from: type=registry,ref=${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE }}:latest
           cache-to: type=inline
 
@@ -66,8 +64,8 @@ jobs:
                   - title: "Commit"
                     value: "<${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}|${{ steps.vars.outputs.sha_short }}> ${{ steps.vars.outputs.commit_msg }}"
                     short: false
-                  - title: "Images"
-                    value: "`${{ steps.vars.outputs.image_sha }}`\n`${{ steps.vars.outputs.image_latest }}`"
+                  - title: "Image"
+                    value: "`${{ steps.vars.outputs.image_sha }}`"
                     short: false
                   - title: "By"
                     value: "${{ github.actor }}"
