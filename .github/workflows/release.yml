@@ -1,0 +1,90 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+env:
+  PROJECT_ID: sentinella-hub
+  REGION: us-east1
+  REPOSITORY: kubernetes-agent
+  IMAGE: sentinella-hub-k8s-agent
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+
+      - name: Set image vars
+        id: vars
+        run: |
+          VERSION="${{ github.ref_name }}"
+          BASE="${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE }}"
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "image_version=${BASE}:${VERSION}" >> $GITHUB_OUTPUT
+          echo "image_latest=${BASE}:latest" >> $GITHUB_OUTPUT
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.vars.outputs.image_version }}
+            ${{ steps.vars.outputs.image_latest }}
+          cache-from: type=registry,ref=${{ steps.vars.outputs.image_latest }}
+          cache-to: type=inline
+
+      - name: Notify Slack — success
+        if: success()
+        uses: slackapi/slack-github-action@v2
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: "${{ secrets.SLACK_CHANNEL_ID }}"
+            text: ":rocket: *${{ github.repository }}* released ${{ steps.vars.outputs.version }}"
+            attachments:
+              - color: "good"
+                fields:
+                  - title: "Version"
+                    value: "${{ steps.vars.outputs.version }}"
+                    short: true
+                  - title: "Image"
+                    value: "`${{ steps.vars.outputs.image_version }}`"
+                    short: false
+                  - title: "By"
+                    value: "${{ github.actor }}"
+                    short: true
+
+      - name: Notify Slack — failure
+        if: failure()
+        uses: slackapi/slack-github-action@v2
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: "${{ secrets.SLACK_CHANNEL_ID }}"
+            text: ":x: *${{ github.repository }}* release ${{ steps.vars.outputs.version }} failed"
+            attachments:
+              - color: "danger"
+                fields:
+                  - title: "Run"
+                    value: "<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|Ver logs>"
+                    short: true
+                  - title: "By"
+                    value: "${{ github.actor }}"
+                    short: true
