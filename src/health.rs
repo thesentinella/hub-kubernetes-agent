@@ -18,8 +18,10 @@ pub static SNAPSHOTS_SENT: Lazy<IntCounterVec> = Lazy::new(|| {
         prometheus::Opts::new("agent_snapshots_total", "Snapshots sent by outcome"),
         &["outcome"],
     )
-    .unwrap();
-    REGISTRY.register(Box::new(c.clone())).unwrap();
+    .expect("failed to create agent_snapshots_total metric");
+    REGISTRY
+        .register(Box::new(c.clone()))
+        .expect("failed to register agent_snapshots_total metric");
     c
 });
 
@@ -28,8 +30,10 @@ pub static COMMANDS_RECEIVED: Lazy<IntCounter> = Lazy::new(|| {
         "agent_commands_received_total",
         "Commands received from Hub",
     )
-    .unwrap();
-    REGISTRY.register(Box::new(c.clone())).unwrap();
+    .expect("failed to create agent_commands_received_total metric");
+    REGISTRY
+        .register(Box::new(c.clone()))
+        .expect("failed to register agent_commands_received_total metric");
     c
 });
 
@@ -38,14 +42,19 @@ pub static COMMANDS_EXECUTED: Lazy<IntCounterVec> = Lazy::new(|| {
         prometheus::Opts::new("agent_commands_executed_total", "Commands by status"),
         &["status"],
     )
-    .unwrap();
-    REGISTRY.register(Box::new(c.clone())).unwrap();
+    .expect("failed to create agent_commands_executed_total metric");
+    REGISTRY
+        .register(Box::new(c.clone()))
+        .expect("failed to register agent_commands_executed_total metric");
     c
 });
 
 pub static IS_LEADER: Lazy<IntGauge> = Lazy::new(|| {
-    let g = IntGauge::new("agent_is_leader", "1 if this pod currently holds the lease").unwrap();
-    REGISTRY.register(Box::new(g.clone())).unwrap();
+    let g = IntGauge::new("agent_is_leader", "1 if this pod currently holds the lease")
+        .expect("failed to create agent_is_leader metric");
+    REGISTRY
+        .register(Box::new(g.clone()))
+        .expect("failed to register agent_is_leader metric");
     g
 });
 
@@ -87,12 +96,12 @@ async fn handle(
             Response::builder()
                 .header("content-type", encoder.format_type())
                 .body(Full::new(Bytes::from(buf)))
-                .unwrap()
+                .expect("failed to build metrics response")
         }
         _ => Response::builder()
             .status(404)
             .body(Full::new(Bytes::from("not found")))
-            .unwrap(),
+            .expect("failed to build 404 response"),
     };
     Ok(resp)
 }
