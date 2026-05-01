@@ -161,7 +161,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: agent
-          image: ghcr.io/sentinella/sentinella-hub-k8s-agent:0.1.0   # replace with your registry
+          image: us-east1-docker.pkg.dev/sentinella-hub/kubernetes-agent/sentinella-hub-k8s-agent:v0.1.0
           imagePullPolicy: IfNotPresent
           envFrom:
             - configMapRef:
