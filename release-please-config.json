@@ -8,6 +8,12 @@
         {"type": "feat", "section": "Features"},
         {"type": "fix", "section": "Bug Fixes"},
         {"type": "perf", "section": "Performance"}
+      ],
+      "extra-files": [
+        {
+          "type": "generic",
+          "path": "agent.yaml"
+        }
       ]
     }
   }
