@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.3.0...v0.3.1) (2026-05-01)
+
+
+### Bug Fixes
+
+* replace unwrap() with expect() in health.rs for better diagnostics ([#13](https://github.com/thesentinella/hub-kubernetes-agent/issues/13)) ([f61db48](https://github.com/thesentinella/hub-kubernetes-agent/commit/f61db480b242b697e2248d21cf58d89c100022ff))
+
 ## [0.3.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.2.0...v0.3.0) (2026-05-01)
 
 
