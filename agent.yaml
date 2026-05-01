@@ -116,7 +116,7 @@ metadata:
   namespace: sentinella
 type: Opaque
 data:
-  bearer-token: BASE64_TOKEN_HERE    # echo -n 'your-token' | base64
+  api-key: BASE64_TOKEN_HERE    # echo -n 'shub_your-api-key' | base64
 ---
 apiVersion: apps/v1
 kind: DaemonSet
@@ -179,11 +179,11 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
-            - name: HUB_BEARER_TOKEN
+            - name: HUB_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: sentinella-hub-k8s-agent-auth
-                  key: bearer-token
+                  key: api-key
                   optional: true
           ports:
             - name: metrics

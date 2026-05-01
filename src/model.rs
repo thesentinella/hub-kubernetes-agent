@@ -102,6 +102,7 @@ pub struct Technology {
     pub vendor: Option<String>,
     pub product: Option<String>,
     pub version: Option<String>,
+    pub language: Option<String>,
     pub source: &'static str, // "image" for now; future: "labels", "exec"
 }
 
