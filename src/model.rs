@@ -152,11 +152,9 @@ pub struct Command {
 /// Pod directly. Patching a pod is futile because its controller will recreate
 /// it with the original spec.
 ///
-/// Either `requests` or `limits` (or both) must be provided. To clear a value
-/// (remove the limit/request entirely) the Hub sends an explicit `null` in
-/// the corresponding field — distinguished from omission via `Option<Option<_>>`
-/// by the Hub-side serializer; on the agent side we treat omission as "leave
-/// as-is" and presence as "set to this exact value or remove if string is empty".
+/// Either `requests` or `limits` (or both) must be provided. Omit a side to
+/// leave it unchanged; provide an empty map to clear all entries on that side.
+/// Individual resource keys cannot be cleared independently in this shape.
 #[derive(Deserialize, Debug)]
 #[allow(dead_code)]
 pub struct WorkloadResourcesSpec {

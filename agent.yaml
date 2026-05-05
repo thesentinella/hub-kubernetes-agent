@@ -13,9 +13,9 @@ metadata:
   namespace: sentinella
 ---
 # Cluster-wide READ-ONLY permissions for inventory collection.
-# When ACTIONS_ENABLED=true is introduced, add a separate ClusterRole/Binding
-# scoped to the specific verbs and resources you want to mutate (e.g. patch on
-# pods). Do not expand this role with mutating verbs.
+# When ACTIONS_ENABLED=true, apply a separate ClusterRole/Binding scoped to
+# patch on apps/deployments, apps/statefulsets, and apps/daemonsets. Do not
+# expand this read-only role with mutating verbs.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:

@@ -2,7 +2,7 @@
 
 Inventory collector and (future) action executor for Kubernetes and OpenShift clusters, part of the **Sentinella Hub** ecosystem. Designed to live alongside future sibling agents (VMware Agent, OpenStack Agent, etc.) under the same Hub.
 
-## What it does in this release (v0.1)
+## What it does in this release
 
 - Connects to the Kubernetes API using its `ServiceAccount` (cluster-wide read-only RBAC).
 - Runs as a **DaemonSet** with **leader election** via a `coordination.k8s.io/Lease`. Only the leader collects and ships inventory; non-leaders idle on that loop. All pods poll for commands.
@@ -11,7 +11,7 @@ Inventory collector and (future) action executor for Kubernetes and OpenShift cl
   - **Namespaces** with labels and phase.
   - **Workloads**: deployments, statefulsets, daemonsets (name, namespace, desired/ready replicas).
   - **Pods**: each container with image, **detected technology** (vendor/product/version inferred from the image), `requests` and `limits` (CPU and memory).
-- Maintains an open long-poll against the Hub for command delivery. **Action execution is disabled by default** (`ACTIONS_ENABLED=false`); the agent replies with `skipped` and an explanatory message to any command received. The framework is in place to enable execution once the Hub-side command contracts are defined.
+- Maintains an open long-poll against the Hub for command delivery. **Action execution is disabled by default** (`ACTIONS_ENABLED=false`); the agent replies with `skipped` and an explanatory message to any command received. When actions are explicitly enabled, the agent can preview workload resource patches with a Kubernetes server-side dry-run.
 
 ## Architecture
 
@@ -62,14 +62,14 @@ Unit tests are included in `tech.rs`. Extending coverage is one entry in the `RU
 
 ### Actions — designed for gradual rollout
 
-`src/executor.rs` implements the dispatch pattern but rejects everything while `ACTIONS_ENABLED=false`. The **v0.2 command contract is already frozen** in `src/model.rs` and the dispatch table in `src/executor.rs`, so Hub developers can start generating commands against this v0.1 build today and verify the round-trip works — they will just come back with `status: "not_implemented"`.
+`src/executor.rs` rejects every command while `ACTIONS_ENABLED=false`, before parsing the command spec. When actions are enabled, `preview_workload_resources` performs a server-side dry-run and `apply_workload_resources` is still recognized but returns `status: "not_implemented"`.
 
-#### v0.2 commands: setting requests and limits
+#### Commands: setting requests and limits
 
 Two command kinds form the resource-patch flow:
 
-- **`preview_workload_resources`** — server-side dry-run. Computes the patch, runs it against the apiserver with `?dryRun=All`, returns the would-be state plus any admission webhook output. Cluster state is unchanged.
-- **`apply_workload_resources`** — applies the patch for real. The rolling restart that follows is the workload controller's responsibility; the agent does not wait for it.
+- **`preview_workload_resources`** — implemented server-side dry-run. Computes the patch, runs it against the apiserver with `?dryRun=All`, and returns the would-be state. Cluster state is unchanged.
+- **`apply_workload_resources`** — planned live apply. It is recognized today but returns `status: "not_implemented"`.
 
 The two-command pattern is intentional. Each artifact (preview, approval, apply) is a separate Hub record with its own `command_id`, timestamp, and audit trail — easier for dashboards, easier for compliance reviews. Cluster state can change between preview and apply (HPA scaled, new pods); the apply re-validates against fresh state rather than relying on a stale preview.
 
@@ -88,25 +88,25 @@ The two-command pattern is intentional. Each artifact (preview, approval, apply)
 }
 ```
 
-Either `requests` or `limits` may be omitted to leave that side untouched.
+At least one of `requests` or `limits` must be present. Either side may be omitted to leave it untouched; an empty map clears that side.
 
-**Result shape** (`CommandResult`) for both kinds includes:
+**Result shape** (`CommandResult`) for a successful preview includes:
 
 - `applied_patch` — the strategic-merge patch the agent computed.
 - `observed_before` — the targeted container's resources block before the operation.
-- `observed_after` — what the apiserver returned (dry-run for preview, actual persisted state for apply).
-- `warnings` — non-fatal safety findings (HPA managing the workload, VPA in Auto mode, LimitRange margins, ResourceQuota headroom, PodDisruptionBudget concerns).
+- `observed_after` — what the apiserver returned for the dry-run patch.
+- `warnings` — non-fatal safety findings. Current preview support returns an empty warning list; richer pre-flight checks are planned.
 
 The agent uses **strategic-merge patch**, not JSON-merge — JSON-merge would clobber the entire `containers` array. Strategic-merge addresses just `spec.template.spec.containers[name=X].resources`.
 
-**Pre-flight safety checks** (planned for v0.2 — accumulated into `warnings`, not fatal unless dangerous):
+**Pre-flight safety checks** (planned — accumulated into `warnings`, not fatal unless dangerous):
 - HPA targeting this workload (CPU/memory autoscaling targets interact with requests).
 - VPA in `Auto` or `Recreate` mode (we would fight the VPA).
 - Namespace `LimitRange` admits the new values.
 - Namespace `ResourceQuota` has headroom for the delta.
 - `PodDisruptionBudget` would block the rolling restart.
 
-**RBAC required to enable**:
+**RBAC required to enable preview actions**:
 
 ```yaml
 - apiGroups: ["apps"]
@@ -114,7 +114,7 @@ The agent uses **strategic-merge patch**, not JSON-merge — JSON-merge would cl
   verbs: ["patch"]
 ```
 
-This is intentionally a separate ClusterRole, applied only when `ACTIONS_ENABLED=true`. The read-only ClusterRole stays untouched. **No `*` on `*/*`**.
+This must be a separate ClusterRole/Binding applied only when `ACTIONS_ENABLED=true`. The read-only ClusterRole stays untouched. **No `*` on `*/*`**. The root `agent.yaml` does not grant this workload patch RBAC by default.
 
 Recommendation when enabling: only grant `patch` after the Hub has dashboard approval flow in place. The preview-then-apply pattern is the technical mechanism; the Hub-side approval workflow is what makes it safe for regulated clients.
 
@@ -142,7 +142,7 @@ Long-poll. The Hub holds the connection until it has a `CommandBatch` or until `
 
 ### POST `/v1/clusters/{cluster_id}/commands/{command_id}/ack`
 
-Body: `CommandResult` with `status` (`ok` | `error` | `skipped` | `not_implemented` | `unknown`) and an optional message. For resource-patch kinds the body also carries `dry_run`, `applied_patch`, `observed_before`, `observed_after`, and `warnings` for full audit.
+Body: `CommandResult` with `status` (`ok` | `error` | `skipped` | `not_implemented` | `unknown`) and an optional message. Successful resource previews also carry `dry_run`, `applied_patch`, `observed_before`, `observed_after`, and `warnings` for full audit.
 
 ## Configuration (env vars from ConfigMap/Secret)
 
@@ -150,7 +150,7 @@ Body: `CommandResult` with `status` (`ok` | `error` | `skipped` | `not_implement
 |---|---|---|
 | `HUB_URL` | ConfigMap | required |
 | `CLUSTER_ID` | ConfigMap | required |
-| `HUB_BEARER_TOKEN` | Secret | optional |
+| `HUB_API_KEY` | Secret | optional |
 | `COLLECT_INTERVAL_SECS` | ConfigMap | `60` |
 | `POLL_WAIT_SECS` | ConfigMap | `30` |
 | `HTTP_TIMEOUT_SECS` | ConfigMap | `20` |
@@ -240,8 +240,9 @@ No manual tagging required.
 
 ## Suggested roadmap
 
-1. **v0.1 (this)** — read-only collection, leader election, command framework wired with v0.2 contract frozen but not yet executing. Hub developers can already integrate.
-2. **v0.2** — `preview_workload_resources` and `apply_workload_resources` handlers fully implemented: workload resolution, container lookup, pre-flight safety checks (HPA/VPA/LimitRange/ResourceQuota/PDB), strategic-merge patch with optional `?dryRun=All`, full audit fields in the result. Separate ClusterRole adds `patch` on `apps/deployments|statefulsets|daemonsets` and is applied only when `ACTIONS_ENABLED=true`.
-3. **v0.3** — additional commands: `scale_workload`, `restart_workload` (rollout restart annotation), `cordon_node`, `drain_node`. In-place pod resize via `pods/resize` subresource (Kubernetes 1.33+) for containers with a compatible `resizePolicy`.
-4. **v0.4** — incremental collection (watches instead of full lists every minute) once snapshots get costly on large clusters.
-5. **v0.5** — node-local data collection (kubelet stats, host filesystem) using the existing per-node pod presence.
+1. Add pre-flight safety warnings for `preview_workload_resources` (HPA/VPA/LimitRange/ResourceQuota/PDB).
+2. Implement `apply_workload_resources` with the same strategic-merge patch shape and fresh validation.
+3. Add additional commands: `scale_workload`, `restart_workload` (rollout restart annotation), `cordon_node`, `drain_node`.
+4. Evaluate in-place pod resize via the `pods/resize` subresource (Kubernetes 1.33+) for containers with a compatible `resizePolicy`.
+5. Add incremental collection (watches instead of full lists every minute) once snapshots get costly on large clusters.
+6. Add node-local data collection (kubelet stats, host filesystem) using the existing per-node pod presence.
