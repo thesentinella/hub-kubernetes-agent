@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.3.1...v0.4.0) (2026-05-05)
+
+
+### Features
+
+* add workload resource preview action ([#16](https://github.com/thesentinella/hub-kubernetes-agent/issues/16)) ([9337df0](https://github.com/thesentinella/hub-kubernetes-agent/commit/9337df0c7368d6fd5dd497c8be092f4131605735))
+
 ## [0.3.1](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.3.0...v0.3.1) (2026-05-01)
 
 
