@@ -34,7 +34,7 @@ Considered alternatives:
 - **Persistent WebSocket**: cleaner for bidirectional traffic, but corporate load balancers sometimes terminate them. Reconnection adds complexity.
 - **gRPC streaming**: same story, worse compatibility with proxies.
 - **Short polling (every N seconds)**: high latency for actions, unnecessary pressure on the Hub.
-- **Long-polling**: the agent opens `GET /v1/clusters/{id}/commands/poll?wait=30s`; the Hub holds the connection until a command arrives or the wait expires. ✅
+- **Long-polling**: this binary opens `GET /v1/clusters/{cluster_id}/commands/poll?wait=30s`; the Hub holds the connection until a command arrives or the wait expires. ✅
 
 Chosen because:
 
@@ -129,6 +129,10 @@ Recommendation when enabling: only grant `patch` after the Hub has dashboard app
 
 ## Hub contract
 
+`{cluster_id}` in paths below is the configured `CLUSTER_ID` value used by the agent at runtime.
+
+### Current agent behavior (implemented in this version)
+
 ### POST `/v1/clusters/{cluster_id}/inventory`
 
 Body: `InventorySnapshot` (see `src/model.rs`). Respond `2xx` to accept. `4xx` is not retried (except `408`/`429`); `5xx` and network errors are (3 attempts: 0s/2s/5s).
@@ -143,6 +147,21 @@ Long-poll. The Hub holds the connection until it has a `CommandBatch` or until `
 ### POST `/v1/clusters/{cluster_id}/commands/{command_id}/ack`
 
 Body: `CommandResult` with `status` (`ok` | `error` | `skipped` | `not_implemented` | `unknown`) and an optional message. Successful resource previews also carry `dry_run`, `applied_patch`, `observed_before`, `observed_after`, and `warnings` for full audit.
+
+### Target backend contract (migration)
+
+Target API route family is `/api/v1/...` on `https://api.hub.sentinel.la`.
+
+| Purpose | Current implemented endpoint | Target endpoint |
+|---|---|---|
+| Inventory ingest | `POST /v1/clusters/{cluster_id}/inventory` | `POST /api/v1/agent/ingest` |
+| Command poll | `GET /v1/clusters/{cluster_id}/commands/poll?wait=30s` | `GET /api/v1/clusters/{cluster_id}/commands/poll?wait=30s` |
+| Command ack | `POST /v1/clusters/{cluster_id}/commands/{command_id}/ack` | `POST /api/v1/clusters/{cluster_id}/commands/{command_id}/ack` |
+
+### Troubleshooting route/response mismatches
+
+- `command poll failed: poll status 404 Not Found` usually means route mismatch (`/v1/...` vs `/api/v1/...`) or missing backend endpoint.
+- `error decoding response body: expected value at line 1 column 1` usually means the poll endpoint returned non-JSON or empty body where JSON was expected.
 
 ## Configuration (env vars from ConfigMap/Secret)
 
