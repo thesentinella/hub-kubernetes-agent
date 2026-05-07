@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.6.2...v0.7.0) (2026-05-07)
+
+
+### Features
+
+* add preflight warning signals for preview resource patches ([#28](https://github.com/thesentinella/hub-kubernetes-agent/issues/28)) ([a8103e2](https://github.com/thesentinella/hub-kubernetes-agent/commit/a8103e2f7be69388bae96d860c0677dbd0902bcb))
+
 ## [0.6.2](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.6.1...v0.6.2) (2026-05-07)
 
 
