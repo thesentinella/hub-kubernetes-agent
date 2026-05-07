@@ -51,9 +51,16 @@ impl HubClient {
             self.cfg.hub_url, self.cfg.cluster_id
         );
         if self.cfg.http_debug {
+            let request_body = if self.cfg.http_debug_bodies {
+                Some(serde_json::to_string(snap).unwrap_or_else(|_| "<serialization error>".into()))
+            } else {
+                None
+            };
             debug!(
                 method = "POST",
                 url = %url,
+                request_preview_enabled = self.cfg.http_debug_bodies,
+                request_body_preview = %body_preview_opt(request_body.as_deref()),
                 schema_version = snap.schema_version,
                 namespaces = snap.namespaces.len(),
                 deployments = snap.workloads.deployments.len(),
@@ -211,9 +218,19 @@ impl HubClient {
             self.cfg.hub_url, self.cfg.cluster_id, result.command_id
         );
         if self.cfg.http_debug {
+            let request_body = if self.cfg.http_debug_bodies {
+                Some(
+                    serde_json::to_string(result)
+                        .unwrap_or_else(|_| "<serialization error>".into()),
+                )
+            } else {
+                None
+            };
             debug!(
                 method = "POST",
                 url = %url,
+                request_preview_enabled = self.cfg.http_debug_bodies,
+                request_body_preview = %body_preview_opt(request_body.as_deref()),
                 command_id = %result.command_id,
                 status = result.status,
                 dry_run = ?result.dry_run,
