@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.10.0...v0.11.0) (2026-05-07)
+
+
+### Features
+
+* add self_update command for immediate agent restart ([#38](https://github.com/thesentinella/hub-kubernetes-agent/issues/38)) ([c034757](https://github.com/thesentinella/hub-kubernetes-agent/commit/c03475767f9dd99451cce68df1f1b28b4e3f336f))
+
 ## [0.10.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.9.0...v0.10.0) (2026-05-07)
 
 
