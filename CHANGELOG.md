@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.8.1...v0.9.0) (2026-05-07)
+
+
+### Features
+
+* add storage inventory signals to snapshot payload ([#34](https://github.com/thesentinella/hub-kubernetes-agent/issues/34)) ([b978cfd](https://github.com/thesentinella/hub-kubernetes-agent/commit/b978cfdd965c1bd593ceea314c225fc915e2ffee))
+
 ## [0.8.1](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.8.0...v0.8.1) (2026-05-07)
 
 
