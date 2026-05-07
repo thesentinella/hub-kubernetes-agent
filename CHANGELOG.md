@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.4.0...v0.5.0) (2026-05-07)
+
+
+### Features
+
+* add bounded hub HTTP debug previews and warn suppression ([#20](https://github.com/thesentinella/hub-kubernetes-agent/issues/20)) ([6a8f226](https://github.com/thesentinella/hub-kubernetes-agent/commit/6a8f226201ea40eccf500e768de2d163b0537ffc))
+
 ## [0.4.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.3.1...v0.4.0) (2026-05-05)
 
 
