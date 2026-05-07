@@ -10,7 +10,7 @@ Inventory collector and (future) action executor for Kubernetes and OpenShift cl
   - **Cluster**: Kubernetes version, detected platform (vanilla / openshift / eks / gke / aks), nodes with capacity/allocatable, kubelet version, container runtime, OS image, roles.
   - **Namespaces** with labels and phase.
   - **Workloads**: deployments, statefulsets, daemonsets (name, namespace, desired/ready replicas).
-  - **Pods**: each container with image, **detected technology** (vendor/product/version inferred from the image), `requests` and `limits` (CPU and memory).
+  - **Pods**: age in seconds (`age_seconds`), each container with image, **detected technology** (vendor/product/version inferred from the image), `requests` and `limits` (CPU and memory).
   - **Storage**: StorageClasses (name/provisioner/safe parameter subset), PersistentVolumes, PersistentVolumeClaims, VolumeSnapshotClasses, and VolumeSnapshots.
 - Maintains an open long-poll against the Hub for command delivery. **Action execution is disabled by default** (`ACTIONS_ENABLED=false`); the agent replies with `skipped` and an explanatory message to any command received. When actions are explicitly enabled, the agent can preview workload resource patches with a Kubernetes server-side dry-run.
 
