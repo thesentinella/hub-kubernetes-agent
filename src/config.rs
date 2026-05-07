@@ -4,7 +4,7 @@ use std::time::Duration;
 
 #[derive(Clone, Debug)]
 pub struct Config {
-    /// Base URL of the Sentinella Hub (e.g. https://hub.sentinel.la).
+    /// Base URL of the Sentinella Hub (e.g. https://api.hub.sentinel.la).
     pub hub_url: String,
 
     /// Identifier this cluster registers as in the Hub.
