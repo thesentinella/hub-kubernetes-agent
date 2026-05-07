@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.1](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.6.0...v0.6.1) (2026-05-07)
+
+
+### Bug Fixes
+
+* set default HUB_URL to api.hub.sentinel.la ([#24](https://github.com/thesentinella/hub-kubernetes-agent/issues/24)) ([a7bdb21](https://github.com/thesentinella/hub-kubernetes-agent/commit/a7bdb210867dcc3f6fd43069945bd9a5dfc917db))
+
 ## [0.6.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.5.0...v0.6.0) (2026-05-07)
 
 
