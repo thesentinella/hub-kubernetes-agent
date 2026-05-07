@@ -133,6 +133,8 @@ Recommendation when enabling: only grant `patch` after the Hub has dashboard app
 
 ### Current agent behavior (implemented in this version)
 
+The agent supports route compatibility by trying both legacy (`/v1/...`) and API (`/api/v1/...`) route families. If a route returns `404`, it automatically retries once against the alternate family for the same operation.
+
 ### POST `/v1/clusters/{cluster_id}/inventory`
 
 Body: `InventorySnapshot` (see `src/model.rs`). Respond `2xx` to accept. `4xx` is not retried (except `408`/`429`); `5xx` and network errors are (3 attempts: 0s/2s/5s).
@@ -143,6 +145,7 @@ Long-poll. The Hub holds the connection until it has a `CommandBatch` or until `
 
 - `200` with body `{"commands":[...]}` — work to do.
 - `204`, or `200` with `{"commands":[]}` — normal timeout; the agent reopens.
+- `200` with an empty body is treated as no work.
 
 ### POST `/v1/clusters/{cluster_id}/commands/{command_id}/ack`
 
