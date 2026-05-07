@@ -166,6 +166,8 @@ Target API route family is `/api/v1/...` on `https://api.hub.sentinel.la`.
 
 ## Configuration (env vars from ConfigMap/Secret)
 
+Recommended `HUB_URL` is `https://api.hub.sentinel.la`.
+
 | Variable | Source | Default |
 |---|---|---|
 | `HUB_URL` | ConfigMap | required |

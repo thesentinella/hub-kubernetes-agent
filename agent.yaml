@@ -100,7 +100,7 @@ metadata:
   name: sentinella-hub-k8s-agent-config
   namespace: sentinella
 data:
-  HUB_URL: "https://hub.sentinel.la"
+  HUB_URL: "https://api.hub.sentinel.la"
   CLUSTER_ID: "REPLACE_ME"           # unique per cluster
   COLLECT_INTERVAL_SECS: "60"
   POLL_WAIT_SECS: "30"
