@@ -62,14 +62,14 @@ Unit tests are included in `tech.rs`. Extending coverage is one entry in the `RU
 
 ### Actions — designed for gradual rollout
 
-`src/executor.rs` rejects every command while `ACTIONS_ENABLED=false`, before parsing the command spec. When actions are enabled, `preview_workload_resources` performs a server-side dry-run and `apply_workload_resources` is still recognized but returns `status: "not_implemented"`.
+`src/executor.rs` rejects every command while `ACTIONS_ENABLED=false`, before parsing the command spec. When actions are enabled, `preview_workload_resources` performs a server-side dry-run and `apply_workload_resources` performs a live strategic-merge patch.
 
 #### Commands: setting requests and limits
 
 Two command kinds form the resource-patch flow:
 
 - **`preview_workload_resources`** — implemented server-side dry-run. Computes the patch, runs it against the apiserver with `?dryRun=All`, and returns the would-be state. Cluster state is unchanged.
-- **`apply_workload_resources`** — planned live apply. It is recognized today but returns `status: "not_implemented"`.
+- **`apply_workload_resources`** — live apply. Uses the same strategic-merge patch shape and pre-flight warning checks as preview, but persists the change.
 
 The two-command pattern is intentional. Each artifact (preview, approval, apply) is a separate Hub record with its own `command_id`, timestamp, and audit trail — easier for dashboards, easier for compliance reviews. Cluster state can change between preview and apply (HPA scaled, new pods); the apply re-validates against fresh state rather than relying on a stale preview.
 
@@ -280,7 +280,7 @@ No manual tagging required.
 ## Suggested roadmap
 
 1. Expand pre-flight safety checks from presence/target signals to full value validation (LimitRange bounds and ResourceQuota deltas).
-2. Implement `apply_workload_resources` with the same strategic-merge patch shape and fresh validation.
+2. Add command-level policy controls for apply (for example allow/deny lists by namespace/workload kind).
 3. Add additional commands: `scale_workload`, `restart_workload` (rollout restart annotation), `cordon_node`, `drain_node`.
 4. Evaluate in-place pod resize via the `pods/resize` subresource (Kubernetes 1.33+) for containers with a compatible `resizePolicy`.
 5. Add incremental collection (watches instead of full lists every minute) once snapshots get costly on large clusters.
