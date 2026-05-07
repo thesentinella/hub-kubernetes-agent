@@ -118,6 +118,7 @@ pub struct WorkloadRef {
 pub struct PodInfo {
     pub namespace: String,
     pub name: String,
+    pub age_seconds: Option<u64>,
     pub node: Option<String>,
     pub phase: Option<String>,
     pub owner_kind: Option<String>,

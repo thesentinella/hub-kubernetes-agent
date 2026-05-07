@@ -292,12 +292,27 @@ fn map_pod(p: Pod) -> PodInfo {
     PodInfo {
         namespace: p.metadata.namespace.unwrap_or_default(),
         name: p.metadata.name.unwrap_or_default(),
+        age_seconds: pod_age_seconds(p.metadata.creation_timestamp.as_ref()),
         node: p.spec.as_ref().and_then(|s| s.node_name.clone()),
         phase: p.status.and_then(|s| s.phase),
         owner_kind: owner.as_ref().map(|o| o.kind.clone()),
         owner_name: owner.as_ref().map(|o| o.name.clone()),
         containers,
     }
+}
+
+fn pod_age_seconds(
+    created_at: Option<&k8s_openapi::apimachinery::pkg::apis::meta::v1::Time>,
+) -> Option<u64> {
+    let created_secs = created_at?.0.as_second();
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs() as i64;
+    if now_secs <= created_secs {
+        return Some(0);
+    }
+    Some((now_secs - created_secs) as u64)
 }
 
 fn map_resources(r: Option<&k8s_openapi::api::core::v1::ResourceRequirements>) -> ResourceSpec {
