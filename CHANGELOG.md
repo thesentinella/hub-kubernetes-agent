@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.1](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.8.0...v0.8.1) (2026-05-07)
+
+
+### Bug Fixes
+
+* externalize agent auth secret from deploy manifest ([#32](https://github.com/thesentinella/hub-kubernetes-agent/issues/32)) ([f69c494](https://github.com/thesentinella/hub-kubernetes-agent/commit/f69c494d7cda0665f9873015da42cb79043a812b))
+
 ## [0.8.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.7.0...v0.8.0) (2026-05-07)
 
 
