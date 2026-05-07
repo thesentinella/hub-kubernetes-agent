@@ -21,7 +21,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tokio::signal;
 use tokio::time::{MissedTickBehavior, interval};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 const AGENT_NAME: &str = "Sentinella Hub Kubernetes Agent";
 const WARN_SUPPRESSION_WINDOW: Duration = Duration::from_secs(60);
@@ -118,7 +118,7 @@ async fn collector_loop(cfg: Config, kube: KubeClient, hub: Arc<HubClient>, lead
     loop {
         ticker.tick().await;
         if !leader.is_leader() {
-            // Not the leader: skip silently. Metrics still expose this.
+            debug!("skipping snapshot send: not leader");
             health::SNAPSHOTS_SENT
                 .with_label_values(&["skipped_not_leader"])
                 .inc();
