@@ -15,9 +15,14 @@
 use crate::config::Config;
 use crate::model::{Command, CommandResult, ResourceMap, WorkloadResourcesSpec};
 use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, StatefulSet};
+use k8s_openapi::api::autoscaling::v2::HorizontalPodAutoscaler;
 use k8s_openapi::api::core::v1::ResourceRequirements;
+use k8s_openapi::api::core::v1::{LimitRange, ResourceQuota};
+use k8s_openapi::api::policy::v1::PodDisruptionBudget;
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
-use kube::api::{Patch, PatchParams};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector;
+use kube::api::{ApiResource, DynamicObject, ListParams, Patch, PatchParams};
+use kube::core::GroupVersionKind;
 use kube::{Api, Client};
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
@@ -153,6 +158,8 @@ impl Executor {
                     .await
                     .map_err(|e| format!("failed to get Deployment {}: {}", spec.name, e))?;
                 let observed_before = deployment_container_resources(&before, &spec.container)?;
+                let pod_labels = deployment_pod_labels(&before);
+                let warnings = self.collect_preflight_warnings(spec, &pod_labels).await;
                 let after = api
                     .patch(&spec.name, &pp, &Patch::Strategic(&patch))
                     .await
@@ -160,7 +167,12 @@ impl Executor {
                         format!("dry-run patch failed for Deployment {}: {}", spec.name, e)
                     })?;
                 let observed_after = deployment_container_resources(&after, &spec.container)?;
-                Ok(ResourcePreview::new(patch, observed_before, observed_after))
+                Ok(ResourcePreview::new(
+                    patch,
+                    observed_before,
+                    observed_after,
+                    warnings,
+                ))
             }
             "StatefulSet" => {
                 let api: Api<StatefulSet> = Api::namespaced(self.client.clone(), &spec.namespace);
@@ -169,6 +181,8 @@ impl Executor {
                     .await
                     .map_err(|e| format!("failed to get StatefulSet {}: {}", spec.name, e))?;
                 let observed_before = statefulset_container_resources(&before, &spec.container)?;
+                let pod_labels = statefulset_pod_labels(&before);
+                let warnings = self.collect_preflight_warnings(spec, &pod_labels).await;
                 let after = api
                     .patch(&spec.name, &pp, &Patch::Strategic(&patch))
                     .await
@@ -176,7 +190,12 @@ impl Executor {
                         format!("dry-run patch failed for StatefulSet {}: {}", spec.name, e)
                     })?;
                 let observed_after = statefulset_container_resources(&after, &spec.container)?;
-                Ok(ResourcePreview::new(patch, observed_before, observed_after))
+                Ok(ResourcePreview::new(
+                    patch,
+                    observed_before,
+                    observed_after,
+                    warnings,
+                ))
             }
             "DaemonSet" => {
                 let api: Api<DaemonSet> = Api::namespaced(self.client.clone(), &spec.namespace);
@@ -185,6 +204,8 @@ impl Executor {
                     .await
                     .map_err(|e| format!("failed to get DaemonSet {}: {}", spec.name, e))?;
                 let observed_before = daemonset_container_resources(&before, &spec.container)?;
+                let pod_labels = daemonset_pod_labels(&before);
+                let warnings = self.collect_preflight_warnings(spec, &pod_labels).await;
                 let after = api
                     .patch(&spec.name, &pp, &Patch::Strategic(&patch))
                     .await
@@ -192,13 +213,207 @@ impl Executor {
                         format!("dry-run patch failed for DaemonSet {}: {}", spec.name, e)
                     })?;
                 let observed_after = daemonset_container_resources(&after, &spec.container)?;
-                Ok(ResourcePreview::new(patch, observed_before, observed_after))
+                Ok(ResourcePreview::new(
+                    patch,
+                    observed_before,
+                    observed_after,
+                    warnings,
+                ))
             }
             other => Err(format!(
                 "unsupported workload_kind {}; expected Deployment, StatefulSet, or DaemonSet",
                 other
             )),
         }
+    }
+
+    async fn collect_preflight_warnings(
+        &self,
+        spec: &WorkloadResourcesSpec,
+        pod_labels: &BTreeMap<String, String>,
+    ) -> Vec<String> {
+        let mut warnings = Vec::new();
+
+        merge_check(&mut warnings, "hpa", self.preflight_check_hpa(spec).await);
+        merge_check(&mut warnings, "vpa", self.preflight_check_vpa(spec).await);
+        merge_check(
+            &mut warnings,
+            "limitrange",
+            self.preflight_check_limitrange(spec).await,
+        );
+        merge_check(
+            &mut warnings,
+            "resourcequota",
+            self.preflight_check_resourcequota(spec).await,
+        );
+        merge_check(
+            &mut warnings,
+            "pdb",
+            self.preflight_check_pdb(spec, pod_labels).await,
+        );
+
+        warnings
+    }
+
+    async fn preflight_check_hpa(
+        &self,
+        spec: &WorkloadResourcesSpec,
+    ) -> Result<Vec<String>, String> {
+        let api: Api<HorizontalPodAutoscaler> =
+            Api::namespaced(self.client.clone(), &spec.namespace);
+        let list = api
+            .list(&ListParams::default())
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let mut names: Vec<String> = list
+            .into_iter()
+            .filter_map(|hpa| {
+                let target = hpa.spec.as_ref().map(|s| &s.scale_target_ref)?;
+                if target.kind == spec.workload_kind && target.name == spec.name {
+                    Some(hpa.metadata.name.unwrap_or_else(|| "<unknown>".into()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        names.sort();
+
+        Ok(names
+            .into_iter()
+            .map(|name| {
+                format!(
+                    "preflight.hpa.targeted: HPA {} targets {}/{}; resource changes may affect autoscaling behavior",
+                    name, spec.workload_kind, spec.name
+                )
+            })
+            .collect())
+    }
+
+    async fn preflight_check_vpa(
+        &self,
+        spec: &WorkloadResourcesSpec,
+    ) -> Result<Vec<String>, String> {
+        let gvk = GroupVersionKind::gvk("autoscaling.k8s.io", "v1", "VerticalPodAutoscaler");
+        let ar = ApiResource::from_gvk(&gvk);
+        let api: Api<DynamicObject> =
+            Api::namespaced_with(self.client.clone(), &spec.namespace, &ar);
+        let list = api
+            .list(&ListParams::default())
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let mut warnings = Vec::new();
+        for vpa in list {
+            let name = vpa
+                .metadata
+                .name
+                .as_deref()
+                .unwrap_or("<unknown>")
+                .to_string();
+            let as_value = serde_json::to_value(&vpa).map_err(|e| e.to_string())?;
+
+            let target_kind = as_value
+                .pointer("/spec/targetRef/kind")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let target_name = as_value
+                .pointer("/spec/targetRef/name")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if target_kind != spec.workload_kind || target_name != spec.name {
+                continue;
+            }
+
+            let mode = as_value
+                .pointer("/spec/updatePolicy/updateMode")
+                .and_then(Value::as_str);
+            if vpa_mode_is_conflicting(mode) {
+                let mode = mode.unwrap_or("Auto");
+                warnings.push(format!(
+                    "preflight.vpa.auto_mode: VPA {} targets {}/{} with updateMode={}; manual resources may be overwritten",
+                    name, spec.workload_kind, spec.name, mode
+                ));
+            }
+        }
+
+        warnings.sort();
+        Ok(warnings)
+    }
+
+    async fn preflight_check_limitrange(
+        &self,
+        spec: &WorkloadResourcesSpec,
+    ) -> Result<Vec<String>, String> {
+        let api: Api<LimitRange> = Api::namespaced(self.client.clone(), &spec.namespace);
+        let list = api
+            .list(&ListParams::default())
+            .await
+            .map_err(|e| e.to_string())?;
+        if list.items.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        Ok(vec![format!(
+            "preflight.limitrange.present: namespace {} has {} LimitRange object(s); requested values may be constrained",
+            spec.namespace,
+            list.items.len()
+        )])
+    }
+
+    async fn preflight_check_resourcequota(
+        &self,
+        spec: &WorkloadResourcesSpec,
+    ) -> Result<Vec<String>, String> {
+        let api: Api<ResourceQuota> = Api::namespaced(self.client.clone(), &spec.namespace);
+        let list = api
+            .list(&ListParams::default())
+            .await
+            .map_err(|e| e.to_string())?;
+        if list.items.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        Ok(vec![format!(
+            "preflight.resourcequota.present: namespace {} has {} ResourceQuota object(s); requested values may exceed quota",
+            spec.namespace,
+            list.items.len()
+        )])
+    }
+
+    async fn preflight_check_pdb(
+        &self,
+        spec: &WorkloadResourcesSpec,
+        pod_labels: &BTreeMap<String, String>,
+    ) -> Result<Vec<String>, String> {
+        let api: Api<PodDisruptionBudget> = Api::namespaced(self.client.clone(), &spec.namespace);
+        let list = api
+            .list(&ListParams::default())
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let mut names: Vec<String> = list
+            .into_iter()
+            .filter_map(|pdb| {
+                let selector = pdb.spec.as_ref().and_then(|s| s.selector.as_ref());
+                if label_selector_matches(selector, pod_labels) {
+                    Some(pdb.metadata.name.unwrap_or_else(|| "<unknown>".into()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        names.sort();
+
+        Ok(names
+            .into_iter()
+            .map(|name| {
+                format!(
+                    "preflight.pdb.selector_overlap: PDB {} selector matches {}/{} pod labels; rollout may be constrained",
+                    name, spec.workload_kind, spec.name
+                )
+            })
+            .collect())
     }
 
     async fn apply_workload_resources(
@@ -225,13 +440,28 @@ struct ResourcePreview {
 }
 
 impl ResourcePreview {
-    fn new(patch: Value, observed_before: Value, observed_after: Value) -> Self {
+    fn new(
+        patch: Value,
+        observed_before: Value,
+        observed_after: Value,
+        warnings: Vec<String>,
+    ) -> Self {
         Self {
             patch,
             observed_before,
             observed_after,
-            warnings: Vec::new(),
+            warnings,
         }
+    }
+}
+
+fn merge_check(warnings: &mut Vec<String>, check_name: &str, result: Result<Vec<String>, String>) {
+    match result {
+        Ok(mut check_warnings) => warnings.append(&mut check_warnings),
+        Err(reason) => warnings.push(format!(
+            "preflight.check.unavailable: {} unavailable: {}",
+            check_name, reason
+        )),
     }
 }
 
@@ -308,6 +538,77 @@ fn daemonset_container_resources(workload: &DaemonSet, container: &str) -> Resul
         .map(|pod_spec| pod_spec.containers.as_slice())
         .ok_or_else(|| format!("DaemonSet has no pod template spec: {container}"))?;
     container_resources(containers, container)
+}
+
+fn deployment_pod_labels(workload: &Deployment) -> BTreeMap<String, String> {
+    workload
+        .spec
+        .as_ref()
+        .and_then(|spec| spec.template.metadata.as_ref())
+        .and_then(|metadata| metadata.labels.clone())
+        .unwrap_or_default()
+}
+
+fn statefulset_pod_labels(workload: &StatefulSet) -> BTreeMap<String, String> {
+    workload
+        .spec
+        .as_ref()
+        .and_then(|spec| spec.template.metadata.as_ref())
+        .and_then(|metadata| metadata.labels.clone())
+        .unwrap_or_default()
+}
+
+fn daemonset_pod_labels(workload: &DaemonSet) -> BTreeMap<String, String> {
+    workload
+        .spec
+        .as_ref()
+        .and_then(|spec| spec.template.metadata.as_ref())
+        .and_then(|metadata| metadata.labels.clone())
+        .unwrap_or_default()
+}
+
+fn label_selector_matches(
+    selector: Option<&LabelSelector>,
+    labels: &BTreeMap<String, String>,
+) -> bool {
+    let Some(selector) = selector else {
+        return true;
+    };
+
+    if let Some(match_labels) = &selector.match_labels {
+        for (key, expected) in match_labels {
+            if labels.get(key) != Some(expected) {
+                return false;
+            }
+        }
+    }
+
+    if let Some(expressions) = &selector.match_expressions {
+        for expression in expressions {
+            let value = labels.get(&expression.key);
+            let values = expression.values.as_deref().unwrap_or_default();
+            let matches = match expression.operator.as_str() {
+                "In" => value
+                    .map(|v| values.iter().any(|candidate| candidate == v))
+                    .unwrap_or(false),
+                "NotIn" => value
+                    .map(|v| values.iter().all(|candidate| candidate != v))
+                    .unwrap_or(true),
+                "Exists" => value.is_some(),
+                "DoesNotExist" => value.is_none(),
+                _ => false,
+            };
+            if !matches {
+                return false;
+            }
+        }
+    }
+
+    true
+}
+
+fn vpa_mode_is_conflicting(mode: Option<&str>) -> bool {
+    matches!(mode.unwrap_or("Auto"), "Auto" | "Recreate")
 }
 
 fn container_resources(
@@ -524,6 +825,56 @@ mod tests {
         let resources = daemonset_container_resources(&daemonset, "agent").unwrap();
 
         assert_eq!(resources, json!({}));
+    }
+
+    #[test]
+    fn vpa_mode_is_conflicting_defaults_to_auto() {
+        assert!(vpa_mode_is_conflicting(None));
+        assert!(vpa_mode_is_conflicting(Some("Auto")));
+        assert!(vpa_mode_is_conflicting(Some("Recreate")));
+        assert!(!vpa_mode_is_conflicting(Some("Off")));
+    }
+
+    #[test]
+    fn label_selector_matches_handles_match_labels_and_expressions() {
+        let selector: LabelSelector = serde_json::from_value(json!({
+            "matchLabels": {"app": "api"},
+            "matchExpressions": [
+                {"key": "tier", "operator": "In", "values": ["backend"]},
+                {"key": "region", "operator": "DoesNotExist"}
+            ]
+        }))
+        .unwrap();
+
+        let labels = BTreeMap::from([
+            ("app".to_string(), "api".to_string()),
+            ("tier".to_string(), "backend".to_string()),
+        ]);
+
+        assert!(label_selector_matches(Some(&selector), &labels));
+    }
+
+    #[test]
+    fn label_selector_matches_rejects_non_matching_expression() {
+        let selector: LabelSelector = serde_json::from_value(json!({
+            "matchExpressions": [
+                {"key": "tier", "operator": "NotIn", "values": ["backend"]}
+            ]
+        }))
+        .unwrap();
+
+        let labels = BTreeMap::from([("tier".to_string(), "backend".to_string())]);
+
+        assert!(!label_selector_matches(Some(&selector), &labels));
+    }
+
+    #[test]
+    fn merge_check_includes_unavailable_prefix() {
+        let mut warnings = Vec::new();
+        merge_check(&mut warnings, "hpa", Err("forbidden".into()));
+
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].starts_with("preflight.check.unavailable: hpa unavailable:"));
     }
 }
 

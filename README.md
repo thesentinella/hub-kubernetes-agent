@@ -95,16 +95,25 @@ At least one of `requests` or `limits` must be present. Either side may be omitt
 - `applied_patch` — the strategic-merge patch the agent computed.
 - `observed_before` — the targeted container's resources block before the operation.
 - `observed_after` — what the apiserver returned for the dry-run patch.
-- `warnings` — non-fatal safety findings. Current preview support returns an empty warning list; richer pre-flight checks are planned.
+- `warnings` — non-fatal safety findings collected during best-effort pre-flight checks. These warnings do not block preview success.
 
 The agent uses **strategic-merge patch**, not JSON-merge — JSON-merge would clobber the entire `containers` array. Strategic-merge addresses just `spec.template.spec.containers[name=X].resources`.
 
-**Pre-flight safety checks** (planned — accumulated into `warnings`, not fatal unless dangerous):
+**Pre-flight safety checks** (best-effort — accumulated into `warnings`, non-fatal):
 - HPA targeting this workload (CPU/memory autoscaling targets interact with requests).
 - VPA in `Auto` or `Recreate` mode (we would fight the VPA).
 - Namespace `LimitRange` admits the new values.
 - Namespace `ResourceQuota` has headroom for the delta.
 - `PodDisruptionBudget` would block the rolling restart.
+
+Warning strings use stable code prefixes for Hub-side grouping:
+
+- `preflight.hpa.targeted`
+- `preflight.vpa.auto_mode`
+- `preflight.limitrange.present`
+- `preflight.resourcequota.present`
+- `preflight.pdb.selector_overlap`
+- `preflight.check.unavailable`
 
 **RBAC required to enable preview actions**:
 
@@ -115,6 +124,8 @@ The agent uses **strategic-merge patch**, not JSON-merge — JSON-merge would cl
 ```
 
 This must be a separate ClusterRole/Binding applied only when `ACTIONS_ENABLED=true`. The read-only ClusterRole stays untouched. **No `*` on `*/*`**. The root `agent.yaml` does not grant this workload patch RBAC by default.
+
+Pre-flight warning checks are also best-effort. Without additional read permissions for HPAs, VPAs, LimitRanges, ResourceQuotas, and PDBs, preview still succeeds but includes `preflight.check.unavailable` warnings for the checks the agent cannot evaluate.
 
 Recommendation when enabling: only grant `patch` after the Hub has dashboard approval flow in place. The preview-then-apply pattern is the technical mechanism; the Hub-side approval workflow is what makes it safe for regulated clients.
 
@@ -268,7 +279,7 @@ No manual tagging required.
 
 ## Suggested roadmap
 
-1. Add pre-flight safety warnings for `preview_workload_resources` (HPA/VPA/LimitRange/ResourceQuota/PDB).
+1. Expand pre-flight safety checks from presence/target signals to full value validation (LimitRange bounds and ResourceQuota deltas).
 2. Implement `apply_workload_resources` with the same strategic-merge patch shape and fresh validation.
 3. Add additional commands: `scale_workload`, `restart_workload` (rollout restart annotation), `cordon_node`, `drain_node`.
 4. Evaluate in-place pod resize via the `pods/resize` subresource (Kubernetes 1.33+) for containers with a compatible `resizePolicy`.
