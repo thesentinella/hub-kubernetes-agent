@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.9.0...v0.10.0) (2026-05-07)
+
+
+### Features
+
+* include pod age seconds in inventory snapshots ([#36](https://github.com/thesentinella/hub-kubernetes-agent/issues/36)) ([b93cb7e](https://github.com/thesentinella/hub-kubernetes-agent/commit/b93cb7e2019bb4eb9e2a3434d78f9c4f4f9576cc))
+
 ## [0.9.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.8.1...v0.9.0) (2026-05-07)
 
 
