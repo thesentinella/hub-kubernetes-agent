@@ -4,14 +4,23 @@ use crate::model::*;
 use crate::tech;
 use anyhow::Result;
 use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, StatefulSet};
-use k8s_openapi::api::core::v1::{Namespace, Node, Pod};
-use kube::api::ListParams;
+use k8s_openapi::api::core::v1::{Namespace, Node, PersistentVolume, PersistentVolumeClaim, Pod};
+use k8s_openapi::api::storage::v1::StorageClass;
+use kube::api::{ApiResource, DynamicObject, ListParams};
+use kube::core::GroupVersionKind;
 use kube::{Api, Client};
+use std::collections::BTreeMap;
 use tracing::warn;
 
 pub async fn collect(
     client: &Client,
-) -> Result<(ClusterInfo, Vec<NamespaceInfo>, Workloads, Vec<PodInfo>)> {
+) -> Result<(
+    ClusterInfo,
+    Vec<NamespaceInfo>,
+    Workloads,
+    Vec<PodInfo>,
+    StorageInventory,
+)> {
     // Concurrency: launch all list calls in parallel; fail soft on individual lists.
     let lp = ListParams::default();
 
@@ -21,15 +30,44 @@ pub async fn collect(
     let sts_fut = list_all::<StatefulSet>(client, &lp);
     let ds_fut = list_all::<DaemonSet>(client, &lp);
     let pods_fut = list_all::<Pod>(client, &lp);
+    let storage_classes_fut = list_all::<StorageClass>(client, &lp);
+    let pvs_fut = list_all::<PersistentVolume>(client, &lp);
+    let pvcs_fut = list_all::<PersistentVolumeClaim>(client, &lp);
+    let volume_snapshot_classes_fut = list_dynamic_all(
+        client,
+        "snapshot.storage.k8s.io",
+        "v1",
+        "VolumeSnapshotClass",
+    );
+    let volume_snapshots_fut =
+        list_dynamic_all(client, "snapshot.storage.k8s.io", "v1", "VolumeSnapshot");
     let version_fut = client.apiserver_version();
 
-    let (nodes, namespaces, deployments, statefulsets, daemonsets, pods, version) = tokio::join!(
+    let (
+        nodes,
+        namespaces,
+        deployments,
+        statefulsets,
+        daemonsets,
+        pods,
+        storage_classes,
+        pvs,
+        pvcs,
+        volume_snapshot_classes,
+        volume_snapshots,
+        version,
+    ) = tokio::join!(
         nodes_fut,
         ns_fut,
         deploy_fut,
         sts_fut,
         ds_fut,
         pods_fut,
+        storage_classes_fut,
+        pvs_fut,
+        pvcs_fut,
+        volume_snapshot_classes_fut,
+        volume_snapshots_fut,
         version_fut
     );
 
@@ -39,6 +77,11 @@ pub async fn collect(
     let statefulsets = soft_unwrap("statefulsets", statefulsets);
     let daemonsets = soft_unwrap("daemonsets", daemonsets);
     let pods = soft_unwrap("pods", pods);
+    let storage_classes = soft_unwrap("storageclasses", storage_classes);
+    let pvs = soft_unwrap("persistentvolumes", pvs);
+    let pvcs = soft_unwrap("persistentvolumeclaims", pvcs);
+    let volume_snapshot_classes = soft_unwrap("volumesnapshotclasses", volume_snapshot_classes);
+    let volume_snapshots = soft_unwrap("volumesnapshots", volume_snapshots);
 
     let cluster = build_cluster_info(version.ok(), &nodes);
     let ns_infos = namespaces.into_iter().map(map_namespace).collect();
@@ -48,8 +91,21 @@ pub async fn collect(
         daemonsets: daemonsets.into_iter().map(map_daemonset).collect(),
     };
     let pod_infos = pods.into_iter().map(map_pod).collect();
+    let storage = StorageInventory {
+        storage_classes: storage_classes.into_iter().map(map_storage_class).collect(),
+        persistent_volumes: pvs.into_iter().map(map_persistent_volume).collect(),
+        persistent_volume_claims: pvcs.into_iter().map(map_persistent_volume_claim).collect(),
+        volume_snapshot_classes: volume_snapshot_classes
+            .into_iter()
+            .map(map_volume_snapshot_class)
+            .collect(),
+        volume_snapshots: volume_snapshots
+            .into_iter()
+            .map(map_volume_snapshot)
+            .collect(),
+    };
 
-    Ok((cluster, ns_infos, workloads, pod_infos))
+    Ok((cluster, ns_infos, workloads, pod_infos, storage))
 }
 
 async fn list_all<K>(client: &Client, lp: &ListParams) -> Result<Vec<K>>
@@ -59,6 +115,18 @@ where
 {
     let api: Api<K> = Api::all(client.clone());
     Ok(api.list(lp).await?.items)
+}
+
+async fn list_dynamic_all(
+    client: &Client,
+    group: &str,
+    version: &str,
+    kind: &str,
+) -> Result<Vec<DynamicObject>> {
+    let gvk = GroupVersionKind::gvk(group, version, kind);
+    let ar = ApiResource::from_gvk(&gvk);
+    let api: Api<DynamicObject> = Api::all_with(client.clone(), &ar);
+    Ok(api.list(&ListParams::default()).await?.items)
 }
 
 fn soft_unwrap<T>(what: &str, r: Result<Vec<T>>) -> Vec<T> {
@@ -245,4 +313,99 @@ fn map_resources(r: Option<&k8s_openapi::api::core::v1::ResourceRequirements>) -
         }
     }
     out
+}
+
+// Deny-by-default: only forward non-sensitive StorageClass parameters useful
+// for backend inference on the Hub side. Secret-related CSI parameters and
+// vendor credentials are intentionally excluded.
+const STORAGE_CLASS_PARAMETER_ALLOWLIST: &[&str] = &[
+    "type",
+    "fsType",
+    "skuName",
+    "storageaccounttype",
+    "iopsPerGB",
+    "throughput",
+    "pool",
+    "backendType",
+    "datastore",
+    "encrypted",
+    "csi.storage.k8s.io/fstype",
+];
+
+fn map_storage_class(sc: StorageClass) -> StorageClassInfo {
+    let parameters = filter_storage_class_parameters(sc.parameters.unwrap_or_default());
+    StorageClassInfo {
+        name: sc.metadata.name.unwrap_or_default(),
+        provisioner: sc.provisioner,
+        parameters,
+    }
+}
+
+fn filter_storage_class_parameters(parameters: BTreeMap<String, String>) -> Vec<KV> {
+    let mut out = Vec::new();
+    for key in STORAGE_CLASS_PARAMETER_ALLOWLIST {
+        if let Some(value) = parameters.get(*key) {
+            out.push(KV {
+                key: (*key).to_string(),
+                value: value.clone(),
+            });
+        }
+    }
+    out
+}
+
+fn map_persistent_volume(pv: PersistentVolume) -> PersistentVolumeInfo {
+    PersistentVolumeInfo {
+        name: pv.metadata.name.unwrap_or_default(),
+        storage_class: pv.spec.and_then(|s| s.storage_class_name),
+    }
+}
+
+fn map_persistent_volume_claim(pvc: PersistentVolumeClaim) -> PersistentVolumeClaimInfo {
+    PersistentVolumeClaimInfo {
+        namespace: pvc.metadata.namespace.unwrap_or_default(),
+        name: pvc.metadata.name.unwrap_or_default(),
+        storage_class: pvc.spec.as_ref().and_then(|s| s.storage_class_name.clone()),
+        volume_name: pvc.spec.and_then(|s| s.volume_name),
+    }
+}
+
+fn map_volume_snapshot_class(vsc: DynamicObject) -> VolumeSnapshotClassInfo {
+    let as_value = serde_json::to_value(vsc).unwrap_or_default();
+    let driver = as_value
+        .pointer("/driver")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let name = as_value
+        .pointer("/metadata/name")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+
+    VolumeSnapshotClassInfo { name, driver }
+}
+
+fn map_volume_snapshot(vs: DynamicObject) -> VolumeSnapshotInfo {
+    let as_value = serde_json::to_value(vs).unwrap_or_default();
+    VolumeSnapshotInfo {
+        namespace: as_value
+            .pointer("/metadata/namespace")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        name: as_value
+            .pointer("/metadata/name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        snapshot_class: as_value
+            .pointer("/spec/volumeSnapshotClassName")
+            .and_then(serde_json::Value::as_str)
+            .map(ToString::to_string),
+        bound_content_name: as_value
+            .pointer("/status/boundVolumeSnapshotContentName")
+            .and_then(serde_json::Value::as_str)
+            .map(ToString::to_string),
+    }
 }

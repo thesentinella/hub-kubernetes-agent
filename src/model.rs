@@ -13,6 +13,7 @@ pub struct InventorySnapshot {
     pub namespaces: Vec<NamespaceInfo>,
     pub workloads: Workloads,
     pub pods: Vec<PodInfo>,
+    pub storage: StorageInventory,
 }
 
 #[derive(Serialize, Debug)]
@@ -59,6 +60,50 @@ pub struct Workloads {
     pub deployments: Vec<WorkloadRef>,
     pub statefulsets: Vec<WorkloadRef>,
     pub daemonsets: Vec<WorkloadRef>,
+}
+
+#[derive(Serialize, Debug, Default)]
+pub struct StorageInventory {
+    pub storage_classes: Vec<StorageClassInfo>,
+    pub persistent_volumes: Vec<PersistentVolumeInfo>,
+    pub persistent_volume_claims: Vec<PersistentVolumeClaimInfo>,
+    pub volume_snapshot_classes: Vec<VolumeSnapshotClassInfo>,
+    pub volume_snapshots: Vec<VolumeSnapshotInfo>,
+}
+
+#[derive(Serialize, Debug)]
+pub struct StorageClassInfo {
+    pub name: String,
+    pub provisioner: String,
+    pub parameters: Vec<KV>,
+}
+
+#[derive(Serialize, Debug)]
+pub struct PersistentVolumeInfo {
+    pub name: String,
+    pub storage_class: Option<String>,
+}
+
+#[derive(Serialize, Debug)]
+pub struct PersistentVolumeClaimInfo {
+    pub namespace: String,
+    pub name: String,
+    pub storage_class: Option<String>,
+    pub volume_name: Option<String>,
+}
+
+#[derive(Serialize, Debug)]
+pub struct VolumeSnapshotClassInfo {
+    pub name: String,
+    pub driver: String,
+}
+
+#[derive(Serialize, Debug)]
+pub struct VolumeSnapshotInfo {
+    pub namespace: String,
+    pub name: String,
+    pub snapshot_class: Option<String>,
+    pub bound_content_name: Option<String>,
 }
 
 #[derive(Serialize, Debug)]

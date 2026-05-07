@@ -11,6 +11,7 @@ Inventory collector and (future) action executor for Kubernetes and OpenShift cl
   - **Namespaces** with labels and phase.
   - **Workloads**: deployments, statefulsets, daemonsets (name, namespace, desired/ready replicas).
   - **Pods**: each container with image, **detected technology** (vendor/product/version inferred from the image), `requests` and `limits` (CPU and memory).
+  - **Storage**: StorageClasses (name/provisioner/safe parameter subset), PersistentVolumes, PersistentVolumeClaims, VolumeSnapshotClasses, and VolumeSnapshots.
 - Maintains an open long-poll against the Hub for command delivery. **Action execution is disabled by default** (`ACTIONS_ENABLED=false`); the agent replies with `skipped` and an explanatory message to any command received. When actions are explicitly enabled, the agent can preview workload resource patches with a Kubernetes server-side dry-run.
 
 ## Architecture
@@ -128,6 +129,8 @@ This must be a separate ClusterRole/Binding applied only when `ACTIONS_ENABLED=t
 Pre-flight warning checks are also best-effort. Without additional read permissions for HPAs, VPAs, LimitRanges, ResourceQuotas, and PDBs, preview still succeeds but includes `preflight.check.unavailable` warnings for the checks the agent cannot evaluate.
 
 Recommendation when enabling: only grant `patch` after the Hub has dashboard approval flow in place. The preview-then-apply pattern is the technical mechanism; the Hub-side approval workflow is what makes it safe for regulated clients.
+
+Storage backend mapping (`backend_slug`, icon selection) is intentionally owned by the Hub. The agent sends raw StorageClass signals (`provisioner` plus a hardcoded safe subset of parameters), and the server maps those to technology slugs.
 
 ## Agent endpoints
 
