@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.2](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.6.1...v0.6.2) (2026-05-07)
+
+
+### Bug Fixes
+
+* harden hub route fallback logging behavior ([#26](https://github.com/thesentinella/hub-kubernetes-agent/issues/26)) ([7dd688e](https://github.com/thesentinella/hub-kubernetes-agent/commit/7dd688e1d7ad905758edbf379f677d54235c35c0))
+
 ## [0.6.1](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.6.0...v0.6.1) (2026-05-07)
 
 
