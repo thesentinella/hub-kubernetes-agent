@@ -110,16 +110,6 @@ data:
   AGENT_HTTP_DEBUG: "false"
   AGENT_HTTP_DEBUG_BODIES: "false"
   AGENT_LOG: "info"
----
-apiVersion: v1
-kind: Secret
-metadata:
-  name: sentinella-hub-k8s-agent-auth
-  namespace: sentinella
-type: Opaque
-data:
-  api-key: BASE64_TOKEN_HERE    # echo -n 'shub_your-api-key' | base64
----
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:

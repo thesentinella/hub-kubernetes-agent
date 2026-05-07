@@ -208,13 +208,18 @@ docker push  ghcr.io/sentinella/sentinella-hub-k8s-agent:0.1.0
 
 ## Deploy
 
-1. Edit `deploy/agent.yaml`:
+1. Create the auth Secret (once per namespace/cluster):
+   ```bash
+   kubectl create secret generic sentinella-hub-k8s-agent-auth \
+     --namespace sentinella \
+     --from-literal=api-key=<API_KEY>
+   ```
+2. Edit `agent.yaml`:
    - `CLUSTER_ID` unique per cluster.
-   - `bearer-token` (`echo -n 'token' | base64`).
    - `image:` pointing to your registry.
    - Toleration block — current value runs on every node including control plane; trim if you want a smaller footprint.
-2. `kubectl apply -f deploy/agent.yaml`
-3. Verify:
+3. `kubectl apply -f agent.yaml`
+4. Verify:
    ```bash
    kubectl -n sentinella get ds,po
    kubectl -n sentinella get lease
@@ -238,7 +243,7 @@ src/
   leader.rs      # leader election via Kubernetes Lease
   tech.rs        # image-based technology detection + tests
   health.rs      # /livez /readyz /metrics
-deploy/agent.yaml  # ServiceAccount, RBAC (ClusterRole + Role), ConfigMap, Secret, DaemonSet
+agent.yaml      # ServiceAccount, RBAC (ClusterRole + Role), ConfigMap, DaemonSet
 ```
 
 ## Contributing
