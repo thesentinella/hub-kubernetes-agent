@@ -4,7 +4,7 @@
 //! execute any command while in read-only mode.
 
 use crate::config::Config;
-use crate::model::{Command, CommandResult, ResourceMap, WorkloadResourcesSpec};
+use crate::model::{Command, CommandResult, ResourceMap, SelfUpdateSpec, WorkloadResourcesSpec};
 use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, StatefulSet};
 use k8s_openapi::api::autoscaling::v2::HorizontalPodAutoscaler;
 use k8s_openapi::api::core::v1::ResourceRequirements;
@@ -51,6 +51,10 @@ impl Executor {
             },
             "apply_workload_resources" => match parse_spec::<WorkloadResourcesSpec>(cmd) {
                 Ok(spec) => self.apply_workload_resources(&cmd.id, spec).await,
+                Err(e) => spec_error(cmd, e),
+            },
+            "self_update" => match parse_spec::<SelfUpdateSpec>(cmd) {
+                Ok(spec) => self.self_update(&cmd.id, spec).await,
                 Err(e) => spec_error(cmd, e),
             },
             other => {
@@ -441,6 +445,24 @@ impl Executor {
                 r
             }
         }
+    }
+
+    async fn self_update(&self, command_id: &str, spec: SelfUpdateSpec) -> CommandResult {
+        info!(command_id, "self_update: restart requested");
+        let strategy = spec.strategy.unwrap_or_else(|| "restart_pod".into());
+        let target = spec.target_version.as_deref().unwrap_or("<unspecified>");
+        let reason = spec.reason.as_deref().unwrap_or("<none>");
+
+        let mut r = CommandResult::simple(
+            command_id.to_string(),
+            "ok",
+            Some(format!(
+                "self_update accepted: strategy={}, target_version={}, reason={}",
+                strategy, target, reason
+            )),
+        );
+        r.restart_requested = Some(true);
+        r
     }
 }
 

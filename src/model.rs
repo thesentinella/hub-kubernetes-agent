@@ -176,6 +176,8 @@ pub struct CommandBatch {
 ///   Spec shape: [`WorkloadResourcesSpec`].
 /// - `apply_workload_resources` — applies the resource patch.
 ///   Spec shape: [`WorkloadResourcesSpec`].
+/// - `self_update` — requests an immediate agent restart.
+///   Spec shape: [`SelfUpdateSpec`].
 ///
 /// The two-command pattern (preview, then apply) is intentional:
 /// - Each artifact is a separate Hub record with its own id, timestamp, and
@@ -231,6 +233,21 @@ pub struct ResourceMap {
     pub memory: Option<String>,
 }
 
+/// Spec payload for `self_update`.
+///
+/// This command requests an immediate process restart so Kubernetes can
+/// recreate the pod. The agent does not mutate workload images or manifests.
+#[derive(Deserialize, Debug, Default)]
+#[allow(dead_code)]
+pub struct SelfUpdateSpec {
+    #[serde(default)]
+    pub target_version: Option<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub strategy: Option<String>,
+}
+
 /// Result returned to the Hub after a command runs.
 ///
 /// `status` values:
@@ -279,6 +296,12 @@ pub struct CommandResult {
     /// the Hub may surface these in the dashboard for operator review.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub warnings: Vec<String>,
+
+    /// Internal control signal used by the runtime loop. When true on a
+    /// successful command, the agent exits after ack attempt so Kubernetes can
+    /// restart the pod.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub restart_requested: Option<bool>,
 }
 
 impl CommandResult {
@@ -295,6 +318,7 @@ impl CommandResult {
             observed_before: None,
             observed_after: None,
             warnings: Vec::new(),
+            restart_requested: None,
         }
     }
 }

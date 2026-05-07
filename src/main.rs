@@ -169,11 +169,19 @@ async fn command_loop(hub: Arc<HubClient>, executor: Arc<Executor>) {
                 for cmd in batch.commands {
                     health::COMMANDS_RECEIVED.inc();
                     let result = executor.execute(&cmd).await;
+                    let restart_requested = should_restart_after_ack(&result);
                     health::COMMANDS_EXECUTED
                         .with_label_values(&[result.status])
                         .inc();
                     if let Err(e) = hub.ack_command(&result).await {
                         warn!("ack failed: {:#}", e);
+                    }
+                    if restart_requested {
+                        warn!(
+                            command_id = %result.command_id,
+                            "self-update requested; exiting process for immediate restart"
+                        );
+                        std::process::exit(0);
                     }
                 }
             }
@@ -186,6 +194,10 @@ async fn command_loop(hub: Arc<HubClient>, executor: Arc<Executor>) {
             }
         }
     }
+}
+
+fn should_restart_after_ack(result: &CommandResult) -> bool {
+    result.status == "ok" && result.restart_requested.unwrap_or(false)
 }
 
 fn warn_with_suppression(key: &str, message: &str) {

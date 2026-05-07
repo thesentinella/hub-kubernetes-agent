@@ -63,7 +63,7 @@ Unit tests are included in `tech.rs`. Extending coverage is one entry in the `RU
 
 ### Actions — designed for gradual rollout
 
-`src/executor.rs` rejects every command while `ACTIONS_ENABLED=false`, before parsing the command spec. When actions are enabled, `preview_workload_resources` performs a server-side dry-run and `apply_workload_resources` performs a live strategic-merge patch.
+`src/executor.rs` rejects every command while `ACTIONS_ENABLED=false`, before parsing the command spec. When actions are enabled, `preview_workload_resources` performs a server-side dry-run, `apply_workload_resources` performs a live strategic-merge patch, and `self_update` triggers an immediate agent restart.
 
 #### Commands: setting requests and limits
 
@@ -73,6 +73,12 @@ Two command kinds form the resource-patch flow:
 - **`apply_workload_resources`** — live apply. Uses the same strategic-merge patch shape and pre-flight warning checks as preview, but persists the change.
 
 The two-command pattern is intentional. Each artifact (preview, approval, apply) is a separate Hub record with its own `command_id`, timestamp, and audit trail — easier for dashboards, easier for compliance reviews. Cluster state can change between preview and apply (HPA scaled, new pods); the apply re-validates against fresh state rather than relying on a stale preview.
+
+#### Command: self update
+
+- **`self_update`** — accepts a restart signal from Hub and immediately restarts the agent process after ack attempt.
+- The agent attempts to ack the result first; restart proceeds even if ack fails.
+- The agent does not mutate deployment manifests or image tags; Kubernetes restarts the pod via DaemonSet reconciliation.
 
 **Target is a workload controller**, not a Pod. A `Pod`-targeted patch is futile — its ReplicaSet/StatefulSet recreates it with the original spec in seconds. Supported kinds: `Deployment`, `StatefulSet`, `DaemonSet`. In-place pod resize via the `pods/resize` subresource (Kubernetes 1.33+, beta) is on the v0.3 roadmap.
 
