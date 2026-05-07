@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.7.0...v0.8.0) (2026-05-07)
+
+
+### Features
+
+* implement live apply for workload resource patches ([#30](https://github.com/thesentinella/hub-kubernetes-agent/issues/30)) ([92032a5](https://github.com/thesentinella/hub-kubernetes-agent/commit/92032a592bba2950064d81821f7708605eb88838))
+
 ## [0.7.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.6.2...v0.7.0) (2026-05-07)
 
 
