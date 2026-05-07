@@ -1,16 +1,7 @@
 //! Command executor.
 //!
-//! In this release `actions_enabled = false` is the default and the executor
-//! refuses to execute any command. The dispatch table below already lists the
-//! v0.2 command contract: known kinds return `not_implemented` (distinct from
-//! `unknown`) so the Hub can tell apart "agent too old" from "Hub sent
-//! something garbled".
-//!
-//! When v0.2 lands, each `not_implemented` arm becomes a real handler. The
-//! Hub-side contract (kind names, spec shapes, result fields) is already
-//! frozen in `model.rs` — Hub developers can start generating these commands
-//! against this v0.1 build today and verify the agent receives, parses, and
-//! acks them correctly. They will just come back as `not_implemented`.
+//! `actions_enabled = false` is the default and the executor refuses to
+//! execute any command while in read-only mode.
 
 use crate::config::Config;
 use crate::model::{Command, CommandResult, ResourceMap, WorkloadResourcesSpec};
@@ -124,7 +115,7 @@ impl Executor {
             "preview_workload_resources: dry-run patching workload"
         );
 
-        match self.preview_workload_resources_inner(&spec).await {
+        match self.execute_workload_resources_inner(&spec, true).await {
             Ok(preview) => {
                 let mut r = CommandResult::simple(command_id.to_string(), "ok", None);
                 r.dry_run = Some(true);
@@ -143,12 +134,22 @@ impl Executor {
         }
     }
 
-    async fn preview_workload_resources_inner(
+    async fn execute_workload_resources_inner(
         &self,
         spec: &WorkloadResourcesSpec,
+        dry_run: bool,
     ) -> Result<ResourcePreview, String> {
         let patch = build_workload_resources_patch(spec)?;
-        let pp = PatchParams::default().dry_run();
+        let pp = if dry_run {
+            PatchParams::default().dry_run()
+        } else {
+            PatchParams::default()
+        };
+        let op_name = if dry_run {
+            "dry-run patch"
+        } else {
+            "apply patch"
+        };
 
         match spec.workload_kind.as_str() {
             "Deployment" => {
@@ -164,7 +165,7 @@ impl Executor {
                     .patch(&spec.name, &pp, &Patch::Strategic(&patch))
                     .await
                     .map_err(|e| {
-                        format!("dry-run patch failed for Deployment {}: {}", spec.name, e)
+                        format!("{} failed for Deployment {}: {}", op_name, spec.name, e)
                     })?;
                 let observed_after = deployment_container_resources(&after, &spec.container)?;
                 Ok(ResourcePreview::new(
@@ -187,7 +188,7 @@ impl Executor {
                     .patch(&spec.name, &pp, &Patch::Strategic(&patch))
                     .await
                     .map_err(|e| {
-                        format!("dry-run patch failed for StatefulSet {}: {}", spec.name, e)
+                        format!("{} failed for StatefulSet {}: {}", op_name, spec.name, e)
                     })?;
                 let observed_after = statefulset_container_resources(&after, &spec.container)?;
                 Ok(ResourcePreview::new(
@@ -210,7 +211,7 @@ impl Executor {
                     .patch(&spec.name, &pp, &Patch::Strategic(&patch))
                     .await
                     .map_err(|e| {
-                        format!("dry-run patch failed for DaemonSet {}: {}", spec.name, e)
+                        format!("{} failed for DaemonSet {}: {}", op_name, spec.name, e)
                     })?;
                 let observed_after = daemonset_container_resources(&after, &spec.container)?;
                 Ok(ResourcePreview::new(
@@ -419,16 +420,27 @@ impl Executor {
     async fn apply_workload_resources(
         &self,
         command_id: &str,
-        _spec: WorkloadResourcesSpec,
+        spec: WorkloadResourcesSpec,
     ) -> CommandResult {
-        info!(command_id, "apply_workload_resources: not implemented yet");
-        let mut r = CommandResult::simple(
-            command_id.to_string(),
-            "not_implemented",
-            Some("apply_workload_resources is not implemented yet".into()),
-        );
-        r.dry_run = Some(false);
-        r
+        info!(command_id, "apply_workload_resources: patching workload");
+
+        match self.execute_workload_resources_inner(&spec, false).await {
+            Ok(applied) => {
+                let mut r = CommandResult::simple(command_id.to_string(), "ok", None);
+                r.dry_run = Some(false);
+                r.applied_patch = Some(applied.patch);
+                r.observed_before = Some(applied.observed_before);
+                r.observed_after = Some(applied.observed_after);
+                r.warnings = applied.warnings;
+                r
+            }
+            Err(message) => {
+                warn!(command_id, "apply_workload_resources failed: {message}");
+                let mut r = CommandResult::simple(command_id.to_string(), "error", Some(message));
+                r.dry_run = Some(false);
+                r
+            }
+        }
     }
 }
 
