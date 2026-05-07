@@ -25,6 +25,12 @@ pub struct Config {
     /// HTTP request timeout to the Hub.
     pub http_timeout: Duration,
 
+    /// Enables debug logging for Hub HTTP requests/responses.
+    pub http_debug: bool,
+
+    /// Enables bounded response/request body previews in Hub HTTP debug logs.
+    pub http_debug_bodies: bool,
+
     /// Pod name (downward API).
     pub pod_name: String,
 
@@ -55,6 +61,9 @@ impl Config {
         let http_timeout = parse_secs("HTTP_TIMEOUT_SECS", 20);
         let lease_ttl = parse_secs("LEASE_TTL_SECS", 30);
 
+        let http_debug = env_flag("AGENT_HTTP_DEBUG");
+        let http_debug_bodies = env_flag("AGENT_HTTP_DEBUG_BODIES");
+
         let actions_enabled = env::var("ACTIONS_ENABLED")
             .ok()
             .map(|v| v == "true" || v == "1")
@@ -75,6 +84,8 @@ impl Config {
             poll_wait,
             actions_enabled,
             http_timeout,
+            http_debug,
+            http_debug_bodies,
             pod_name,
             pod_namespace,
             node_name,
@@ -91,6 +102,13 @@ fn parse_secs(var: &str, default: u64) -> Duration {
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(default),
     )
+}
+
+fn env_flag(var: &str) -> bool {
+    env::var(var)
+        .ok()
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -110,6 +128,8 @@ mod tests {
             "POLL_WAIT_SECS",
             "HTTP_TIMEOUT_SECS",
             "LEASE_TTL_SECS",
+            "AGENT_HTTP_DEBUG",
+            "AGENT_HTTP_DEBUG_BODIES",
             "ACTIONS_ENABLED",
             "POD_NAME",
             "POD_NAMESPACE",
@@ -233,6 +253,41 @@ mod tests {
             set_required("https://hub.example.com", "cluster-1");
             let cfg = Config::from_env().unwrap();
             assert!(!cfg.actions_enabled);
+            clear_required();
+        }
+    }
+
+    #[test]
+    fn http_debug_flags_true_values() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        unsafe {
+            reset_env();
+            set_required("https://hub.example.com", "cluster-1");
+            for val in ["true", "1"] {
+                env::set_var("AGENT_HTTP_DEBUG", val);
+                env::set_var("AGENT_HTTP_DEBUG_BODIES", val);
+                let cfg = Config::from_env().unwrap();
+                assert!(cfg.http_debug, "expected true for AGENT_HTTP_DEBUG={val}");
+                assert!(
+                    cfg.http_debug_bodies,
+                    "expected true for AGENT_HTTP_DEBUG_BODIES={val}"
+                );
+            }
+            env::remove_var("AGENT_HTTP_DEBUG");
+            env::remove_var("AGENT_HTTP_DEBUG_BODIES");
+            clear_required();
+        }
+    }
+
+    #[test]
+    fn http_debug_flags_default_false() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        unsafe {
+            reset_env();
+            set_required("https://hub.example.com", "cluster-1");
+            let cfg = Config::from_env().unwrap();
+            assert!(!cfg.http_debug);
+            assert!(!cfg.http_debug_bodies);
             clear_required();
         }
     }
