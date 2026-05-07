@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.5.0...v0.6.0) (2026-05-07)
+
+
+### Features
+
+* add POST request body previews in HTTP debug logs ([#22](https://github.com/thesentinella/hub-kubernetes-agent/issues/22)) ([07b3e4b](https://github.com/thesentinella/hub-kubernetes-agent/commit/07b3e4b3e99a388c0a8b8e256528ebbcd4042f15))
+
 ## [0.5.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.4.0...v0.5.0) (2026-05-07)
 
 
