@@ -107,7 +107,7 @@ data:
   HTTP_TIMEOUT_SECS: "20"
   LEASE_TTL_SECS: "30"
   ACTIONS_ENABLED: "false"           # read-only by default
-  RUST_LOG: "info"
+  AGENT_LOG: "info"
 ---
 apiVersion: v1
 kind: Secret

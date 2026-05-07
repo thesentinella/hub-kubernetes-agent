@@ -176,7 +176,8 @@ Target API route family is `/api/v1/...` on `https://api.hub.sentinel.la`.
 | `LEASE_TTL_SECS` | ConfigMap | `30` |
 | `LEASE_NAME` | ConfigMap | `sentinella-hub-k8s-agent-leader` |
 | `ACTIONS_ENABLED` | ConfigMap | `false` |
-| `RUST_LOG` | ConfigMap | `info` |
+| `AGENT_LOG` | ConfigMap | `info` |
+| `RUST_LOG` | ConfigMap | optional legacy alias |
 | `POD_NAME`, `POD_NAMESPACE`, `NODE_NAME` | downward API | auto |
 
 ## Build

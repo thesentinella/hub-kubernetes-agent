@@ -82,11 +82,18 @@ async fn main() -> Result<()> {
 }
 
 fn init_tracing() {
+    let filter = std::env::var("AGENT_LOG")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .or_else(|| {
+            std::env::var("RUST_LOG")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+        })
+        .unwrap_or_else(|| "info".to_string());
+
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
+        .with_env_filter(tracing_subscriber::EnvFilter::new(filter))
         .json()
         .init();
 }
