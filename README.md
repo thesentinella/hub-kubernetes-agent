@@ -162,6 +162,7 @@ Target API route family is `/api/v1/...` on `https://api.hub.sentinel.la`.
 
 - `command poll failed: poll status 404 Not Found` usually means route mismatch (`/v1/...` vs `/api/v1/...`) or missing backend endpoint.
 - `error decoding response body: expected value at line 1 column 1` usually means the poll endpoint returned non-JSON or empty body where JSON was expected.
+- For temporary wire diagnostics, set `AGENT_LOG=debug` and `AGENT_HTTP_DEBUG=true`. Set `AGENT_HTTP_DEBUG_BODIES=true` only when needed; logs include bounded (`200` chars) body previews.
 
 ## Configuration (env vars from ConfigMap/Secret)
 
@@ -176,6 +177,8 @@ Target API route family is `/api/v1/...` on `https://api.hub.sentinel.la`.
 | `LEASE_TTL_SECS` | ConfigMap | `30` |
 | `LEASE_NAME` | ConfigMap | `sentinella-hub-k8s-agent-leader` |
 | `ACTIONS_ENABLED` | ConfigMap | `false` |
+| `AGENT_HTTP_DEBUG` | ConfigMap | `false` |
+| `AGENT_HTTP_DEBUG_BODIES` | ConfigMap | `false` |
 | `AGENT_LOG` | ConfigMap | `info` |
 | `RUST_LOG` | ConfigMap | optional legacy alias |
 | `POD_NAME`, `POD_NAMESPACE`, `NODE_NAME` | downward API | auto |

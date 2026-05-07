@@ -107,6 +107,8 @@ data:
   HTTP_TIMEOUT_SECS: "20"
   LEASE_TTL_SECS: "30"
   ACTIONS_ENABLED: "false"           # read-only by default
+  AGENT_HTTP_DEBUG: "false"
+  AGENT_HTTP_DEBUG_BODIES: "false"
   AGENT_LOG: "info"
 ---
 apiVersion: v1

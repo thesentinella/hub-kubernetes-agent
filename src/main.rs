@@ -14,13 +14,26 @@ use crate::leader::LeaderState;
 use crate::model::*;
 use anyhow::Result;
 use kube::Client as KubeClient;
+use once_cell::sync::Lazy;
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use tokio::signal;
 use tokio::time::{MissedTickBehavior, interval};
 use tracing::{error, info, warn};
 
 const AGENT_NAME: &str = "Sentinella Hub Kubernetes Agent";
+const WARN_SUPPRESSION_WINDOW: Duration = Duration::from_secs(60);
+
+static WARN_SUPPRESSION: Lazy<Mutex<HashMap<String, SuppressionState>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+#[derive(Clone, Debug)]
+struct SuppressionState {
+    last_emitted_at: Instant,
+    suppressed_count: u64,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -164,8 +177,48 @@ async fn command_loop(hub: Arc<HubClient>, executor: Arc<Executor>) {
                 }
             }
             Err(e) => {
-                warn!("command poll failed: {:#}", e);
+                warn_with_suppression(
+                    &format!("command_poll::{e}"),
+                    &format!("command poll failed: {:#}", e),
+                );
                 tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        }
+    }
+}
+
+fn warn_with_suppression(key: &str, message: &str) {
+    let now = Instant::now();
+    let mut map = WARN_SUPPRESSION
+        .lock()
+        .expect("warn suppression mutex poisoned");
+
+    match map.get_mut(key) {
+        None => {
+            warn!("{}", message);
+            map.insert(
+                key.to_string(),
+                SuppressionState {
+                    last_emitted_at: now,
+                    suppressed_count: 0,
+                },
+            );
+        }
+        Some(state) => {
+            if now.duration_since(state.last_emitted_at) >= WARN_SUPPRESSION_WINDOW {
+                if state.suppressed_count > 0 {
+                    warn!(
+                        warning_key = %key,
+                        suppressed_count = state.suppressed_count,
+                        window_secs = WARN_SUPPRESSION_WINDOW.as_secs(),
+                        "suppressed similar warnings"
+                    );
+                }
+                warn!("{}", message);
+                state.last_emitted_at = now;
+                state.suppressed_count = 0;
+            } else {
+                state.suppressed_count += 1;
             }
         }
     }

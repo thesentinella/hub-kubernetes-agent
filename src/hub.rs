@@ -5,7 +5,7 @@ use crate::model::*;
 use anyhow::Result;
 use reqwest::{Client, StatusCode};
 use std::time::Duration;
-use tracing::{error, warn};
+use tracing::{debug, error, warn};
 
 pub struct HubClient {
     http: Client,
@@ -50,6 +50,20 @@ impl HubClient {
             "{}/v1/clusters/{}/inventory",
             self.cfg.hub_url, self.cfg.cluster_id
         );
+        if self.cfg.http_debug {
+            debug!(
+                method = "POST",
+                url = %url,
+                schema_version = snap.schema_version,
+                namespaces = snap.namespaces.len(),
+                deployments = snap.workloads.deployments.len(),
+                statefulsets = snap.workloads.statefulsets.len(),
+                daemonsets = snap.workloads.daemonsets.len(),
+                pods = snap.pods.len(),
+                "sending inventory snapshot"
+            );
+        }
+
         let backoffs = [
             Duration::ZERO,
             Duration::from_secs(2),
@@ -61,16 +75,46 @@ impl HubClient {
             if !delay.is_zero() {
                 tokio::time::sleep(*delay).await;
             }
+            let start = std::time::Instant::now();
             let req = self.auth(self.http.post(&url).json(snap));
             match req.send().await {
-                Ok(r) if r.status().is_success() => return Ok(()),
                 Ok(r) => {
                     let s = r.status();
+                    let content_type = response_content_type(&r);
+                    let content_length = r.content_length();
+                    let body = if self.cfg.http_debug_bodies || !s.is_success() {
+                        Some(r.text().await.unwrap_or_default())
+                    } else {
+                        None
+                    };
+
+                    if self.cfg.http_debug {
+                        debug!(
+                            method = "POST",
+                            url = %url,
+                            status = %s,
+                            content_type = %content_type,
+                            content_length = ?content_length,
+                            elapsed_ms = start.elapsed().as_millis(),
+                            body_preview = %body_preview_opt(body.as_deref()),
+                            "inventory response"
+                        );
+                    }
+
+                    if s.is_success() {
+                        return Ok(());
+                    }
+
                     if s.is_client_error()
                         && s != StatusCode::REQUEST_TIMEOUT
                         && s != StatusCode::TOO_MANY_REQUESTS
                     {
-                        return Err(anyhow::anyhow!("hub rejected snapshot: {}", s));
+                        return Err(anyhow::anyhow!(
+                            "hub rejected snapshot: {} (content_type={}, body_preview={})",
+                            s,
+                            content_type,
+                            body_preview_opt(body.as_deref())
+                        ));
                     }
                     last_err = Some(anyhow::anyhow!("attempt {} status {}", i + 1, s));
                 }
@@ -90,7 +134,17 @@ impl HubClient {
             self.cfg.poll_wait.as_secs()
         );
         let timeout = self.cfg.poll_wait + Duration::from_secs(10);
+        if self.cfg.http_debug {
+            debug!(
+                method = "GET",
+                url = %url,
+                timeout_secs = timeout.as_secs(),
+                "polling commands"
+            );
+        }
+
         let req = self.auth(self.http.get(&url).timeout(timeout));
+        let start = std::time::Instant::now();
 
         let resp = match req.send().await {
             Ok(r) => r,
@@ -99,13 +153,55 @@ impl HubClient {
         };
 
         let status = resp.status();
+        let content_type = response_content_type(&resp);
+        let content_length = resp.content_length();
         if status == StatusCode::NO_CONTENT {
+            if self.cfg.http_debug {
+                debug!(
+                    method = "GET",
+                    url = %url,
+                    status = %status,
+                    content_type = %content_type,
+                    content_length = ?content_length,
+                    elapsed_ms = start.elapsed().as_millis(),
+                    "poll returned no content"
+                );
+            }
             return Ok(CommandBatch { commands: vec![] });
         }
-        if !status.is_success() {
-            return Err(anyhow::anyhow!("poll status {}", status));
+
+        let body = resp.text().await.unwrap_or_default();
+        if self.cfg.http_debug {
+            debug!(
+                method = "GET",
+                url = %url,
+                status = %status,
+                content_type = %content_type,
+                content_length = ?content_length,
+                elapsed_ms = start.elapsed().as_millis(),
+                body_preview = %body_preview_opt(self.cfg.http_debug_bodies.then_some(body.as_str())),
+                "poll response"
+            );
         }
-        Ok(resp.json().await?)
+
+        if !status.is_success() {
+            return Err(anyhow::anyhow!(
+                "poll status {} (content_type={}, body_preview={})",
+                status,
+                content_type,
+                body_preview_opt(Some(body.as_str()))
+            ));
+        }
+
+        serde_json::from_str(&body).map_err(|e| {
+            anyhow::anyhow!(
+                "error decoding response body: {} (status={}, content_type={}, body_preview={})",
+                e,
+                status,
+                content_type,
+                body_preview_opt(Some(body.as_str()))
+            )
+        })
     }
 
     /// Acknowledge a command result.
@@ -114,11 +210,75 @@ impl HubClient {
             "{}/v1/clusters/{}/commands/{}/ack",
             self.cfg.hub_url, self.cfg.cluster_id, result.command_id
         );
+        if self.cfg.http_debug {
+            debug!(
+                method = "POST",
+                url = %url,
+                command_id = %result.command_id,
+                status = result.status,
+                dry_run = ?result.dry_run,
+                "sending command ack"
+            );
+        }
+
+        let start = std::time::Instant::now();
         let req = self.auth(self.http.post(&url).json(result));
         let resp = req.send().await?;
-        if !resp.status().is_success() {
-            warn!("ack returned {}", resp.status());
+        let status = resp.status();
+        let content_type = response_content_type(&resp);
+        let content_length = resp.content_length();
+        let body = if self.cfg.http_debug_bodies || !status.is_success() {
+            Some(resp.text().await.unwrap_or_default())
+        } else {
+            None
+        };
+
+        if self.cfg.http_debug {
+            debug!(
+                method = "POST",
+                url = %url,
+                status = %status,
+                content_type = %content_type,
+                content_length = ?content_length,
+                elapsed_ms = start.elapsed().as_millis(),
+                body_preview = %body_preview_opt(body.as_deref()),
+                "ack response"
+            );
+        }
+
+        if !status.is_success() {
+            warn!(
+                "ack returned {} (content_type={}, body_preview={})",
+                status,
+                content_type,
+                body_preview_opt(body.as_deref())
+            );
         }
         Ok(())
     }
+}
+
+fn response_content_type(resp: &reqwest::Response) -> String {
+    resp.headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("<none>")
+        .to_string()
+}
+
+fn body_preview_opt(body: Option<&str>) -> String {
+    match body {
+        Some(b) => body_preview(b),
+        None => "<disabled>".into(),
+    }
+}
+
+fn body_preview(body: &str) -> String {
+    const MAX_PREVIEW_CHARS: usize = 200;
+    let trimmed = body.trim();
+    let mut preview = trimmed.chars().take(MAX_PREVIEW_CHARS).collect::<String>();
+    if trimmed.chars().count() > MAX_PREVIEW_CHARS {
+        preview.push_str("...");
+    }
+    preview
 }
