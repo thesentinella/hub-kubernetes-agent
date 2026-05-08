@@ -65,7 +65,7 @@ Unit tests are included in `tech.rs`. Extending coverage is one entry in the `RU
 
 ### Actions — designed for gradual rollout
 
-`src/executor.rs` rejects every command while `ACTIONS_ENABLED=false`, before parsing the command spec. When actions are enabled, `preview_workload_resources` performs a server-side dry-run, `apply_workload_resources` performs a live strategic-merge patch, and `self_update` triggers an immediate agent restart.
+`src/executor.rs` rejects every command while `ACTIONS_ENABLED=false`, before parsing the command spec. When actions are enabled, `preview_workload_resources` performs a server-side dry-run, `apply_workload_resources` performs a live strategic-merge patch, `self_update` triggers an immediate agent restart, and `update_agent` updates the fixed agent DaemonSet image.
 
 #### Commands: setting requests and limits
 
@@ -81,6 +81,15 @@ The two-command pattern is intentional. Each artifact (preview, approval, apply)
 - **`self_update`** — accepts a restart signal from Hub and immediately restarts the agent process after ack attempt.
 - The agent attempts to ack the result first; restart proceeds even if ack fails.
 - The agent does not mutate deployment manifests or image tags; Kubernetes restarts the pod via DaemonSet reconciliation.
+
+#### Command: update agent image
+
+- **`update_agent`** — updates the image of the fixed target `DaemonSet/sentinella-hub-k8s-agent` container `agent` in namespace `sentinella`.
+- Accepted image refs must start with `us-east1-docker.pkg.dev/sentinella-hub/kubernetes-agent/` and must include either `:<tag>` or `@sha256:<64-hex-digest>`.
+- `:latest` is allowed.
+- The agent runs a Kubernetes dry-run patch before live apply and returns pre-flight warnings alongside the result.
+- The command fails with `status: "error"` when validation fails or when the DaemonSet/container lookup/patch fails.
+- Reader RBAC in `agent.yaml` remains read-only; mutating patch permissions must be granted via a separate action RBAC role/binding when actions are enabled.
 
 **Target is a workload controller**, not a Pod. A `Pod`-targeted patch is futile — its ReplicaSet/StatefulSet recreates it with the original spec in seconds. Supported kinds: `Deployment`, `StatefulSet`, `DaemonSet`. In-place pod resize via the `pods/resize` subresource (Kubernetes 1.33+, beta) is on the v0.3 roadmap.
 

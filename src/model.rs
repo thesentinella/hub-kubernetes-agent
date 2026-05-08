@@ -204,6 +204,8 @@ pub struct CommandBatch {
 ///   Spec shape: [`WorkloadResourcesSpec`].
 /// - `self_update` — requests an immediate agent restart.
 ///   Spec shape: [`SelfUpdateSpec`].
+/// - `update_agent` — updates the agent DaemonSet container image.
+///   Spec shape: [`UpdateAgentSpec`].
 ///
 /// The two-command pattern (preview, then apply) is intentional:
 /// - Each artifact is a separate Hub record with its own id, timestamp, and
@@ -272,6 +274,16 @@ pub struct SelfUpdateSpec {
     pub reason: Option<String>,
     #[serde(default)]
     pub strategy: Option<String>,
+}
+
+/// Spec payload for `update_agent`.
+///
+/// `image` must be an allowed Artifact Registry reference with either a tag
+/// or sha256 digest.
+#[derive(Deserialize, Debug)]
+#[allow(dead_code)]
+pub struct UpdateAgentSpec {
+    pub image: String,
 }
 
 /// Result returned to the Hub after a command runs.

@@ -4,7 +4,9 @@
 //! execute any command while in read-only mode.
 
 use crate::config::Config;
-use crate::model::{Command, CommandResult, ResourceMap, SelfUpdateSpec, WorkloadResourcesSpec};
+use crate::model::{
+    Command, CommandResult, ResourceMap, SelfUpdateSpec, UpdateAgentSpec, WorkloadResourcesSpec,
+};
 use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, StatefulSet};
 use k8s_openapi::api::autoscaling::v2::HorizontalPodAutoscaler;
 use k8s_openapi::api::core::v1::ResourceRequirements;
@@ -18,6 +20,12 @@ use kube::{Api, Client};
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 use tracing::{info, warn};
+
+const UPDATE_AGENT_ALLOWED_PREFIX: &str =
+    "us-east1-docker.pkg.dev/sentinella-hub/kubernetes-agent/";
+const UPDATE_AGENT_NAMESPACE: &str = "sentinella";
+const UPDATE_AGENT_DAEMONSET: &str = "sentinella-hub-k8s-agent";
+const UPDATE_AGENT_CONTAINER: &str = "agent";
 
 pub struct Executor {
     cfg: Config,
@@ -55,6 +63,10 @@ impl Executor {
             },
             "self_update" => match parse_spec::<SelfUpdateSpec>(cmd) {
                 Ok(spec) => self.self_update(&cmd.id, spec).await,
+                Err(e) => spec_error(cmd, e),
+            },
+            "update_agent" => match parse_spec::<UpdateAgentSpec>(cmd) {
+                Ok(spec) => self.update_agent(&cmd.id, spec).await,
                 Err(e) => spec_error(cmd, e),
             },
             other => {
@@ -464,6 +476,167 @@ impl Executor {
         r.restart_requested = Some(true);
         r
     }
+
+    async fn update_agent(&self, command_id: &str, spec: UpdateAgentSpec) -> CommandResult {
+        let image = match validate_update_agent_image(&spec.image) {
+            Ok(image) => image,
+            Err(message) => {
+                return update_agent_error(command_id, message);
+            }
+        };
+
+        let api: Api<DaemonSet> = Api::namespaced(self.client.clone(), UPDATE_AGENT_NAMESPACE);
+        let before = match api.get(UPDATE_AGENT_DAEMONSET).await {
+            Ok(ds) => ds,
+            Err(e) => {
+                return update_agent_error(
+                    command_id,
+                    format!(
+                        "failed to get target DaemonSet {}/{}: {}",
+                        UPDATE_AGENT_NAMESPACE, UPDATE_AGENT_DAEMONSET, e
+                    ),
+                );
+            }
+        };
+
+        let before_image = match daemonset_container_image(&before, UPDATE_AGENT_CONTAINER) {
+            Ok(current) => current,
+            Err(message) => {
+                return update_agent_error(command_id, message);
+            }
+        };
+
+        let warnings = self
+            .collect_preflight_warnings(
+                &WorkloadResourcesSpec {
+                    workload_kind: "DaemonSet".into(),
+                    namespace: UPDATE_AGENT_NAMESPACE.into(),
+                    name: UPDATE_AGENT_DAEMONSET.into(),
+                    container: UPDATE_AGENT_CONTAINER.into(),
+                    requests: None,
+                    limits: None,
+                },
+                &daemonset_pod_labels(&before),
+            )
+            .await;
+
+        let patch = json!({
+            "spec": {
+                "template": {
+                    "spec": {
+                        "containers": [{
+                            "name": UPDATE_AGENT_CONTAINER,
+                            "image": image,
+                        }],
+                    },
+                },
+            },
+        });
+
+        if let Err(e) = api
+            .patch(
+                UPDATE_AGENT_DAEMONSET,
+                &PatchParams::default().dry_run(),
+                &Patch::Strategic(&patch),
+            )
+            .await
+        {
+            return update_agent_error(
+                command_id,
+                format!(
+                    "update_agent dry-run failed for target DaemonSet {}/{}: {}",
+                    UPDATE_AGENT_NAMESPACE, UPDATE_AGENT_DAEMONSET, e
+                ),
+            );
+        }
+
+        let after = match api
+            .patch(
+                UPDATE_AGENT_DAEMONSET,
+                &PatchParams::default(),
+                &Patch::Strategic(&patch),
+            )
+            .await
+        {
+            Ok(ds) => ds,
+            Err(e) => {
+                return update_agent_error(
+                    command_id,
+                    format!(
+                        "failed to patch target DaemonSet {}/{}: {}",
+                        UPDATE_AGENT_NAMESPACE, UPDATE_AGENT_DAEMONSET, e
+                    ),
+                );
+            }
+        };
+
+        let after_image = match daemonset_container_image(&after, UPDATE_AGENT_CONTAINER) {
+            Ok(updated) => updated,
+            Err(message) => {
+                return update_agent_error(command_id, message);
+            }
+        };
+
+        let mut result = CommandResult::simple(
+            command_id.to_string(),
+            "ok",
+            Some(format!(
+                "update_agent applied on {}/{} container {}: {} -> {}",
+                UPDATE_AGENT_NAMESPACE,
+                UPDATE_AGENT_DAEMONSET,
+                UPDATE_AGENT_CONTAINER,
+                before_image,
+                after_image
+            )),
+        );
+        result.dry_run = Some(false);
+        result.applied_patch = Some(patch);
+        result.observed_before = Some(json!({"image": before_image}));
+        result.observed_after = Some(json!({"image": after_image}));
+        result.warnings = warnings;
+        result
+    }
+}
+
+fn update_agent_error(command_id: &str, message: String) -> CommandResult {
+    let mut result = CommandResult::simple(command_id.to_string(), "error", Some(message));
+    result.dry_run = Some(false);
+    result
+}
+
+fn validate_update_agent_image(image: &str) -> Result<String, String> {
+    let image = image.trim();
+    if image.is_empty() {
+        return Err("update_agent image must be non-empty".into());
+    }
+
+    if !image.starts_with(UPDATE_AGENT_ALLOWED_PREFIX) {
+        return Err(format!(
+            "update_agent image must start with allowed prefix {}",
+            UPDATE_AGENT_ALLOWED_PREFIX
+        ));
+    }
+
+    let suffix = &image[UPDATE_AGENT_ALLOWED_PREFIX.len()..];
+    if suffix.is_empty() || suffix == "/" {
+        return Err("update_agent image must include an image name after allowed prefix".into());
+    }
+
+    if let Some((_, digest)) = suffix.rsplit_once("@sha256:") {
+        if digest.len() == 64 && digest.chars().all(|ch| ch.is_ascii_hexdigit()) {
+            return Ok(image.to_string());
+        }
+        return Err("update_agent image has invalid sha256 digest format".into());
+    }
+
+    if let Some((name, tag)) = suffix.rsplit_once(':') {
+        if name.is_empty() || tag.is_empty() {
+            return Err("update_agent image must include non-empty image name and tag".into());
+        }
+        return Ok(image.to_string());
+    }
+
+    Err("update_agent image must include either :<tag> or @sha256:<digest>".into())
 }
 
 struct ResourcePreview {
@@ -572,6 +745,32 @@ fn daemonset_container_resources(workload: &DaemonSet, container: &str) -> Resul
         .map(|pod_spec| pod_spec.containers.as_slice())
         .ok_or_else(|| format!("DaemonSet has no pod template spec: {container}"))?;
     container_resources(containers, container)
+}
+
+fn daemonset_container_image(workload: &DaemonSet, container: &str) -> Result<String, String> {
+    let containers = workload
+        .spec
+        .as_ref()
+        .and_then(|spec| spec.template.spec.as_ref())
+        .map(|pod_spec| pod_spec.containers.as_slice())
+        .ok_or_else(|| {
+            format!(
+                "target DaemonSet has no pod template spec for container {}",
+                container
+            )
+        })?;
+
+    let matched = containers
+        .iter()
+        .find(|candidate| candidate.name == container)
+        .ok_or_else(|| format!("target DaemonSet missing expected container {}", container))?;
+
+    matched.image.clone().ok_or_else(|| {
+        format!(
+            "target DaemonSet container {} has no image field",
+            container
+        )
+    })
 }
 
 fn deployment_pod_labels(workload: &Deployment) -> BTreeMap<String, String> {
@@ -909,6 +1108,99 @@ mod tests {
 
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].starts_with("preflight.check.unavailable: hpa unavailable:"));
+    }
+
+    #[test]
+    fn validate_update_agent_image_rejects_empty() {
+        let err = validate_update_agent_image("").unwrap_err();
+        assert_eq!(err, "update_agent image must be non-empty");
+    }
+
+    #[test]
+    fn validate_update_agent_image_rejects_whitespace() {
+        let err = validate_update_agent_image("   ").unwrap_err();
+        assert_eq!(err, "update_agent image must be non-empty");
+    }
+
+    #[test]
+    fn validate_update_agent_image_rejects_wrong_registry() {
+        let err = validate_update_agent_image("ghcr.io/sentinella/agent:v1.2.3").unwrap_err();
+        assert!(err.starts_with("update_agent image must start with allowed prefix"));
+    }
+
+    #[test]
+    fn validate_update_agent_image_rejects_wrong_repo_path() {
+        let err = validate_update_agent_image(
+            "us-east1-docker.pkg.dev/sentinella-hub/other-repo/agent:v1.2.3",
+        )
+        .unwrap_err();
+        assert!(err.starts_with("update_agent image must start with allowed prefix"));
+    }
+
+    #[test]
+    fn validate_update_agent_image_rejects_prefix_only() {
+        let err = validate_update_agent_image(UPDATE_AGENT_ALLOWED_PREFIX).unwrap_err();
+        assert_eq!(
+            err,
+            "update_agent image must include an image name after allowed prefix"
+        );
+    }
+
+    #[test]
+    fn validate_update_agent_image_rejects_missing_tag_or_digest() {
+        let err = validate_update_agent_image(
+            "us-east1-docker.pkg.dev/sentinella-hub/kubernetes-agent/sentinella-hub-k8s-agent",
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "update_agent image must include either :<tag> or @sha256:<digest>"
+        );
+    }
+
+    #[test]
+    fn validate_update_agent_image_accepts_tagged_image() {
+        let image = validate_update_agent_image(
+            "us-east1-docker.pkg.dev/sentinella-hub/kubernetes-agent/sentinella-hub-k8s-agent:v1.2.3",
+        )
+        .unwrap();
+        assert_eq!(
+            image,
+            "us-east1-docker.pkg.dev/sentinella-hub/kubernetes-agent/sentinella-hub-k8s-agent:v1.2.3"
+        );
+    }
+
+    #[test]
+    fn validate_update_agent_image_allows_latest_tag() {
+        let image = validate_update_agent_image(
+            "us-east1-docker.pkg.dev/sentinella-hub/kubernetes-agent/sentinella-hub-k8s-agent:latest",
+        )
+        .unwrap();
+        assert_eq!(
+            image,
+            "us-east1-docker.pkg.dev/sentinella-hub/kubernetes-agent/sentinella-hub-k8s-agent:latest"
+        );
+    }
+
+    #[test]
+    fn validate_update_agent_image_accepts_valid_digest() {
+        let image = validate_update_agent_image(
+            "us-east1-docker.pkg.dev/sentinella-hub/kubernetes-agent/sentinella-hub-k8s-agent@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .unwrap();
+        assert_eq!(
+            image,
+            "us-east1-docker.pkg.dev/sentinella-hub/kubernetes-agent/sentinella-hub-k8s-agent@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+    }
+
+    #[test]
+    fn validate_update_agent_image_rejects_bad_digest() {
+        let err = validate_update_agent_image(
+            "us-east1-docker.pkg.dev/sentinella-hub/kubernetes-agent/sentinella-hub-k8s-agent@sha256:abc",
+        )
+        .unwrap_err();
+        assert_eq!(err, "update_agent image has invalid sha256 digest format");
     }
 }
 
