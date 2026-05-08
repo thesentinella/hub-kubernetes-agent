@@ -14,6 +14,7 @@ pub struct InventorySnapshot {
     pub workloads: Workloads,
     pub pods: Vec<PodInfo>,
     pub storage: StorageInventory,
+    pub events: Vec<EventInfo>,
 }
 
 #[derive(Serialize, Debug)]
@@ -125,6 +126,30 @@ pub struct PodInfo {
     pub owner_kind: Option<String>,
     pub owner_name: Option<String>,
     pub containers: Vec<ContainerInfo>,
+}
+
+#[derive(Serialize, Debug)]
+pub struct EventInfo {
+    pub namespace: String,
+    pub name: String,
+    #[serde(rename = "type")]
+    pub type_: Option<String>,
+    pub reason: Option<String>,
+    pub message: Option<String>,
+    pub count: Option<i32>,
+    pub first_timestamp: Option<String>,
+    pub last_timestamp: Option<String>,
+    pub reporting_controller: Option<String>,
+    pub reporting_instance: Option<String>,
+    pub involved_object: InvolvedObjectInfo,
+}
+
+#[derive(Serialize, Debug, Default)]
+pub struct InvolvedObjectInfo {
+    pub kind: Option<String>,
+    pub name: Option<String>,
+    pub namespace: Option<String>,
+    pub uid: Option<String>,
 }
 
 #[derive(Serialize, Debug)]

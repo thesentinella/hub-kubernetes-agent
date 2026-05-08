@@ -4,7 +4,9 @@ use crate::model::*;
 use crate::tech;
 use anyhow::Result;
 use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, StatefulSet};
-use k8s_openapi::api::core::v1::{Namespace, Node, PersistentVolume, PersistentVolumeClaim, Pod};
+use k8s_openapi::api::core::v1::{
+    Event, Namespace, Node, PersistentVolume, PersistentVolumeClaim, Pod,
+};
 use k8s_openapi::api::storage::v1::StorageClass;
 use kube::api::{ApiResource, DynamicObject, ListParams};
 use kube::core::GroupVersionKind;
@@ -20,6 +22,7 @@ pub async fn collect(
     Workloads,
     Vec<PodInfo>,
     StorageInventory,
+    Vec<EventInfo>,
 )> {
     // Concurrency: launch all list calls in parallel; fail soft on individual lists.
     let lp = ListParams::default();
@@ -41,6 +44,7 @@ pub async fn collect(
     );
     let volume_snapshots_fut =
         list_dynamic_all(client, "snapshot.storage.k8s.io", "v1", "VolumeSnapshot");
+    let events_fut = list_all::<Event>(client, &lp);
     let version_fut = client.apiserver_version();
 
     let (
@@ -55,6 +59,7 @@ pub async fn collect(
         pvcs,
         volume_snapshot_classes,
         volume_snapshots,
+        events,
         version,
     ) = tokio::join!(
         nodes_fut,
@@ -68,6 +73,7 @@ pub async fn collect(
         pvcs_fut,
         volume_snapshot_classes_fut,
         volume_snapshots_fut,
+        events_fut,
         version_fut
     );
 
@@ -82,6 +88,7 @@ pub async fn collect(
     let pvcs = soft_unwrap("persistentvolumeclaims", pvcs);
     let volume_snapshot_classes = soft_unwrap("volumesnapshotclasses", volume_snapshot_classes);
     let volume_snapshots = soft_unwrap("volumesnapshots", volume_snapshots);
+    let mut events = soft_unwrap("events", events);
 
     let cluster = build_cluster_info(version.ok(), &nodes);
     let ns_infos = namespaces.into_iter().map(map_namespace).collect();
@@ -105,7 +112,17 @@ pub async fn collect(
             .collect(),
     };
 
-    Ok((cluster, ns_infos, workloads, pod_infos, storage))
+    sort_events_for_snapshot(&mut events);
+    let event_infos = events.into_iter().take(MAX_EVENTS).map(map_event).collect();
+
+    Ok((
+        cluster,
+        ns_infos,
+        workloads,
+        pod_infos,
+        storage,
+        event_infos,
+    ))
 }
 
 async fn list_all<K>(client: &Client, lp: &ListParams) -> Result<Vec<K>>
@@ -347,6 +364,9 @@ const STORAGE_CLASS_PARAMETER_ALLOWLIST: &[&str] = &[
     "csi.storage.k8s.io/fstype",
 ];
 
+const MAX_EVENTS: usize = 500;
+const MAX_EVENT_MESSAGE_CHARS: usize = 500;
+
 fn map_storage_class(sc: StorageClass) -> StorageClassInfo {
     let parameters = filter_storage_class_parameters(sc.parameters.unwrap_or_default());
     StorageClassInfo {
@@ -423,4 +443,87 @@ fn map_volume_snapshot(vs: DynamicObject) -> VolumeSnapshotInfo {
             .and_then(serde_json::Value::as_str)
             .map(ToString::to_string),
     }
+}
+
+fn sort_events_for_snapshot(events: &mut [Event]) {
+    events.sort_by(|a, b| {
+        let a_rank = event_type_rank(a.type_.as_deref());
+        let b_rank = event_type_rank(b.type_.as_deref());
+
+        b_rank
+            .cmp(&a_rank)
+            .then_with(|| event_sort_ts_seconds(b).cmp(&event_sort_ts_seconds(a)))
+            .then_with(|| {
+                a.metadata
+                    .namespace
+                    .as_deref()
+                    .unwrap_or_default()
+                    .cmp(b.metadata.namespace.as_deref().unwrap_or_default())
+            })
+            .then_with(|| {
+                a.metadata
+                    .name
+                    .as_deref()
+                    .unwrap_or_default()
+                    .cmp(b.metadata.name.as_deref().unwrap_or_default())
+            })
+    });
+}
+
+fn event_type_rank(kind: Option<&str>) -> u8 {
+    if matches!(kind, Some("Warning")) {
+        1
+    } else {
+        0
+    }
+}
+
+fn event_sort_ts_seconds(event: &Event) -> i64 {
+    event
+        .event_time
+        .as_ref()
+        .map(|t| t.0.as_second())
+        .or_else(|| event.last_timestamp.as_ref().map(|t| t.0.as_second()))
+        .or_else(|| event.first_timestamp.as_ref().map(|t| t.0.as_second()))
+        .unwrap_or(0)
+}
+
+fn map_event(event: Event) -> EventInfo {
+    let involved = event.involved_object;
+    EventInfo {
+        namespace: event.metadata.namespace.unwrap_or_default(),
+        name: event.metadata.name.unwrap_or_default(),
+        type_: event.type_,
+        reason: event.reason,
+        message: event
+            .message
+            .map(|m| truncate_chars(&m, MAX_EVENT_MESSAGE_CHARS)),
+        count: event.count,
+        first_timestamp: event.first_timestamp.map(|t| t.0.to_string()),
+        last_timestamp: event
+            .event_time
+            .map(|t| t.0.to_string())
+            .or_else(|| event.last_timestamp.map(|t| t.0.to_string())),
+        reporting_controller: event.reporting_component,
+        reporting_instance: event.reporting_instance,
+        involved_object: InvolvedObjectInfo {
+            kind: involved.kind,
+            name: involved.name,
+            namespace: involved.namespace,
+            uid: involved.uid,
+        },
+    }
+}
+
+fn truncate_chars(input: &str, max_chars: usize) -> String {
+    let total = input.chars().count();
+    if total <= max_chars {
+        return input.to_string();
+    }
+    let keep = max_chars.saturating_sub(3);
+    let mut out = input.chars().take(keep).collect::<String>();
+    if max_chars >= 3 {
+        out.push_str("...");
+    }
+    out
 }
