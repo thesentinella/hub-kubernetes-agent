@@ -23,6 +23,7 @@ pub struct AgentInfo {
     pub pod_name: String,
     pub pod_namespace: String,
     pub node_name: String,
+    pub actions_enabled: bool,
 }
 
 #[derive(Serialize, Debug, Default)]
