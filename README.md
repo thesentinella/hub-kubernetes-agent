@@ -12,6 +12,7 @@ Inventory collector and (future) action executor for Kubernetes and OpenShift cl
   - **Workloads**: deployments, statefulsets, daemonsets (name, namespace, desired/ready replicas).
   - **Pods**: age in seconds (`age_seconds`), each container with image, **detected technology** (vendor/product/version inferred from the image), `requests` and `limits` (CPU and memory).
   - **Storage**: StorageClasses (name/provisioner/safe parameter subset), PersistentVolumes, PersistentVolumeClaims, VolumeSnapshotClasses, and VolumeSnapshots.
+  - **Events**: Kubernetes `Warning` and `Normal` events with bounded payload (max 500 events per snapshot, event message truncated to 500 chars).
 - Maintains an open long-poll against the Hub for command delivery. **Action execution is disabled by default** (`ACTIONS_ENABLED=false`); the agent replies with `skipped` and an explanatory message to any command received. When actions are explicitly enabled, the agent can preview workload resource patches with a Kubernetes server-side dry-run.
 - Snapshot agent metadata includes whether actions are enabled (`agent.actions_enabled`) so the Hub can accurately reflect agent execution capability.
 
