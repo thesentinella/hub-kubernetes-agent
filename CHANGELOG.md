@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.1](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.13.0...v0.13.1) (2026-05-08)
+
+
+### Bug Fixes
+
+* separate ConfigMap and DaemonSet YAML documents ([#48](https://github.com/thesentinella/hub-kubernetes-agent/issues/48)) ([c7a2979](https://github.com/thesentinella/hub-kubernetes-agent/commit/c7a297953dd73109604d6e1d14f731d9b7d8623f))
+
 ## [0.13.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.12.1...v0.13.0) (2026-05-08)
 
 
