@@ -138,7 +138,8 @@ async fn collector_loop(cfg: Config, kube: KubeClient, hub: Arc<HubClient>, lead
 }
 
 async fn build_and_send(cfg: &Config, kube: &KubeClient, hub: &HubClient) -> Result<()> {
-    let (cluster, namespaces, workloads, pods, storage, events) = collector::collect(kube).await?;
+    let (cluster, namespaces, workloads, pods, network, storage, events) =
+        collector::collect(kube).await?;
     let snap = InventorySnapshot {
         schema_version: 1,
         agent: AgentInfo {
@@ -155,6 +156,7 @@ async fn build_and_send(cfg: &Config, kube: &KubeClient, hub: &HubClient) -> Res
         namespaces,
         workloads,
         pods,
+        network,
         storage,
         events,
     };
