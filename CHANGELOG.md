@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.1](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.11.0...v0.11.1) (2026-05-08)
+
+
+### Bug Fixes
+
+* send actions_enabled state in agent snapshot metadata ([#40](https://github.com/thesentinella/hub-kubernetes-agent/issues/40)) ([9ee8353](https://github.com/thesentinella/hub-kubernetes-agent/commit/9ee83537f789b90f952db602a71d71f5127884b5))
+
 ## [0.11.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.10.0...v0.11.0) (2026-05-07)
 
 
