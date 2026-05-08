@@ -115,6 +115,7 @@ data:
   AGENT_HTTP_DEBUG: "false"
   AGENT_HTTP_DEBUG_BODIES: "false"
   AGENT_LOG: "info"
+---
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
