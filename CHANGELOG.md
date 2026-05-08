@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.11.1...v0.12.0) (2026-05-08)
+
+
+### Features
+
+* add bounded Kubernetes events to inventory snapshots ([#42](https://github.com/thesentinella/hub-kubernetes-agent/issues/42)) ([c1518ed](https://github.com/thesentinella/hub-kubernetes-agent/commit/c1518ed05612f5b86d807e1033c329f5eedcdf73))
+
 ## [0.11.1](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.11.0...v0.11.1) (2026-05-08)
 
 
