@@ -5,9 +5,11 @@ use crate::tech;
 use anyhow::Result;
 use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, StatefulSet};
 use k8s_openapi::api::core::v1::{
-    Event, Namespace, Node, PersistentVolume, PersistentVolumeClaim, Pod,
+    Event, Namespace, Node, PersistentVolume, PersistentVolumeClaim, Pod, Service,
 };
+use k8s_openapi::api::networking::v1::Ingress;
 use k8s_openapi::api::storage::v1::StorageClass;
+use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kube::api::{ApiResource, DynamicObject, ListParams};
 use kube::core::GroupVersionKind;
 use kube::{Api, Client};
@@ -21,6 +23,7 @@ pub async fn collect(
     Vec<NamespaceInfo>,
     Workloads,
     Vec<PodInfo>,
+    NetworkInventory,
     StorageInventory,
     Vec<EventInfo>,
 )> {
@@ -33,6 +36,8 @@ pub async fn collect(
     let sts_fut = list_all::<StatefulSet>(client, &lp);
     let ds_fut = list_all::<DaemonSet>(client, &lp);
     let pods_fut = list_all::<Pod>(client, &lp);
+    let services_fut = list_all::<Service>(client, &lp);
+    let ingresses_fut = list_all::<Ingress>(client, &lp);
     let storage_classes_fut = list_all::<StorageClass>(client, &lp);
     let pvs_fut = list_all::<PersistentVolume>(client, &lp);
     let pvcs_fut = list_all::<PersistentVolumeClaim>(client, &lp);
@@ -54,6 +59,8 @@ pub async fn collect(
         statefulsets,
         daemonsets,
         pods,
+        services,
+        ingresses,
         storage_classes,
         pvs,
         pvcs,
@@ -68,6 +75,8 @@ pub async fn collect(
         sts_fut,
         ds_fut,
         pods_fut,
+        services_fut,
+        ingresses_fut,
         storage_classes_fut,
         pvs_fut,
         pvcs_fut,
@@ -83,6 +92,8 @@ pub async fn collect(
     let statefulsets = soft_unwrap("statefulsets", statefulsets);
     let daemonsets = soft_unwrap("daemonsets", daemonsets);
     let pods = soft_unwrap("pods", pods);
+    let mut services = soft_unwrap("services", services);
+    let mut ingresses = soft_unwrap("ingresses", ingresses);
     let storage_classes = soft_unwrap("storageclasses", storage_classes);
     let pvs = soft_unwrap("persistentvolumes", pvs);
     let pvcs = soft_unwrap("persistentvolumeclaims", pvcs);
@@ -98,6 +109,12 @@ pub async fn collect(
         daemonsets: daemonsets.into_iter().map(map_daemonset).collect(),
     };
     let pod_infos = pods.into_iter().map(map_pod).collect();
+    sort_services_for_snapshot(&mut services);
+    sort_ingresses_for_snapshot(&mut ingresses);
+    let network = NetworkInventory {
+        services: services.into_iter().map(map_service).collect(),
+        ingresses: ingresses.into_iter().map(map_ingress).collect(),
+    };
     let storage = StorageInventory {
         storage_classes: storage_classes.into_iter().map(map_storage_class).collect(),
         persistent_volumes: pvs.into_iter().map(map_persistent_volume).collect(),
@@ -120,6 +137,7 @@ pub async fn collect(
         ns_infos,
         workloads,
         pod_infos,
+        network,
         storage,
         event_infos,
     ))
@@ -316,6 +334,229 @@ fn map_pod(p: Pod) -> PodInfo {
         owner_name: owner.as_ref().map(|o| o.name.clone()),
         containers,
     }
+}
+
+fn map_service(svc: Service) -> ServiceInfo {
+    let namespace = svc.metadata.namespace.unwrap_or_default();
+    let name = svc.metadata.name.unwrap_or_default();
+    let spec = svc.spec;
+    let status = svc.status;
+
+    let type_ = spec
+        .as_ref()
+        .and_then(|s| s.type_.clone())
+        .unwrap_or_else(|| "ClusterIP".into());
+    let cluster_ip = spec.as_ref().and_then(|s| s.cluster_ip.clone());
+    let mut external_ips = spec
+        .as_ref()
+        .and_then(|s| s.external_ips.clone())
+        .unwrap_or_default();
+    external_ips.sort();
+
+    let mut selector = spec
+        .as_ref()
+        .and_then(|s| s.selector.clone())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(key, value)| KV { key, value })
+        .collect::<Vec<_>>();
+    selector.sort_by(|a, b| a.key.cmp(&b.key).then_with(|| a.value.cmp(&b.value)));
+
+    let mut ports = spec
+        .as_ref()
+        .and_then(|s| s.ports.clone())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|p| ServicePortInfo {
+            name: p.name,
+            protocol: p.protocol,
+            port: p.port,
+            target_port: p.target_port.map(format_int_or_string),
+            node_port: p.node_port,
+        })
+        .collect::<Vec<_>>();
+    ports.sort_by(|a, b| {
+        a.port
+            .cmp(&b.port)
+            .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.protocol.cmp(&b.protocol))
+    });
+
+    let mut load_balancer_ingress = status
+        .and_then(|st| st.load_balancer)
+        .and_then(|lb| lb.ingress)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|entry| {
+            entry
+                .hostname
+                .or(entry.ip)
+                .or(entry.ip_mode)
+                .filter(|value| !value.is_empty())
+        })
+        .collect::<Vec<_>>();
+    load_balancer_ingress.sort();
+
+    ServiceInfo {
+        namespace,
+        name,
+        type_,
+        cluster_ip,
+        external_ips,
+        selector,
+        ports,
+        load_balancer_ingress,
+    }
+}
+
+fn map_ingress(ingress: Ingress) -> IngressInfo {
+    let namespace = ingress.metadata.namespace.unwrap_or_default();
+    let name = ingress.metadata.name.unwrap_or_default();
+    let spec = ingress.spec;
+    let status = ingress.status;
+
+    let class_name = spec.as_ref().and_then(|s| s.ingress_class_name.clone());
+
+    let mut hosts = spec
+        .as_ref()
+        .and_then(|s| s.rules.clone())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|rule| rule.host)
+        .collect::<Vec<_>>();
+    hosts.sort();
+    hosts.dedup();
+
+    let mut rules = Vec::new();
+    for rule in spec
+        .as_ref()
+        .and_then(|s| s.rules.clone())
+        .unwrap_or_default()
+    {
+        let host = rule.host;
+        if let Some(http) = rule.http {
+            for path in http.paths {
+                let backend_service = path.backend.service.as_ref().map(|s| s.name.clone());
+                let backend_port = path
+                    .backend
+                    .service
+                    .and_then(|s| s.port)
+                    .map(|p| match (p.name, p.number) {
+                        (Some(name), _) => name,
+                        (None, Some(number)) => number.to_string(),
+                        (None, None) => String::new(),
+                    })
+                    .filter(|s| !s.is_empty());
+                rules.push(IngressRuleInfo {
+                    host: host.clone(),
+                    path: path.path,
+                    path_type: Some(path.path_type),
+                    backend_service,
+                    backend_port,
+                });
+            }
+        } else {
+            rules.push(IngressRuleInfo {
+                host,
+                path: None,
+                path_type: None,
+                backend_service: None,
+                backend_port: None,
+            });
+        }
+    }
+    rules.sort_by(|a, b| {
+        a.host
+            .cmp(&b.host)
+            .then_with(|| a.path.cmp(&b.path))
+            .then_with(|| a.backend_service.cmp(&b.backend_service))
+            .then_with(|| a.backend_port.cmp(&b.backend_port))
+    });
+
+    let mut tls = spec
+        .as_ref()
+        .and_then(|s| s.tls.clone())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|entry| {
+            let mut tls_hosts = entry.hosts.unwrap_or_default();
+            tls_hosts.sort();
+            IngressTlsInfo {
+                hosts: tls_hosts,
+                secret_name: entry.secret_name,
+            }
+        })
+        .collect::<Vec<_>>();
+    tls.sort_by(|a, b| {
+        a.secret_name
+            .cmp(&b.secret_name)
+            .then_with(|| a.hosts.cmp(&b.hosts))
+    });
+
+    let mut load_balancer_ingress = status
+        .and_then(|st| st.load_balancer)
+        .and_then(|lb| lb.ingress)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|entry| {
+            entry
+                .hostname
+                .or(entry.ip)
+                .filter(|value| !value.is_empty())
+        })
+        .collect::<Vec<_>>();
+    load_balancer_ingress.sort();
+
+    IngressInfo {
+        namespace,
+        name,
+        class_name,
+        hosts,
+        rules,
+        tls,
+        load_balancer_ingress,
+    }
+}
+
+fn format_int_or_string(value: IntOrString) -> String {
+    match value {
+        IntOrString::Int(number) => number.to_string(),
+        IntOrString::String(text) => text,
+    }
+}
+
+fn sort_services_for_snapshot(services: &mut [Service]) {
+    services.sort_by(|a, b| {
+        a.metadata
+            .namespace
+            .as_deref()
+            .unwrap_or_default()
+            .cmp(b.metadata.namespace.as_deref().unwrap_or_default())
+            .then_with(|| {
+                a.metadata
+                    .name
+                    .as_deref()
+                    .unwrap_or_default()
+                    .cmp(b.metadata.name.as_deref().unwrap_or_default())
+            })
+    });
+}
+
+fn sort_ingresses_for_snapshot(ingresses: &mut [Ingress]) {
+    ingresses.sort_by(|a, b| {
+        a.metadata
+            .namespace
+            .as_deref()
+            .unwrap_or_default()
+            .cmp(b.metadata.namespace.as_deref().unwrap_or_default())
+            .then_with(|| {
+                a.metadata
+                    .name
+                    .as_deref()
+                    .unwrap_or_default()
+                    .cmp(b.metadata.name.as_deref().unwrap_or_default())
+            })
+    });
 }
 
 fn pod_age_seconds(
@@ -526,4 +767,136 @@ fn truncate_chars(input: &str, max_chars: usize) -> String {
         out.push_str("...");
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn map_service_extracts_selector_ports_and_lb() {
+        let service: Service = serde_json::from_value(json!({
+            "apiVersion": "v1",
+            "kind": "Service",
+            "metadata": {"name": "api", "namespace": "prod"},
+            "spec": {
+                "type": "LoadBalancer",
+                "clusterIP": "10.0.0.10",
+                "externalIPs": ["203.0.113.10"],
+                "selector": {"app": "api"},
+                "ports": [
+                    {"name": "http", "protocol": "TCP", "port": 80, "targetPort": 8080, "nodePort": 30080}
+                ]
+            },
+            "status": {
+                "loadBalancer": {
+                    "ingress": [{"hostname": "lb.example.com"}, {"ip": "34.12.10.9"}]
+                }
+            }
+        }))
+        .unwrap();
+
+        let mapped = map_service(service);
+        assert_eq!(mapped.namespace, "prod");
+        assert_eq!(mapped.name, "api");
+        assert_eq!(mapped.type_, "LoadBalancer");
+        assert_eq!(mapped.cluster_ip.as_deref(), Some("10.0.0.10"));
+        assert_eq!(mapped.external_ips, vec!["203.0.113.10"]);
+        assert_eq!(mapped.selector.len(), 1);
+        assert_eq!(mapped.selector[0].key, "app");
+        assert_eq!(mapped.selector[0].value, "api");
+        assert_eq!(mapped.ports.len(), 1);
+        assert_eq!(mapped.ports[0].port, 80);
+        assert_eq!(mapped.ports[0].target_port.as_deref(), Some("8080"));
+        assert_eq!(mapped.load_balancer_ingress.len(), 2);
+    }
+
+    #[test]
+    fn map_ingress_extracts_rules_tls_and_lb() {
+        let ingress: Ingress = serde_json::from_value(json!({
+            "apiVersion": "networking.k8s.io/v1",
+            "kind": "Ingress",
+            "metadata": {"name": "web", "namespace": "prod"},
+            "spec": {
+                "ingressClassName": "nginx",
+                "rules": [
+                    {
+                        "host": "example.com",
+                        "http": {
+                            "paths": [
+                                {
+                                    "path": "/",
+                                    "pathType": "Prefix",
+                                    "backend": {
+                                        "service": {
+                                            "name": "web-svc",
+                                            "port": {"number": 80}
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ],
+                "tls": [
+                    {"hosts": ["example.com"], "secretName": "web-tls"}
+                ]
+            },
+            "status": {
+                "loadBalancer": {
+                    "ingress": [{"ip": "34.118.20.1"}]
+                }
+            }
+        }))
+        .unwrap();
+
+        let mapped = map_ingress(ingress);
+        assert_eq!(mapped.namespace, "prod");
+        assert_eq!(mapped.name, "web");
+        assert_eq!(mapped.class_name.as_deref(), Some("nginx"));
+        assert_eq!(mapped.hosts, vec!["example.com"]);
+        assert_eq!(mapped.rules.len(), 1);
+        assert_eq!(mapped.rules[0].backend_service.as_deref(), Some("web-svc"));
+        assert_eq!(mapped.rules[0].backend_port.as_deref(), Some("80"));
+        assert_eq!(mapped.tls.len(), 1);
+        assert_eq!(mapped.tls[0].secret_name.as_deref(), Some("web-tls"));
+        assert_eq!(mapped.load_balancer_ingress, vec!["34.118.20.1"]);
+    }
+
+    #[test]
+    fn map_service_handles_missing_spec() {
+        let service: Service = serde_json::from_value(json!({
+            "apiVersion": "v1",
+            "kind": "Service",
+            "metadata": {"name": "headless", "namespace": "prod"}
+        }))
+        .unwrap();
+
+        let mapped = map_service(service);
+        assert_eq!(mapped.type_, "ClusterIP");
+        assert!(mapped.cluster_ip.is_none());
+        assert!(mapped.external_ips.is_empty());
+        assert!(mapped.selector.is_empty());
+        assert!(mapped.ports.is_empty());
+    }
+
+    #[test]
+    fn map_ingress_handles_missing_rules_and_tls() {
+        let ingress: Ingress = serde_json::from_value(json!({
+            "apiVersion": "networking.k8s.io/v1",
+            "kind": "Ingress",
+            "metadata": {"name": "web", "namespace": "prod"},
+            "spec": {
+                "ingressClassName": "nginx"
+            }
+        }))
+        .unwrap();
+
+        let mapped = map_ingress(ingress);
+        assert_eq!(mapped.class_name.as_deref(), Some("nginx"));
+        assert!(mapped.hosts.is_empty());
+        assert!(mapped.rules.is_empty());
+        assert!(mapped.tls.is_empty());
+    }
 }

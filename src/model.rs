@@ -13,6 +13,7 @@ pub struct InventorySnapshot {
     pub namespaces: Vec<NamespaceInfo>,
     pub workloads: Workloads,
     pub pods: Vec<PodInfo>,
+    pub network: NetworkInventory,
     pub storage: StorageInventory,
     pub events: Vec<EventInfo>,
 }
@@ -62,6 +63,60 @@ pub struct Workloads {
     pub deployments: Vec<WorkloadRef>,
     pub statefulsets: Vec<WorkloadRef>,
     pub daemonsets: Vec<WorkloadRef>,
+}
+
+#[derive(Serialize, Debug, Default)]
+pub struct NetworkInventory {
+    pub services: Vec<ServiceInfo>,
+    pub ingresses: Vec<IngressInfo>,
+}
+
+#[derive(Serialize, Debug)]
+pub struct ServiceInfo {
+    pub namespace: String,
+    pub name: String,
+    #[serde(rename = "type")]
+    pub type_: String,
+    pub cluster_ip: Option<String>,
+    pub external_ips: Vec<String>,
+    pub selector: Vec<KV>,
+    pub ports: Vec<ServicePortInfo>,
+    pub load_balancer_ingress: Vec<String>,
+}
+
+#[derive(Serialize, Debug)]
+pub struct ServicePortInfo {
+    pub name: Option<String>,
+    pub protocol: Option<String>,
+    pub port: i32,
+    pub target_port: Option<String>,
+    pub node_port: Option<i32>,
+}
+
+#[derive(Serialize, Debug)]
+pub struct IngressInfo {
+    pub namespace: String,
+    pub name: String,
+    pub class_name: Option<String>,
+    pub hosts: Vec<String>,
+    pub rules: Vec<IngressRuleInfo>,
+    pub tls: Vec<IngressTlsInfo>,
+    pub load_balancer_ingress: Vec<String>,
+}
+
+#[derive(Serialize, Debug)]
+pub struct IngressRuleInfo {
+    pub host: Option<String>,
+    pub path: Option<String>,
+    pub path_type: Option<String>,
+    pub backend_service: Option<String>,
+    pub backend_port: Option<String>,
+}
+
+#[derive(Serialize, Debug)]
+pub struct IngressTlsInfo {
+    pub hosts: Vec<String>,
+    pub secret_name: Option<String>,
 }
 
 #[derive(Serialize, Debug, Default)]
