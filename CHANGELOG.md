@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.12.1...v0.13.0) (2026-05-08)
+
+
+### Features
+
+* add network resources to snapshot inventory ([#46](https://github.com/thesentinella/hub-kubernetes-agent/issues/46)) ([af02fa2](https://github.com/thesentinella/hub-kubernetes-agent/commit/af02fa2165f44061a0f0c436b7e2f194a7851a61))
+
 ## [0.12.1](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.12.0...v0.12.1) (2026-05-08)
 
 
