@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.1](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.12.0...v0.12.1) (2026-05-08)
+
+
+### Bug Fixes
+
+* add guarded update_agent image rollout command ([#44](https://github.com/thesentinella/hub-kubernetes-agent/issues/44)) ([160849b](https://github.com/thesentinella/hub-kubernetes-agent/commit/160849b6f8b95cfbd56d86eb37a5b379237768c8))
+
 ## [0.12.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.11.1...v0.12.0) (2026-05-08)
 
 
