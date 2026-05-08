@@ -147,6 +147,7 @@ async fn build_and_send(cfg: &Config, kube: &KubeClient, hub: &HubClient) -> Res
             pod_name: cfg.pod_name.clone(),
             pod_namespace: cfg.pod_namespace.clone(),
             node_name: cfg.node_name.clone(),
+            actions_enabled: cfg.actions_enabled,
         },
         cluster_id: cfg.cluster_id.clone(),
         timestamp_ms: now_ms(),
