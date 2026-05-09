@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.16.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.15.0...v0.16.0) (2026-05-09)
+
+
+### Features
+
+* improve container technology classification from image metadata ([#56](https://github.com/thesentinella/hub-kubernetes-agent/issues/56)) ([6b19910](https://github.com/thesentinella/hub-kubernetes-agent/commit/6b199103a7ef934026e77210aa83207e14d463c1))
+
 ## [0.15.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.14.0...v0.15.0) (2026-05-09)
 
 
