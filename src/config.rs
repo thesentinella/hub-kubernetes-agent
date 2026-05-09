@@ -25,6 +25,9 @@ pub struct Config {
     /// Master switch for action execution. Read-only when false.
     pub actions_enabled: bool,
 
+    /// Enables cluster-wide secret metadata/key-name collection.
+    pub collect_secrets: bool,
+
     /// HTTP request timeout to the Hub.
     pub http_timeout: Duration,
 
@@ -72,6 +75,7 @@ impl Config {
             .ok()
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
+        let collect_secrets = env_flag("COLLECT_SECRETS");
 
         let pod_name = env::var("POD_NAME").unwrap_or_else(|_| "unknown".to_string());
         let pod_namespace = env::var("POD_NAMESPACE").unwrap_or_else(|_| "default".to_string());
@@ -88,6 +92,7 @@ impl Config {
             collect_interval,
             poll_wait,
             actions_enabled,
+            collect_secrets,
             http_timeout,
             http_debug,
             http_debug_bodies,
@@ -145,6 +150,7 @@ mod tests {
             "AGENT_HTTP_DEBUG",
             "AGENT_HTTP_DEBUG_BODIES",
             "ACTIONS_ENABLED",
+            "COLLECT_SECRETS",
             "POD_NAME",
             "POD_NAMESPACE",
             "NODE_NAME",
@@ -295,6 +301,7 @@ mod tests {
                     cfg.actions_enabled,
                     "expected true for ACTIONS_ENABLED={val}"
                 );
+                assert!(!cfg.collect_secrets);
             }
             env::remove_var("ACTIONS_ENABLED");
             clear_required();
@@ -309,6 +316,26 @@ mod tests {
             set_required("https://hub.example.com", "cluster-1");
             let cfg = Config::from_env().unwrap();
             assert!(!cfg.actions_enabled);
+            assert!(!cfg.collect_secrets);
+            clear_required();
+        }
+    }
+
+    #[test]
+    fn collect_secrets_true_values() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        unsafe {
+            reset_env();
+            set_required("https://hub.example.com", "cluster-1");
+            for val in ["true", "1"] {
+                env::set_var("COLLECT_SECRETS", val);
+                let cfg = Config::from_env().unwrap();
+                assert!(
+                    cfg.collect_secrets,
+                    "expected true for COLLECT_SECRETS={val}"
+                );
+            }
+            env::remove_var("COLLECT_SECRETS");
             clear_required();
         }
     }

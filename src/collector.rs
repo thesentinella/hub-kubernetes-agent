@@ -5,7 +5,8 @@ use crate::tech;
 use anyhow::Result;
 use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, StatefulSet};
 use k8s_openapi::api::core::v1::{
-    Event, Namespace, Node, PersistentVolume, PersistentVolumeClaim, Pod, Service,
+    ConfigMap, Event, Namespace, Node, PersistentVolume, PersistentVolumeClaim, Pod, Secret,
+    Service,
 };
 use k8s_openapi::api::networking::v1::Ingress;
 use k8s_openapi::api::storage::v1::StorageClass;
@@ -18,12 +19,14 @@ use tracing::warn;
 
 pub async fn collect(
     client: &Client,
+    collect_secrets: bool,
 ) -> Result<(
     ClusterInfo,
     Vec<NamespaceInfo>,
     Workloads,
     Vec<PodInfo>,
     NetworkInventory,
+    ConfigurationInventory,
     StorageInventory,
     Vec<EventInfo>,
     Vec<PodLogInfo>,
@@ -39,6 +42,14 @@ pub async fn collect(
     let pods_fut = list_all::<Pod>(client, &lp);
     let services_fut = list_all::<Service>(client, &lp);
     let ingresses_fut = list_all::<Ingress>(client, &lp);
+    let configmaps_fut = list_all::<ConfigMap>(client, &lp);
+    let secrets_fut = async {
+        if collect_secrets {
+            list_all::<Secret>(client, &lp).await
+        } else {
+            Ok(Vec::new())
+        }
+    };
     let storage_classes_fut = list_all::<StorageClass>(client, &lp);
     let pvs_fut = list_all::<PersistentVolume>(client, &lp);
     let pvcs_fut = list_all::<PersistentVolumeClaim>(client, &lp);
@@ -62,6 +73,8 @@ pub async fn collect(
         pods,
         services,
         ingresses,
+        configmaps,
+        secrets,
         storage_classes,
         pvs,
         pvcs,
@@ -78,6 +91,8 @@ pub async fn collect(
         pods_fut,
         services_fut,
         ingresses_fut,
+        configmaps_fut,
+        secrets_fut,
         storage_classes_fut,
         pvs_fut,
         pvcs_fut,
@@ -95,6 +110,8 @@ pub async fn collect(
     let pods = soft_unwrap("pods", pods);
     let mut services = soft_unwrap("services", services);
     let mut ingresses = soft_unwrap("ingresses", ingresses);
+    let mut configmaps = soft_unwrap("configmaps", configmaps);
+    let mut secrets = soft_unwrap("secrets", secrets);
     let storage_classes = soft_unwrap("storageclasses", storage_classes);
     let pvs = soft_unwrap("persistentvolumes", pvs);
     let pvcs = soft_unwrap("persistentvolumeclaims", pvcs);
@@ -116,6 +133,12 @@ pub async fn collect(
     let network = NetworkInventory {
         services: services.into_iter().map(map_service).collect(),
         ingresses: ingresses.into_iter().map(map_ingress).collect(),
+    };
+    sort_configmaps_for_snapshot(&mut configmaps);
+    sort_secrets_for_snapshot(&mut secrets);
+    let configuration = ConfigurationInventory {
+        configmaps: configmaps.into_iter().map(map_configmap).collect(),
+        secrets: secrets.into_iter().map(map_secret).collect(),
     };
     let storage = StorageInventory {
         storage_classes: storage_classes.into_iter().map(map_storage_class).collect(),
@@ -140,6 +163,7 @@ pub async fn collect(
         workloads,
         pod_infos,
         network,
+        configuration,
         storage,
         event_infos,
         pod_logs,
@@ -466,18 +490,61 @@ fn map_node(n: &Node) -> NodeInfo {
 }
 
 fn map_namespace(n: Namespace) -> NamespaceInfo {
-    let labels = n
-        .metadata
-        .labels
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(k, v)| KV { key: k, value: v })
-        .collect();
+    let labels = map_metadata_pairs(n.metadata.labels.unwrap_or_default());
     NamespaceInfo {
         name: n.metadata.name.unwrap_or_default(),
         phase: n.status.and_then(|s| s.phase),
         labels,
     }
+}
+
+fn map_configmap(cm: ConfigMap) -> ConfigMapInfo {
+    ConfigMapInfo {
+        namespace: cm.metadata.namespace.unwrap_or_default(),
+        name: cm.metadata.name.unwrap_or_default(),
+        immutable: cm.immutable,
+        labels: map_metadata_pairs(cm.metadata.labels.unwrap_or_default()),
+        annotations: map_metadata_pairs(cm.metadata.annotations.unwrap_or_default()),
+        data_keys: map_data_keys(cm.data.unwrap_or_default()),
+        binary_data_keys: map_data_keys(cm.binary_data.unwrap_or_default()),
+    }
+}
+
+fn map_secret(secret: Secret) -> SecretInfo {
+    SecretInfo {
+        namespace: secret.metadata.namespace.unwrap_or_default(),
+        name: secret.metadata.name.unwrap_or_default(),
+        type_: secret.type_,
+        immutable: secret.immutable,
+        labels: map_metadata_pairs(secret.metadata.labels.unwrap_or_default()),
+        annotations: map_metadata_pairs(secret.metadata.annotations.unwrap_or_default()),
+        data_keys: map_data_keys(secret.data.unwrap_or_default()),
+    }
+}
+
+fn map_metadata_pairs(map: BTreeMap<String, String>) -> Vec<KV> {
+    sanitize_metadata_map(map)
+        .into_iter()
+        .map(|(k, v)| KV { key: k, value: v })
+        .collect()
+}
+
+const METADATA_ANNOTATION_DENYLIST_EXACT: &[&str] = &[];
+const METADATA_ANNOTATION_DENYLIST_PREFIX: &[&str] = &[];
+
+fn sanitize_metadata_map(map: BTreeMap<String, String>) -> BTreeMap<String, String> {
+    map.into_iter()
+        .filter(|(key, _)| !METADATA_ANNOTATION_DENYLIST_EXACT.contains(&key.as_str()))
+        .filter(|(key, _)| {
+            !METADATA_ANNOTATION_DENYLIST_PREFIX
+                .iter()
+                .any(|prefix| key.starts_with(prefix))
+        })
+        .collect()
+}
+
+fn map_data_keys<T>(map: BTreeMap<String, T>) -> Vec<String> {
+    map.into_keys().collect()
 }
 
 fn map_deployment(d: Deployment) -> WorkloadRef {
@@ -752,6 +819,40 @@ fn sort_services_for_snapshot(services: &mut [Service]) {
 
 fn sort_ingresses_for_snapshot(ingresses: &mut [Ingress]) {
     ingresses.sort_by(|a, b| {
+        a.metadata
+            .namespace
+            .as_deref()
+            .unwrap_or_default()
+            .cmp(b.metadata.namespace.as_deref().unwrap_or_default())
+            .then_with(|| {
+                a.metadata
+                    .name
+                    .as_deref()
+                    .unwrap_or_default()
+                    .cmp(b.metadata.name.as_deref().unwrap_or_default())
+            })
+    });
+}
+
+fn sort_configmaps_for_snapshot(configmaps: &mut [ConfigMap]) {
+    configmaps.sort_by(|a, b| {
+        a.metadata
+            .namespace
+            .as_deref()
+            .unwrap_or_default()
+            .cmp(b.metadata.namespace.as_deref().unwrap_or_default())
+            .then_with(|| {
+                a.metadata
+                    .name
+                    .as_deref()
+                    .unwrap_or_default()
+                    .cmp(b.metadata.name.as_deref().unwrap_or_default())
+            })
+    });
+}
+
+fn sort_secrets_for_snapshot(secrets: &mut [Secret]) {
+    secrets.sort_by(|a, b| {
         a.metadata
             .namespace
             .as_deref()
@@ -1078,6 +1179,59 @@ mod tests {
         let out = truncate_chars(&input, 20);
         assert_eq!(out.chars().count(), 20);
         assert!(out.ends_with("..."));
+    }
+
+    #[test]
+    fn map_configmap_collects_keys_and_metadata_only() {
+        let cm: ConfigMap = serde_json::from_value(json!({
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {
+                "namespace": "prod",
+                "name": "app-config",
+                "labels": {"app": "api"},
+                "annotations": {"checksum/config": "abc123"}
+            },
+            "immutable": true,
+            "data": {"A": "secret-ish", "B": "value"},
+            "binaryData": {"BIN": "AA=="}
+        }))
+        .unwrap();
+
+        let mapped = map_configmap(cm);
+        assert_eq!(mapped.namespace, "prod");
+        assert_eq!(mapped.name, "app-config");
+        assert_eq!(mapped.immutable, Some(true));
+        assert_eq!(mapped.labels.len(), 1);
+        assert_eq!(mapped.annotations.len(), 1);
+        assert_eq!(mapped.data_keys, vec!["A", "B"]);
+        assert_eq!(mapped.binary_data_keys, vec!["BIN"]);
+    }
+
+    #[test]
+    fn map_secret_collects_key_names_without_values() {
+        let secret: Secret = serde_json::from_value(json!({
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {
+                "namespace": "prod",
+                "name": "db-auth",
+                "annotations": {"owner": "platform"}
+            },
+            "type": "Opaque",
+            "data": {
+                "password": "c2VjcmV0",
+                "username": "YWRtaW4="
+            }
+        }))
+        .unwrap();
+
+        let mapped = map_secret(secret);
+        assert_eq!(mapped.namespace, "prod");
+        assert_eq!(mapped.name, "db-auth");
+        assert_eq!(mapped.type_.as_deref(), Some("Opaque"));
+        assert_eq!(mapped.data_keys, vec!["password", "username"]);
+        assert_eq!(mapped.annotations.len(), 1);
     }
 
     #[test]
