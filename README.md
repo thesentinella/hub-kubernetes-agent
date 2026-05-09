@@ -208,6 +208,7 @@ Recommended `HUB_URL` is `https://api.hub.sentinel.la`.
 | `HUB_URL` | ConfigMap | required |
 | `CLUSTER_ID` | ConfigMap | required |
 | `HUB_API_KEY` | Secret | optional |
+| `AGENT_VERSION_OVERRIDE` | ConfigMap | optional |
 | `COLLECT_INTERVAL_SECS` | ConfigMap | `60` |
 | `POLL_WAIT_SECS` | ConfigMap | `30` |
 | `HTTP_TIMEOUT_SECS` | ConfigMap | `20` |
@@ -219,6 +220,8 @@ Recommended `HUB_URL` is `https://api.hub.sentinel.la`.
 | `AGENT_LOG` | ConfigMap | `info` |
 | `RUST_LOG` | ConfigMap | optional legacy alias |
 | `POD_NAME`, `POD_NAMESPACE`, `NODE_NAME` | downward API | auto |
+
+When `AGENT_VERSION_OVERRIDE` is set to a non-empty value, snapshots report that value as `agent.version`. When unset or empty, the agent reports the compile-time package version.
 
 ## Build
 

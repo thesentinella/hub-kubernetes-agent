@@ -13,6 +13,9 @@ pub struct Config {
     /// API key for Hub authentication. Must have the `shub_` prefix.
     pub api_key: Option<String>,
 
+    /// Optional override for the reported agent version in snapshots.
+    pub agent_version_override: Option<String>,
+
     /// How often the leader collects and ships cluster inventory.
     pub collect_interval: Duration,
 
@@ -55,6 +58,7 @@ impl Config {
         let cluster_id = env::var("CLUSTER_ID").context("CLUSTER_ID not set")?;
 
         let api_key = env::var("HUB_API_KEY").ok().filter(|s| !s.is_empty());
+        let agent_version_override = parse_non_empty_env("AGENT_VERSION_OVERRIDE");
 
         let collect_interval = parse_secs("COLLECT_INTERVAL_SECS", 60);
         let poll_wait = parse_secs("POLL_WAIT_SECS", 30);
@@ -80,6 +84,7 @@ impl Config {
             hub_url: hub_url.trim_end_matches('/').to_string(),
             cluster_id,
             api_key,
+            agent_version_override,
             collect_interval,
             poll_wait,
             actions_enabled,
@@ -111,6 +116,14 @@ fn env_flag(var: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn parse_non_empty_env(var: &str) -> Option<String> {
+    env::var(var)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .filter(|value| value.len() <= 128)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,6 +137,7 @@ mod tests {
             "HUB_URL",
             "CLUSTER_ID",
             "HUB_API_KEY",
+            "AGENT_VERSION_OVERRIDE",
             "COLLECT_INTERVAL_SECS",
             "POLL_WAIT_SECS",
             "HTTP_TIMEOUT_SECS",
@@ -222,6 +236,48 @@ mod tests {
             let cfg = Config::from_env().unwrap();
             assert_eq!(cfg.api_key.as_deref(), Some("shub_test123"));
             env::remove_var("HUB_API_KEY");
+            clear_required();
+        }
+    }
+
+    #[test]
+    fn agent_version_override_set() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        unsafe {
+            reset_env();
+            set_required("https://hub.example.com", "cluster-1");
+            env::set_var("AGENT_VERSION_OVERRIDE", "dev");
+            let cfg = Config::from_env().unwrap();
+            assert_eq!(cfg.agent_version_override.as_deref(), Some("dev"));
+            env::remove_var("AGENT_VERSION_OVERRIDE");
+            clear_required();
+        }
+    }
+
+    #[test]
+    fn agent_version_override_empty_becomes_none() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        unsafe {
+            reset_env();
+            set_required("https://hub.example.com", "cluster-1");
+            env::set_var("AGENT_VERSION_OVERRIDE", "   ");
+            let cfg = Config::from_env().unwrap();
+            assert!(cfg.agent_version_override.is_none());
+            env::remove_var("AGENT_VERSION_OVERRIDE");
+            clear_required();
+        }
+    }
+
+    #[test]
+    fn agent_version_override_too_long_becomes_none() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        unsafe {
+            reset_env();
+            set_required("https://hub.example.com", "cluster-1");
+            env::set_var("AGENT_VERSION_OVERRIDE", "x".repeat(129));
+            let cfg = Config::from_env().unwrap();
+            assert!(cfg.agent_version_override.is_none());
+            env::remove_var("AGENT_VERSION_OVERRIDE");
             clear_required();
         }
     }

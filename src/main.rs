@@ -144,7 +144,7 @@ async fn build_and_send(cfg: &Config, kube: &KubeClient, hub: &HubClient) -> Res
         schema_version: 1,
         agent: AgentInfo {
             name: AGENT_NAME,
-            version: env!("CARGO_PKG_VERSION"),
+            version: reported_agent_version(cfg),
             pod_name: cfg.pod_name.clone(),
             pod_namespace: cfg.pod_namespace.clone(),
             node_name: cfg.node_name.clone(),
@@ -161,6 +161,12 @@ async fn build_and_send(cfg: &Config, kube: &KubeClient, hub: &HubClient) -> Res
         events,
     };
     hub.send_snapshot(&snap).await
+}
+
+fn reported_agent_version(cfg: &Config) -> String {
+    cfg.agent_version_override
+        .clone()
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string())
 }
 
 async fn command_loop(hub: Arc<HubClient>, executor: Arc<Executor>) {
@@ -264,4 +270,41 @@ fn now_ms() -> u128 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_config(version_override: Option<&str>) -> Config {
+        Config {
+            hub_url: "https://api.hub.sentinel.la".into(),
+            cluster_id: "cluster-dev".into(),
+            api_key: None,
+            agent_version_override: version_override.map(ToString::to_string),
+            collect_interval: Duration::from_secs(60),
+            poll_wait: Duration::from_secs(30),
+            actions_enabled: false,
+            http_timeout: Duration::from_secs(20),
+            http_debug: false,
+            http_debug_bodies: false,
+            pod_name: "pod-1".into(),
+            pod_namespace: "sentinella".into(),
+            node_name: "node-1".into(),
+            lease_name: "lease".into(),
+            lease_ttl: Duration::from_secs(30),
+        }
+    }
+
+    #[test]
+    fn reported_agent_version_uses_override_when_set() {
+        let cfg = test_config(Some("dev"));
+        assert_eq!(reported_agent_version(&cfg), "dev");
+    }
+
+    #[test]
+    fn reported_agent_version_falls_back_to_package_version() {
+        let cfg = test_config(None);
+        assert_eq!(reported_agent_version(&cfg), env!("CARGO_PKG_VERSION"));
+    }
 }

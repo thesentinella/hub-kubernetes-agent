@@ -21,7 +21,7 @@ pub struct InventorySnapshot {
 #[derive(Serialize, Debug)]
 pub struct AgentInfo {
     pub name: &'static str,
-    pub version: &'static str,
+    pub version: String,
     pub pod_name: String,
     pub pod_namespace: String,
     pub node_name: String,
