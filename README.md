@@ -14,6 +14,7 @@ Inventory collector and (future) action executor for Kubernetes and OpenShift cl
   - **Network**: Services (type, selector, ports, exposure metadata) and Ingresses (class, hosts/paths/backends, TLS summary, load balancer status hints).
   - **Storage**: StorageClasses (name/provisioner/safe parameter subset), PersistentVolumes, PersistentVolumeClaims, VolumeSnapshotClasses, and VolumeSnapshots.
   - **Events**: Kubernetes `Warning` and `Normal` events with bounded payload (max 500 events per snapshot, event message truncated to 500 chars).
+  - **Pod logs (problematic only)**: bounded logs for problematic containers (for example `CrashLoopBackOff`, non-zero exits, restart loops, and `Pending` pull/config failures such as `ImagePullBackOff` and `ErrImagePull`).
 - Maintains an open long-poll against the Hub for command delivery. **Action execution is disabled by default** (`ACTIONS_ENABLED=false`); the agent replies with `skipped` and an explanatory message to any command received. When actions are explicitly enabled, the agent can preview workload resource patches with a Kubernetes server-side dry-run.
 - Snapshot agent metadata includes whether actions are enabled (`agent.actions_enabled`) so the Hub can accurately reflect agent execution capability.
 
@@ -170,6 +171,12 @@ The agent supports route compatibility by trying both legacy (`/v1/...`) and API
 ### POST `/v1/clusters/{cluster_id}/inventory`
 
 Body: `InventorySnapshot` (see `src/model.rs`). Respond `2xx` to accept. `4xx` is not retried (except `408`/`429`); `5xx` and network errors are (3 attempts: 0s/2s/5s).
+
+`InventorySnapshot` includes a bounded `pod_logs` section. Collection is fail-soft (log fetch errors do not fail full snapshot collection). Limits:
+- max problematic pods: 20
+- max containers per pod: 2
+- max lines per container fetch: 80
+- max chars per line: 500
 
 ### GET `/v1/clusters/{cluster_id}/commands/poll?wait=30s`
 
