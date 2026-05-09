@@ -64,6 +64,8 @@ If heavy bidirectional streaming is needed later (live logs, interactive exec), 
 
 Unknown images are not discarded — they return `vendor=null`, `product=<image-name>`, `version=<tag>` so the Hub can group and surface frequently seen images for promotion to vendor/product later.
 
+Technology detection in this release is intentionally image-derived only. Process-level/runtime inspection is tracked separately.
+
 Unit tests are included in `tech.rs`. Extending coverage is one entry in the `RULES` table.
 
 ### Actions — designed for gradual rollout
