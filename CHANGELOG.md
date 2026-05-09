@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.13.2...v0.14.0) (2026-05-09)
+
+
+### Features
+
+* add bounded problematic pod logs to snapshots ([#52](https://github.com/thesentinella/hub-kubernetes-agent/issues/52)) ([8b8aaa7](https://github.com/thesentinella/hub-kubernetes-agent/commit/8b8aaa724d5480df92dfcbbecab9111e84141edf))
+
 ## [0.13.2](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.13.1...v0.13.2) (2026-05-09)
 
 
