@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.2](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.13.1...v0.13.2) (2026-05-09)
+
+
+### Bug Fixes
+
+* support AGENT_VERSION_OVERRIDE for snapshot agent version ([#50](https://github.com/thesentinella/hub-kubernetes-agent/issues/50)) ([d23b096](https://github.com/thesentinella/hub-kubernetes-agent/commit/d23b096df617b5d04b2b9c28bacef6ce6197a7ac))
+
 ## [0.13.1](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.13.0...v0.13.1) (2026-05-08)
 
 
