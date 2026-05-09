@@ -16,6 +16,7 @@ pub struct InventorySnapshot {
     pub network: NetworkInventory,
     pub storage: StorageInventory,
     pub events: Vec<EventInfo>,
+    pub pod_logs: Vec<PodLogInfo>,
 }
 
 #[derive(Serialize, Debug)]
@@ -197,6 +198,16 @@ pub struct EventInfo {
     pub reporting_controller: Option<String>,
     pub reporting_instance: Option<String>,
     pub involved_object: InvolvedObjectInfo,
+}
+
+#[derive(Serialize, Debug)]
+pub struct PodLogInfo {
+    pub namespace: String,
+    pub pod: String,
+    pub container: String,
+    pub source: String,
+    pub reason: String,
+    pub lines: Vec<String>,
 }
 
 #[derive(Serialize, Debug, Default)]

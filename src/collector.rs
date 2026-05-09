@@ -10,7 +10,7 @@ use k8s_openapi::api::core::v1::{
 use k8s_openapi::api::networking::v1::Ingress;
 use k8s_openapi::api::storage::v1::StorageClass;
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
-use kube::api::{ApiResource, DynamicObject, ListParams};
+use kube::api::{ApiResource, DynamicObject, ListParams, LogParams};
 use kube::core::GroupVersionKind;
 use kube::{Api, Client};
 use std::collections::BTreeMap;
@@ -26,6 +26,7 @@ pub async fn collect(
     NetworkInventory,
     StorageInventory,
     Vec<EventInfo>,
+    Vec<PodLogInfo>,
 )> {
     // Concurrency: launch all list calls in parallel; fail soft on individual lists.
     let lp = ListParams::default();
@@ -108,6 +109,7 @@ pub async fn collect(
         statefulsets: statefulsets.into_iter().map(map_statefulset).collect(),
         daemonsets: daemonsets.into_iter().map(map_daemonset).collect(),
     };
+    let pod_logs = collect_problematic_pod_logs(client, &pods).await;
     let pod_infos = pods.into_iter().map(map_pod).collect();
     sort_services_for_snapshot(&mut services);
     sort_ingresses_for_snapshot(&mut ingresses);
@@ -140,7 +142,213 @@ pub async fn collect(
         network,
         storage,
         event_infos,
+        pod_logs,
     ))
+}
+
+async fn collect_problematic_pod_logs(client: &Client, pods: &[Pod]) -> Vec<PodLogInfo> {
+    let mut candidates = pods
+        .iter()
+        .flat_map(problematic_container_candidates)
+        .collect::<Vec<_>>();
+
+    candidates.sort_by(|a, b| {
+        a.namespace
+            .cmp(&b.namespace)
+            .then_with(|| a.pod.cmp(&b.pod))
+            .then_with(|| a.container.cmp(&b.container))
+    });
+
+    let mut results = Vec::new();
+    let mut total_chars = 0usize;
+    let mut pods_seen = std::collections::BTreeSet::new();
+    let mut per_pod_container_count = std::collections::BTreeMap::<(String, String), usize>::new();
+
+    for candidate in candidates {
+        let pod_key = (candidate.namespace.clone(), candidate.pod.clone());
+        if !pods_seen.contains(&pod_key) && pods_seen.len() >= MAX_LOG_PODS {
+            break;
+        }
+        let count = per_pod_container_count
+            .entry(pod_key.clone())
+            .and_modify(|c| *c += 1)
+            .or_insert(1);
+        if *count > MAX_LOG_CONTAINERS_PER_POD {
+            continue;
+        }
+        pods_seen.insert(pod_key);
+
+        if let Some(entry) = fetch_container_logs(client, &candidate, false, &mut total_chars).await
+        {
+            results.push(entry);
+        }
+        if candidate.include_previous {
+            if let Some(entry) =
+                fetch_container_logs(client, &candidate, true, &mut total_chars).await
+            {
+                results.push(entry);
+            }
+        }
+
+        if total_chars >= MAX_TOTAL_LOG_CHARS {
+            break;
+        }
+    }
+
+    results
+}
+
+async fn fetch_container_logs(
+    client: &Client,
+    candidate: &ProblematicContainerCandidate,
+    previous: bool,
+    total_chars: &mut usize,
+) -> Option<PodLogInfo> {
+    let pods_api: Api<Pod> = Api::namespaced(client.clone(), &candidate.namespace);
+    let log_params = LogParams {
+        container: Some(candidate.container.clone()),
+        previous,
+        timestamps: true,
+        tail_lines: Some(MAX_LOG_LINES as i64),
+        ..LogParams::default()
+    };
+
+    match pods_api.logs(&candidate.pod, &log_params).await {
+        Ok(logs) => {
+            if logs.trim().is_empty() {
+                return None;
+            }
+            let mut lines = Vec::new();
+            for raw in logs.lines().take(MAX_LOG_LINES) {
+                if *total_chars >= MAX_TOTAL_LOG_CHARS {
+                    break;
+                }
+                let line = truncate_chars(raw, MAX_LOG_LINE_CHARS);
+                *total_chars += line.chars().count();
+                lines.push(line);
+            }
+            if lines.is_empty() {
+                return None;
+            }
+
+            Some(PodLogInfo {
+                namespace: candidate.namespace.clone(),
+                pod: candidate.pod.clone(),
+                container: candidate.container.clone(),
+                source: if previous {
+                    "previous".to_string()
+                } else {
+                    "current".to_string()
+                },
+                reason: candidate.reason.clone(),
+                lines,
+            })
+        }
+        Err(e) => {
+            warn!(
+                namespace = %candidate.namespace,
+                pod = %candidate.pod,
+                container = %candidate.container,
+                previous,
+                error = %e,
+                "pod log collection failed"
+            );
+            None
+        }
+    }
+}
+
+#[derive(Clone)]
+struct ProblematicContainerCandidate {
+    namespace: String,
+    pod: String,
+    container: String,
+    reason: String,
+    include_previous: bool,
+}
+
+fn problematic_container_candidates(pod: &Pod) -> Vec<ProblematicContainerCandidate> {
+    let namespace = pod.metadata.namespace.clone().unwrap_or_default();
+    let pod_name = pod.metadata.name.clone().unwrap_or_default();
+    let phase = pod.status.as_ref().and_then(|s| s.phase.clone());
+
+    let mut out = Vec::new();
+    let statuses = pod
+        .status
+        .as_ref()
+        .and_then(|s| s.container_statuses.as_ref())
+        .cloned()
+        .unwrap_or_default();
+
+    for status in statuses {
+        let mut reasons = Vec::new();
+        let mut include_previous = false;
+
+        if status.restart_count > 0 {
+            reasons.push(format!("restart_count={}", status.restart_count));
+            include_previous = true;
+        }
+
+        if let Some(state) = status.state.as_ref() {
+            if let Some(waiting) = state.waiting.as_ref() {
+                let wait_reason = waiting.reason.clone().unwrap_or_default();
+                if wait_reason == "CrashLoopBackOff"
+                    || wait_reason == "ImagePullBackOff"
+                    || wait_reason == "ErrImagePull"
+                    || wait_reason == "CreateContainerConfigError"
+                    || wait_reason == "CreateContainerError"
+                {
+                    reasons.push(format!("waiting:{}", wait_reason));
+                    include_previous = include_previous || wait_reason == "CrashLoopBackOff";
+                }
+            }
+
+            if let Some(terminated) = state.terminated.as_ref() {
+                if terminated.exit_code != 0 {
+                    reasons.push(format!("terminated_exit_code={}", terminated.exit_code));
+                    include_previous = true;
+                }
+            }
+        }
+
+        if phase.as_deref() == Some("Failed") {
+            reasons.push("pod_phase=Failed".to_string());
+        }
+        if phase.as_deref() == Some("Unknown") {
+            reasons.push("pod_phase=Unknown".to_string());
+        }
+
+        if phase.as_deref() == Some("Pending") && reasons.is_empty() {
+            if let Some(state) = status.state.as_ref() {
+                if let Some(waiting) = state.waiting.as_ref() {
+                    if let Some(wait_reason) = waiting.reason.as_ref() {
+                        if wait_reason == "ImagePullBackOff"
+                            || wait_reason == "ErrImagePull"
+                            || wait_reason == "CreateContainerConfigError"
+                            || wait_reason == "CreateContainerError"
+                            || wait_reason == "ContainerCreating"
+                        {
+                            reasons.push(format!("pending_waiting:{}", wait_reason));
+                        }
+                    }
+                }
+            }
+        }
+
+        reasons.sort();
+        reasons.dedup();
+        if !reasons.is_empty() {
+            out.push(ProblematicContainerCandidate {
+                namespace: namespace.clone(),
+                pod: pod_name.clone(),
+                container: status.name,
+                reason: reasons.join(";"),
+                include_previous,
+            });
+        }
+    }
+
+    out
 }
 
 async fn list_all<K>(client: &Client, lp: &ListParams) -> Result<Vec<K>>
@@ -607,6 +815,11 @@ const STORAGE_CLASS_PARAMETER_ALLOWLIST: &[&str] = &[
 
 const MAX_EVENTS: usize = 500;
 const MAX_EVENT_MESSAGE_CHARS: usize = 500;
+const MAX_LOG_PODS: usize = 20;
+const MAX_LOG_CONTAINERS_PER_POD: usize = 2;
+const MAX_LOG_LINES: usize = 80;
+const MAX_LOG_LINE_CHARS: usize = 500;
+const MAX_TOTAL_LOG_CHARS: usize = 200_000;
 
 fn map_storage_class(sc: StorageClass) -> StorageClassInfo {
     let parameters = filter_storage_class_parameters(sc.parameters.unwrap_or_default());
@@ -773,6 +986,99 @@ fn truncate_chars(input: &str, max_chars: usize) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn problematic_container_detects_pending_pull_failure() {
+        let pod: Pod = serde_json::from_value(json!({
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {"namespace": "prod", "name": "api-123"},
+            "status": {
+                "phase": "Pending",
+                "containerStatuses": [
+                    {
+                        "name": "app",
+                        "image": "repo/app:1",
+                        "imageID": "docker://sha256:abc",
+                        "ready": false,
+                        "restartCount": 0,
+                        "state": {"waiting": {"reason": "ImagePullBackOff"}}
+                    }
+                ]
+            }
+        }))
+        .unwrap();
+
+        let candidates = problematic_container_candidates(&pod);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].container, "app");
+        assert_eq!(candidates[0].reason, "waiting:ImagePullBackOff");
+    }
+
+    #[test]
+    fn problematic_container_combines_reasons() {
+        let pod: Pod = serde_json::from_value(json!({
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {"namespace": "prod", "name": "api-123"},
+            "status": {
+                "phase": "Running",
+                "containerStatuses": [
+                    {
+                        "name": "app",
+                        "image": "repo/app:1",
+                        "imageID": "docker://sha256:abc",
+                        "ready": false,
+                        "restartCount": 3,
+                        "state": {"waiting": {"reason": "CrashLoopBackOff"}}
+                    }
+                ]
+            }
+        }))
+        .unwrap();
+
+        let candidates = problematic_container_candidates(&pod);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0].reason,
+            "restart_count=3;waiting:CrashLoopBackOff"
+        );
+        assert!(candidates[0].include_previous);
+    }
+
+    #[test]
+    fn problematic_container_skips_healthy_running() {
+        let pod: Pod = serde_json::from_value(json!({
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {"namespace": "prod", "name": "api-123"},
+            "status": {
+                "phase": "Running",
+                "containerStatuses": [
+                    {
+                        "name": "app",
+                        "image": "repo/app:1",
+                        "imageID": "docker://sha256:abc",
+                        "ready": true,
+                        "restartCount": 0,
+                        "state": {"running": {"startedAt": "2026-05-09T00:00:00Z"}}
+                    }
+                ]
+            }
+        }))
+        .unwrap();
+
+        let candidates = problematic_container_candidates(&pod);
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn truncate_chars_respects_max_length() {
+        let input = "a".repeat(1000);
+        let out = truncate_chars(&input, 20);
+        assert_eq!(out.chars().count(), 20);
+        assert!(out.ends_with("..."));
+    }
 
     #[test]
     fn map_service_extracts_selector_ports_and_lb() {
