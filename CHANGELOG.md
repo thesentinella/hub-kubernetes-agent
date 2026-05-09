@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.15.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.14.0...v0.15.0) (2026-05-09)
+
+
+### Features
+
+* collect configuration resource metadata in snapshots ([#54](https://github.com/thesentinella/hub-kubernetes-agent/issues/54)) ([be1e555](https://github.com/thesentinella/hub-kubernetes-agent/commit/be1e5553a99f6990231c94e65f123f2989851c63))
+
 ## [0.14.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.13.2...v0.14.0) (2026-05-09)
 
 
