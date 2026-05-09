@@ -28,6 +28,12 @@ pub struct Config {
     /// Enables cluster-wide secret metadata/key-name collection.
     pub collect_secrets: bool,
 
+    /// Enables Tetragon-based dependency collection from log/events.
+    pub collect_dependencies_tetragon: bool,
+
+    /// Path to Tetragon JSONL events input.
+    pub tetragon_log_path: String,
+
     /// HTTP request timeout to the Hub.
     pub http_timeout: Duration,
 
@@ -76,6 +82,9 @@ impl Config {
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
         let collect_secrets = env_flag("COLLECT_SECRETS");
+        let collect_dependencies_tetragon = env_flag("COLLECT_DEPENDENCIES_TETRAGON");
+        let tetragon_log_path = env::var("TETRAGON_LOG_PATH")
+            .unwrap_or_else(|_| "/var/run/tetragon/tetragon-events.jsonl".to_string());
 
         let pod_name = env::var("POD_NAME").unwrap_or_else(|_| "unknown".to_string());
         let pod_namespace = env::var("POD_NAMESPACE").unwrap_or_else(|_| "default".to_string());
@@ -93,6 +102,8 @@ impl Config {
             poll_wait,
             actions_enabled,
             collect_secrets,
+            collect_dependencies_tetragon,
+            tetragon_log_path,
             http_timeout,
             http_debug,
             http_debug_bodies,
@@ -151,6 +162,8 @@ mod tests {
             "AGENT_HTTP_DEBUG_BODIES",
             "ACTIONS_ENABLED",
             "COLLECT_SECRETS",
+            "COLLECT_DEPENDENCIES_TETRAGON",
+            "TETRAGON_LOG_PATH",
             "POD_NAME",
             "POD_NAMESPACE",
             "NODE_NAME",
@@ -180,6 +193,11 @@ mod tests {
             let cfg = Config::from_env().unwrap();
             assert_eq!(cfg.hub_url, "https://hub.example.com");
             assert_eq!(cfg.cluster_id, "cluster-1");
+            assert!(!cfg.collect_dependencies_tetragon);
+            assert_eq!(
+                cfg.tetragon_log_path,
+                "/var/run/tetragon/tetragon-events.jsonl"
+            );
             clear_required();
         }
     }
@@ -336,6 +354,21 @@ mod tests {
                 );
             }
             env::remove_var("COLLECT_SECRETS");
+            clear_required();
+        }
+    }
+
+    #[test]
+    fn collect_dependencies_tetragon_and_path_values() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        unsafe {
+            reset_env();
+            set_required("https://hub.example.com", "cluster-1");
+            env::set_var("COLLECT_DEPENDENCIES_TETRAGON", "true");
+            env::set_var("TETRAGON_LOG_PATH", "/tmp/tetragon.jsonl");
+            let cfg = Config::from_env().unwrap();
+            assert!(cfg.collect_dependencies_tetragon);
+            assert_eq!(cfg.tetragon_log_path, "/tmp/tetragon.jsonl");
             clear_required();
         }
     }

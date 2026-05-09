@@ -13,6 +13,7 @@ Inventory collector and (future) action executor for Kubernetes and OpenShift cl
   - **Pods**: age in seconds (`age_seconds`), each container with image, **detected technology** (vendor/product/version inferred from the image), `requests` and `limits` (CPU and memory).
   - **Configuration**: ConfigMaps metadata by default, and optional Secrets metadata when `COLLECT_SECRETS=true` (name/namespace/type/immutability/labels/annotations) plus key names only (`data_keys`, `binary_data_keys` where applicable), never raw values.
   - **Network**: Services (type, selector, ports, exposure metadata) and Ingresses (class, hosts/paths/backends, TLS summary, load balancer status hints).
+  - **Dependencies (optional)**: bounded pod/service dependency edges derived from Tetragon logs/events (`source=tetragon_logs`), including unresolved `unknown` edges when endpoint mapping is unavailable.
   - **Storage**: StorageClasses (name/provisioner/safe parameter subset), PersistentVolumes, PersistentVolumeClaims, VolumeSnapshotClasses, and VolumeSnapshots.
   - **Events**: Kubernetes `Warning` and `Normal` events with bounded payload (max 500 events per snapshot, event message truncated to 500 chars).
   - **Pod logs (problematic only)**: bounded logs for problematic containers (for example `CrashLoopBackOff`, non-zero exits, restart loops, and `Pending` pull/config failures such as `ImagePullBackOff` and `ErrImagePull`).
@@ -67,6 +68,17 @@ Unknown images are not discarded — they return `vendor=null`, `product=<image-
 Technology detection in this release is intentionally image-derived only. Process-level/runtime inspection is tracked separately.
 
 Unit tests are included in `tech.rs`. Extending coverage is one entry in the `RULES` table.
+
+### Dependency collection (Tetragon, phase 1)
+
+Dependency collection is opt-in and disabled by default (`COLLECT_DEPENDENCIES_TETRAGON=false`).
+
+- Source: Tetragon logs/events (`source=tetragon_logs` in snapshot payload).
+- Output: metadata-only dependency edges (no packet payload capture, no process args/env collection).
+- Behavior: bounded, deterministic ordering, and fail-soft when the source is unavailable.
+- Unknown destinations/sources are included as `kind="unknown"` edges.
+
+Direct Tetragon gRPC ingestion is deferred to a follow-up issue (`SEN-253`).
 
 ### Actions — designed for gradual rollout
 
@@ -228,6 +240,8 @@ Recommended `HUB_URL` is `https://api.hub.sentinel.la`.
 | `LEASE_NAME` | ConfigMap | `sentinella-hub-k8s-agent-leader` |
 | `ACTIONS_ENABLED` | ConfigMap | `false` |
 | `COLLECT_SECRETS` | ConfigMap | `false` |
+| `COLLECT_DEPENDENCIES_TETRAGON` | ConfigMap | `false` |
+| `TETRAGON_LOG_PATH` | ConfigMap | `/var/run/tetragon/tetragon-events.jsonl` |
 | `AGENT_HTTP_DEBUG` | ConfigMap | `false` |
 | `AGENT_HTTP_DEBUG_BODIES` | ConfigMap | `false` |
 | `AGENT_LOG` | ConfigMap | `info` |
@@ -237,6 +251,8 @@ Recommended `HUB_URL` is `https://api.hub.sentinel.la`.
 When `AGENT_VERSION_OVERRIDE` is set to a non-empty value, snapshots report that value as `agent.version`. When unset or empty, the agent reports the compile-time package version.
 
 When `COLLECT_SECRETS=true`, the agent attempts to collect Secret metadata and key names. This requires separate read RBAC for `secrets` (`get/list/watch`).
+
+When `COLLECT_DEPENDENCIES_TETRAGON=true`, the agent attempts to ingest Tetragon events from `TETRAGON_LOG_PATH`. If the source is unavailable or unreadable, dependency collection is fail-soft and snapshots continue.
 
 ## Build
 
@@ -253,12 +269,19 @@ docker push  ghcr.io/sentinella/sentinella-hub-k8s-agent:0.1.0
      --namespace sentinella \
      --from-literal=api-key=<API_KEY>
    ```
-2. Edit `agent.yaml`:
-   - `CLUSTER_ID` unique per cluster.
-   - `image:` pointing to your registry.
-   - Toleration block — current value runs on every node including control plane; trim if you want a smaller footprint.
-3. `kubectl apply -f agent.yaml`
-4. Verify:
+2. (Optional for dependency collection) Install Tetragon in-cluster, for example:
+   ```bash
+   helm repo add cilium https://helm.cilium.io
+   helm repo update
+   helm upgrade --install tetragon cilium/tetragon -n kube-system --create-namespace
+   ```
+3. Edit `agent.yaml`:
+    - `CLUSTER_ID` unique per cluster.
+    - `image:` pointing to your registry.
+    - For dependency collection: set `COLLECT_DEPENDENCIES_TETRAGON=true` and point `TETRAGON_LOG_PATH` to your Tetragon event file path.
+    - Toleration block — current value runs on every node including control plane; trim if you want a smaller footprint.
+4. `kubectl apply -f agent.yaml`
+5. Verify:
    ```bash
    kubectl -n sentinella get ds,po
    kubectl -n sentinella get lease

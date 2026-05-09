@@ -114,6 +114,8 @@ data:
   LEASE_TTL_SECS: "30"
   ACTIONS_ENABLED: "false"           # read-only by default
   COLLECT_SECRETS: "false"           # requires separate secrets-reader RBAC when true
+  COLLECT_DEPENDENCIES_TETRAGON: "false"  # opt-in; requires Tetragon events source
+  TETRAGON_LOG_PATH: "/var/run/tetragon/tetragon-events.jsonl"
   AGENT_HTTP_DEBUG: "false"
   AGENT_HTTP_DEBUG_BODIES: "false"
   AGENT_LOG: "info"
@@ -189,6 +191,10 @@ spec:
             - name: metrics
               containerPort: 9090
               protocol: TCP
+          volumeMounts:
+            - name: tetragon-events
+              mountPath: /var/run/tetragon
+              readOnly: true
           livenessProbe:
             httpGet:
               path: /livez
@@ -212,3 +218,8 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
+      volumes:
+        - name: tetragon-events
+          hostPath:
+            path: /var/run/tetragon
+            type: DirectoryOrCreate
