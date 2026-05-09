@@ -19,6 +19,17 @@ pub fn detect(image: &str) -> Technology {
 
     // Split tag (handle digests too: image@sha256:... -> ignore digest as version).
     let (repo, tag) = split_tag(after_registry);
+    let repo_lower = repo.to_lowercase();
+
+    if repo_lower.starts_with("distroless/") || repo_lower.contains("/distroless/") {
+        return Technology {
+            vendor: Some("distroless".to_string()),
+            product: Some("distroless".to_string()),
+            version: tag.map(normalize_version),
+            language: None,
+            source: "image",
+        };
+    }
 
     // Take the last path segment as the canonical image name.
     let name = repo.rsplit('/').next().unwrap_or(repo).to_lowercase();
@@ -75,7 +86,18 @@ fn split_tag(repo_with_tag: &str) -> (&str, Option<&str>) {
 /// Strip leading 'v' and common suffixes like "-alpine", "-jre", "-slim".
 fn normalize_version(tag: &str) -> String {
     let mut v = tag.trim_start_matches('v').to_string();
-    for suffix in ["-alpine", "-slim", "-jre", "-jdk", "-bullseye", "-bookworm"] {
+    for suffix in [
+        "-alpine",
+        "-slim",
+        "-jre",
+        "-jdk",
+        "-bullseye",
+        "-bookworm",
+        "-distroless",
+        "-ubi",
+        "-ubi8",
+        "-ubi9",
+    ] {
         if let Some(stripped) = v.strip_suffix(suffix) {
             v = stripped.to_string();
         }
@@ -231,6 +253,41 @@ const RULES: &[Rule] = &[
         names: &["nats"],
         prefixes: &[],
     },
+    Rule {
+        vendor: "apache",
+        product: "zookeeper",
+        language: "Java",
+        names: &["zookeeper"],
+        prefixes: &[],
+    },
+    Rule {
+        vendor: "memcached",
+        product: "memcached",
+        language: "C",
+        names: &["memcached"],
+        prefixes: &[],
+    },
+    Rule {
+        vendor: "keycloak",
+        product: "keycloak",
+        language: "Java",
+        names: &["keycloak"],
+        prefixes: &[],
+    },
+    Rule {
+        vendor: "hashicorp",
+        product: "vault",
+        language: "Go",
+        names: &["vault"],
+        prefixes: &[],
+    },
+    Rule {
+        vendor: "hashicorp",
+        product: "consul",
+        language: "Go",
+        names: &["consul"],
+        prefixes: &[],
+    },
     // Runtimes / language base images
     Rule {
         vendor: "oracle",
@@ -288,6 +345,41 @@ const RULES: &[Rule] = &[
         names: &["php"],
         prefixes: &[],
     },
+    Rule {
+        vendor: "busybox",
+        product: "busybox",
+        language: "C",
+        names: &["busybox"],
+        prefixes: &[],
+    },
+    Rule {
+        vendor: "alpine",
+        product: "alpine",
+        language: "",
+        names: &["alpine"],
+        prefixes: &[],
+    },
+    Rule {
+        vendor: "debian",
+        product: "debian",
+        language: "",
+        names: &["debian"],
+        prefixes: &[],
+    },
+    Rule {
+        vendor: "ubuntu",
+        product: "ubuntu",
+        language: "",
+        names: &["ubuntu"],
+        prefixes: &[],
+    },
+    Rule {
+        vendor: "distroless",
+        product: "distroless",
+        language: "",
+        names: &["distroless"],
+        prefixes: &[],
+    },
     // Observability
     Rule {
         vendor: "prometheus",
@@ -301,6 +393,27 @@ const RULES: &[Rule] = &[
         product: "grafana",
         language: "Go",
         names: &["grafana"],
+        prefixes: &[],
+    },
+    Rule {
+        vendor: "grafana",
+        product: "loki",
+        language: "Go",
+        names: &["loki"],
+        prefixes: &[],
+    },
+    Rule {
+        vendor: "grafana",
+        product: "promtail",
+        language: "Go",
+        names: &["promtail"],
+        prefixes: &[],
+    },
+    Rule {
+        vendor: "opentelemetry",
+        product: "otel-collector",
+        language: "Go",
+        names: &["otelcol", "opentelemetry-collector"],
         prefixes: &[],
     },
     Rule {
@@ -389,6 +502,27 @@ const RULES: &[Rule] = &[
         names: &["proxy"],
         prefixes: &["linkerd2-proxy"],
     },
+    Rule {
+        vendor: "jaeger",
+        product: "jaeger-agent",
+        language: "Go",
+        names: &["jaeger-agent"],
+        prefixes: &[],
+    },
+    Rule {
+        vendor: "jaeger",
+        product: "jaeger-collector",
+        language: "Go",
+        names: &["jaeger-collector"],
+        prefixes: &[],
+    },
+    Rule {
+        vendor: "jaeger",
+        product: "jaeger-query",
+        language: "Go",
+        names: &["jaeger-query"],
+        prefixes: &[],
+    },
 ];
 
 #[cfg(test)]
@@ -467,5 +601,82 @@ mod tests {
         assert_eq!(fb.language.as_deref(), Some("C"));
         let fd = detect("fluent/fluentd:v1.16");
         assert_eq!(fd.language.as_deref(), Some("Ruby"));
+    }
+
+    #[test]
+    fn detects_busybox() {
+        let t = detect("busybox:1.36");
+        assert_eq!(t.product.as_deref(), Some("busybox"));
+        assert_eq!(t.language.as_deref(), Some("C"));
+    }
+
+    #[test]
+    fn detects_hashicorp_vault_and_consul() {
+        let vault = detect("hashicorp/vault:1.17.2");
+        assert_eq!(vault.vendor.as_deref(), Some("hashicorp"));
+        assert_eq!(vault.product.as_deref(), Some("vault"));
+        assert_eq!(vault.language.as_deref(), Some("Go"));
+
+        let consul = detect("hashicorp/consul:v1.20.1");
+        assert_eq!(consul.vendor.as_deref(), Some("hashicorp"));
+        assert_eq!(consul.product.as_deref(), Some("consul"));
+        assert_eq!(consul.version.as_deref(), Some("1.20.1"));
+    }
+
+    #[test]
+    fn detects_keycloak_and_zookeeper() {
+        let keycloak = detect("quay.io/keycloak/keycloak:24.0.1");
+        assert_eq!(keycloak.product.as_deref(), Some("keycloak"));
+        assert_eq!(keycloak.language.as_deref(), Some("Java"));
+
+        let zk = detect("bitnami/zookeeper:3.9.3");
+        assert_eq!(zk.vendor.as_deref(), Some("apache"));
+        assert_eq!(zk.product.as_deref(), Some("zookeeper"));
+    }
+
+    #[test]
+    fn detects_observability_additions() {
+        let loki = detect("grafana/loki:3.1.0");
+        assert_eq!(loki.product.as_deref(), Some("loki"));
+        assert_eq!(loki.language.as_deref(), Some("Go"));
+
+        let promtail = detect("grafana/promtail:3.1.0");
+        assert_eq!(promtail.product.as_deref(), Some("promtail"));
+
+        let otel = detect("otel/opentelemetry-collector:0.104.0");
+        assert_eq!(otel.vendor.as_deref(), Some("opentelemetry"));
+        assert_eq!(otel.product.as_deref(), Some("otel-collector"));
+    }
+
+    #[test]
+    fn detects_jaeger_components() {
+        let agent = detect("jaegertracing/jaeger-agent:1.57.0");
+        assert_eq!(agent.product.as_deref(), Some("jaeger-agent"));
+        let collector = detect("jaegertracing/jaeger-collector:1.57.0");
+        assert_eq!(collector.product.as_deref(), Some("jaeger-collector"));
+        let query = detect("jaegertracing/jaeger-query:1.57.0");
+        assert_eq!(query.product.as_deref(), Some("jaeger-query"));
+    }
+
+    #[test]
+    fn detects_base_images() {
+        let alpine = detect("alpine:3.20");
+        assert_eq!(alpine.product.as_deref(), Some("alpine"));
+        assert_eq!(alpine.language, None);
+
+        let ubuntu = detect("ubuntu:24.04");
+        assert_eq!(ubuntu.product.as_deref(), Some("ubuntu"));
+
+        let distroless = detect("gcr.io/distroless/base:nonroot");
+        assert_eq!(distroless.product.as_deref(), Some("distroless"));
+    }
+
+    #[test]
+    fn normalizes_ubi_and_distroless_suffixes() {
+        let php_ubi = detect("php:8.3-ubi9");
+        assert_eq!(php_ubi.version.as_deref(), Some("8.3"));
+
+        let node_distroless = detect("node:v22.1-distroless");
+        assert_eq!(node_distroless.version.as_deref(), Some("22.1"));
     }
 }
