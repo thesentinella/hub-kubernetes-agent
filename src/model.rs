@@ -14,6 +14,7 @@ pub struct InventorySnapshot {
     pub workloads: Workloads,
     pub pods: Vec<PodInfo>,
     pub network: NetworkInventory,
+    pub configuration: ConfigurationInventory,
     pub storage: StorageInventory,
     pub events: Vec<EventInfo>,
     pub pod_logs: Vec<PodLogInfo>,
@@ -70,6 +71,35 @@ pub struct Workloads {
 pub struct NetworkInventory {
     pub services: Vec<ServiceInfo>,
     pub ingresses: Vec<IngressInfo>,
+}
+
+#[derive(Serialize, Debug, Default)]
+pub struct ConfigurationInventory {
+    pub configmaps: Vec<ConfigMapInfo>,
+    pub secrets: Vec<SecretInfo>,
+}
+
+#[derive(Serialize, Debug)]
+pub struct ConfigMapInfo {
+    pub namespace: String,
+    pub name: String,
+    pub immutable: Option<bool>,
+    pub labels: Vec<KV>,
+    pub annotations: Vec<KV>,
+    pub data_keys: Vec<String>,
+    pub binary_data_keys: Vec<String>,
+}
+
+#[derive(Serialize, Debug)]
+pub struct SecretInfo {
+    pub namespace: String,
+    pub name: String,
+    #[serde(rename = "type")]
+    pub type_: Option<String>,
+    pub immutable: Option<bool>,
+    pub labels: Vec<KV>,
+    pub annotations: Vec<KV>,
+    pub data_keys: Vec<String>,
 }
 
 #[derive(Serialize, Debug)]

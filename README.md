@@ -11,6 +11,7 @@ Inventory collector and (future) action executor for Kubernetes and OpenShift cl
   - **Namespaces** with labels and phase.
   - **Workloads**: deployments, statefulsets, daemonsets (name, namespace, desired/ready replicas).
   - **Pods**: age in seconds (`age_seconds`), each container with image, **detected technology** (vendor/product/version inferred from the image), `requests` and `limits` (CPU and memory).
+  - **Configuration**: ConfigMaps metadata by default, and optional Secrets metadata when `COLLECT_SECRETS=true` (name/namespace/type/immutability/labels/annotations) plus key names only (`data_keys`, `binary_data_keys` where applicable), never raw values.
   - **Network**: Services (type, selector, ports, exposure metadata) and Ingresses (class, hosts/paths/backends, TLS summary, load balancer status hints).
   - **Storage**: StorageClasses (name/provisioner/safe parameter subset), PersistentVolumes, PersistentVolumeClaims, VolumeSnapshotClasses, and VolumeSnapshots.
   - **Events**: Kubernetes `Warning` and `Normal` events with bounded payload (max 500 events per snapshot, event message truncated to 500 chars).
@@ -172,6 +173,8 @@ The agent supports route compatibility by trying both legacy (`/v1/...`) and API
 
 Body: `InventorySnapshot` (see `src/model.rs`). Respond `2xx` to accept. `4xx` is not retried (except `408`/`429`); `5xx` and network errors are (3 attempts: 0s/2s/5s).
 
+`InventorySnapshot.configuration` includes `configmaps` and `secrets` entries. Secret entries are populated only when `COLLECT_SECRETS=true`. Secret and ConfigMap payloads include metadata and key names only; values are intentionally excluded.
+
 `InventorySnapshot` includes a bounded `pod_logs` section. Collection is fail-soft (log fetch errors do not fail full snapshot collection). Limits:
 - max problematic pods: 20
 - max containers per pod: 2
@@ -222,6 +225,7 @@ Recommended `HUB_URL` is `https://api.hub.sentinel.la`.
 | `LEASE_TTL_SECS` | ConfigMap | `30` |
 | `LEASE_NAME` | ConfigMap | `sentinella-hub-k8s-agent-leader` |
 | `ACTIONS_ENABLED` | ConfigMap | `false` |
+| `COLLECT_SECRETS` | ConfigMap | `false` |
 | `AGENT_HTTP_DEBUG` | ConfigMap | `false` |
 | `AGENT_HTTP_DEBUG_BODIES` | ConfigMap | `false` |
 | `AGENT_LOG` | ConfigMap | `info` |
@@ -229,6 +233,8 @@ Recommended `HUB_URL` is `https://api.hub.sentinel.la`.
 | `POD_NAME`, `POD_NAMESPACE`, `NODE_NAME` | downward API | auto |
 
 When `AGENT_VERSION_OVERRIDE` is set to a non-empty value, snapshots report that value as `agent.version`. When unset or empty, the agent reports the compile-time package version.
+
+When `COLLECT_SECRETS=true`, the agent attempts to collect Secret metadata and key names. This requires separate read RBAC for `secrets` (`get/list/watch`).
 
 ## Build
 
