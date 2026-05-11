@@ -6,24 +6,47 @@ set -euo pipefail
 
 NAMESPACE="sentinella"
 MANIFEST_URL="https://raw.githubusercontent.com/thesentinella/hub-kubernetes-agent/main/agent.yaml"
+HUB_URL="https://api.hub.sentinel.la"
 
-for cmd in kubectl curl base64; do
+for cmd in kubectl curl; do
   command -v "$cmd" >/dev/null 2>&1 || { echo "Error: '$cmd' not found in PATH"; exit 1; }
 done
 
+# Validate API key before touching the cluster
+echo "Validating API key..."
+HTTP_STATUS=$(curl -so /dev/null -w "%{http_code}" \
+  -H "Authorization: Bearer ${HUB_API_KEY}" \
+  "${HUB_URL}/api/v1/agent/whoami")
+
+if [ "$HTTP_STATUS" != "200" ]; then
+  echo "Error: API key is invalid or rejected by the hub (HTTP ${HTTP_STATUS})."
+  echo "Check the key in your project settings and try again."
+  exit 1
+fi
+
+WHOAMI=$(curl -sf \
+  -H "Authorization: Bearer ${HUB_API_KEY}" \
+  "${HUB_URL}/api/v1/agent/whoami")
+
+echo "API key valid."
+echo "  Project : $(echo "$WHOAMI" | grep -o '"project_id":"[^"]*"' | cut -d'"' -f4)"
+echo "  Tenant  : $(echo "$WHOAMI" | grep -o '"tenant_id":"[^"]*"' | cut -d'"' -f4)"
+echo ""
 echo "Installing Sentinella Hub Agent..."
 echo "  Cluster ID : $CLUSTER_ID"
 echo "  Namespace  : $NAMESPACE"
 echo ""
 
-# Portable base64 (Linux + macOS)
-HUB_API_KEY_B64=$(printf '%s' "$HUB_API_KEY" | base64 | tr -d '\n')
-
+# Apply manifest (namespace + RBAC + ConfigMap + DaemonSet)
 curl -sfL "$MANIFEST_URL" \
-  | sed \
-      -e "s|REPLACE_ME|${CLUSTER_ID}|g" \
-      -e "s|BASE64_TOKEN_HERE|${HUB_API_KEY_B64}|g" \
+  | sed "s|REPLACE_ME|${CLUSTER_ID}|g" \
   | kubectl apply -f -
+
+# Create secret separately (not in agent.yaml)
+kubectl create secret generic sentinella-hub-k8s-agent-auth \
+  --namespace "$NAMESPACE" \
+  --from-literal=api-key="$HUB_API_KEY" \
+  --dry-run=client -o yaml | kubectl apply -f -
 
 echo ""
 echo "Waiting for rollout..."
