@@ -14,10 +14,44 @@ pub struct InventorySnapshot {
     pub workloads: Workloads,
     pub pods: Vec<PodInfo>,
     pub network: NetworkInventory,
+    pub dependencies: DependencyInventory,
     pub configuration: ConfigurationInventory,
     pub storage: StorageInventory,
     pub events: Vec<EventInfo>,
     pub pod_logs: Vec<PodLogInfo>,
+}
+
+#[derive(Serialize, Debug, Default)]
+pub struct DependencyInventory {
+    pub edges: Vec<DependencyEdge>,
+    pub source: &'static str,
+    pub window_seconds: u64,
+    pub truncated: bool,
+    pub dropped_edges: u64,
+}
+
+#[derive(Serialize, Debug)]
+pub struct DependencyEdge {
+    pub from: DependencyEndpoint,
+    pub to: DependencyEndpoint,
+    pub protocol: String,
+    pub destination_port: u16,
+    pub direction: String,
+    pub bytes: u64,
+    pub packets: u64,
+    pub connections: u64,
+    pub first_seen_unix_ms: u128,
+    pub last_seen_unix_ms: u128,
+}
+
+#[derive(Serialize, Debug)]
+pub struct DependencyEndpoint {
+    pub kind: String,
+    pub namespace: Option<String>,
+    pub name: Option<String>,
+    pub workload_kind: Option<String>,
+    pub workload_name: Option<String>,
+    pub ip: Option<String>,
 }
 
 #[derive(Serialize, Debug)]

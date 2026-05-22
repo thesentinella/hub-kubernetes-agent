@@ -138,8 +138,24 @@ async fn collector_loop(cfg: Config, kube: KubeClient, hub: Arc<HubClient>, lead
 }
 
 async fn build_and_send(cfg: &Config, kube: &KubeClient, hub: &HubClient) -> Result<()> {
-    let (cluster, namespaces, workloads, pods, network, configuration, storage, events, pod_logs) =
-        collector::collect(kube, cfg.collect_secrets).await?;
+    let (
+        cluster,
+        namespaces,
+        workloads,
+        pods,
+        network,
+        dependencies,
+        configuration,
+        storage,
+        events,
+        pod_logs,
+    ) = collector::collect(
+        kube,
+        cfg.collect_secrets,
+        cfg.collect_dependencies_tetragon,
+        &cfg.tetragon_log_path,
+    )
+    .await?;
     let snap = InventorySnapshot {
         schema_version: 1,
         agent: AgentInfo {
@@ -157,6 +173,7 @@ async fn build_and_send(cfg: &Config, kube: &KubeClient, hub: &HubClient) -> Res
         workloads,
         pods,
         network,
+        dependencies,
         configuration,
         storage,
         events,
@@ -288,6 +305,8 @@ mod tests {
             poll_wait: Duration::from_secs(30),
             actions_enabled: false,
             collect_secrets: false,
+            collect_dependencies_tetragon: false,
+            tetragon_log_path: "/var/run/tetragon/tetragon-events.jsonl".into(),
             http_timeout: Duration::from_secs(20),
             http_debug: false,
             http_debug_bodies: false,

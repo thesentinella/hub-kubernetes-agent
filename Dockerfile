@@ -1,6 +1,8 @@
 # syntax=docker/dockerfile:1.7
-FROM rust:1.88-bookworm AS builder
+FROM rust:1.95-alpine3.23 AS builder
 WORKDIR /build
+
+RUN apk add --no-cache build-base binutils
 
 # Cache deps
 COPY Cargo.toml Cargo.lock* ./
