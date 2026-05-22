@@ -114,7 +114,7 @@ data:
   LEASE_TTL_SECS: "30"
   ACTIONS_ENABLED: "false"           # read-only by default
   COLLECT_SECRETS: "false"           # requires separate secrets-reader RBAC when true
-  COLLECT_DEPENDENCIES_TETRAGON: "false"  # opt-in; requires Tetragon events source
+  COLLECT_DEPENDENCIES_TETRAGON: "false"  # opt-in; requires Tetragon manifest applied (see README Deploy section)
   TETRAGON_LOG_PATH: "/var/run/tetragon/tetragon-events.jsonl"
   AGENT_HTTP_DEBUG: "false"
   AGENT_HTTP_DEBUG_BODIES: "false"
