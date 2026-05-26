@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.16.0...v0.17.0) (2026-05-26)
+
+
+### Features
+
+* ebpf tracing ([#61](https://github.com/thesentinella/hub-kubernetes-agent/issues/61)) ([a4a7c23](https://github.com/thesentinella/hub-kubernetes-agent/commit/a4a7c2382df862fd6b0573dd4fd8a796dcfe1df1))
+
 ## [0.16.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.15.0...v0.16.0) (2026-05-09)
 
 
