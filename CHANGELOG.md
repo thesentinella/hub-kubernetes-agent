@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.18.1](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.18.0...v0.18.1) (2026-05-28)
+
+
+### Bug Fixes
+
+* **ci:** quote if condition to prevent YAML tag parsing of ! ([#65](https://github.com/thesentinella/hub-kubernetes-agent/issues/65)) ([cfc1894](https://github.com/thesentinella/hub-kubernetes-agent/commit/cfc18947da0bf0157fffac6358a875309997b7a1))
+
 ## [0.18.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.17.0...v0.18.0) (2026-05-28)
 
 
