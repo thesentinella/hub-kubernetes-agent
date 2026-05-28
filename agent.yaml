@@ -114,6 +114,8 @@ data:
   LEASE_TTL_SECS: "30"
   ACTIONS_ENABLED: "false"           # read-only by default
   COLLECT_SECRETS: "false"           # requires separate secrets-reader RBAC when true
+  COLLECT_DEPENDENCIES_TETRAGON: "false"  # opt-in; requires Tetragon manifest applied (see README Deploy section)
+  TETRAGON_LOG_PATH: "/var/run/tetragon/tetragon-events.jsonl"
   AGENT_HTTP_DEBUG: "false"
   AGENT_HTTP_DEBUG_BODIES: "false"
   AGENT_LOG: "info"
@@ -161,7 +163,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: agent
-          image: us-east1-docker.pkg.dev/sentinella-hub/kubernetes-agent/sentinella-hub-k8s-agent:v0.16.0  # x-release-please-version
+          image: us-east1-docker.pkg.dev/sentinella-hub/kubernetes-agent/sentinella-hub-k8s-agent:v0.17.0  # x-release-please-version
           imagePullPolicy: IfNotPresent
           envFrom:
             - configMapRef:
@@ -189,6 +191,10 @@ spec:
             - name: metrics
               containerPort: 9090
               protocol: TCP
+          volumeMounts:
+            - name: tetragon-events
+              mountPath: /var/run/tetragon
+              readOnly: true
           livenessProbe:
             httpGet:
               path: /livez
@@ -212,3 +218,8 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
+      volumes:
+        - name: tetragon-events
+          hostPath:
+            path: /var/run/tetragon
+            type: DirectoryOrCreate
