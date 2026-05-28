@@ -32,6 +32,32 @@ echo "API key valid."
 echo "  Project : $(echo "$WHOAMI" | grep -o '"project_id":"[^"]*"' | cut -d'"' -f4)"
 echo "  Tenant  : $(echo "$WHOAMI" | grep -o '"tenant_id":"[^"]*"' | cut -d'"' -f4)"
 echo ""
+
+# Warn if a cluster with this ID is already registered
+CLUSTER_CHECK_STATUS=$(curl -so /dev/null -w "%{http_code}" \
+  -H "Authorization: Bearer ${HUB_API_KEY}" \
+  "${HUB_URL}/v1/clusters/${CLUSTER_ID}")
+
+if [ "$CLUSTER_CHECK_STATUS" = "200" ]; then
+  echo "WARNING: A cluster with ID '${CLUSTER_ID}' is already registered in Sentinella Hub."
+  echo "  Running the installer again will continue reporting to the existing entry."
+  echo "  If you intended to create a fresh cluster, delete the existing entry first"
+  echo "  at https://hub.sentinel.la and use a different CLUSTER_ID."
+  echo ""
+  if [ -t 0 ]; then
+    # Interactive: ask for confirmation
+    read -r -p "Continue anyway? [y/N] " CONFIRM
+    case "$CONFIRM" in
+      [yY][eE][sS]|[yY]) ;;
+      *) echo "Aborted."; exit 1 ;;
+    esac
+  else
+    # Non-interactive (piped): proceed but keep the warning visible
+    echo "Running non-interactively — continuing with existing cluster entry."
+  fi
+  echo ""
+fi
+
 echo "Installing Sentinella Hub Agent..."
 echo "  Cluster ID : $CLUSTER_ID"
 echo "  Namespace  : $NAMESPACE"
