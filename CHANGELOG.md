@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.18.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.17.0...v0.18.0) (2026-05-28)
+
+
+### Features
+
+* warn when cluster_id already registered before agent install ([#63](https://github.com/thesentinella/hub-kubernetes-agent/issues/63)) ([3a8a819](https://github.com/thesentinella/hub-kubernetes-agent/commit/3a8a819f4a11861b4d0ec888a4f161cd5af048f0))
+
 ## [0.17.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.16.0...v0.17.0) (2026-05-26)
 
 
