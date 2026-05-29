@@ -12,7 +12,7 @@
 ## Kubernetes Permissions
 
 - The deployed reader `ClusterRole` is read-only and grants `get`, `list`, `watch`.
-- Core resources covered by the reader role: nodes, namespaces, pods, pods/log (get), services, configmaps, persistentvolumeclaims, persistentvolumes, events.
+- Core resources covered by the reader role: nodes, namespaces, pods, services, configmaps, persistentvolumeclaims, persistentvolumes, events.
 - Secret collection requires separate read RBAC on `secrets` (`get`, `list`, `watch`) and is gated by `COLLECT_SECRETS=true`.
 - Apps resources covered by the reader role: deployments, statefulsets, daemonsets, replicasets.
 - Batch resources covered by the reader role: jobs, cronjobs.
@@ -154,31 +154,6 @@ Path parameter note:
 - `configuration`: `ConfigurationInventory`.
 - `storage`: `StorageInventory`.
 - `events`: array of `EventInfo`.
-- `pod_logs`: array of `PodLogInfo` (problematic pods only, bounded).
-
-`PodLogInfo` fields:
-
-- `namespace`: string.
-- `pod`: string.
-- `container`: string.
-- `source`: `current` or `previous`.
-- `reason`: short reason why this container was included (for example `waiting:CrashLoopBackOff`).
-- `lines`: array of bounded log lines (each truncated to max 500 chars).
-
-Pod log collection bounds:
-
-- max problematic pods per snapshot: 20.
-- max containers per pod: 2.
-- max lines per container log fetch: 80.
-- max chars per line: 500.
-- max total chars across all `pod_logs` lines: 200000.
-
-Pod log selection rules:
-
-- include problematic containers only.
-- include `Pending` pods when waiting reasons indicate pull/config/start failures (for example `ImagePullBackOff`, `ErrImagePull`, `CreateContainerConfigError`).
-- include previous logs when restart/crash indicators are present.
-- log collection failures are fail-soft and do not fail snapshot collection.
 
 `AgentInfo` fields:
 
