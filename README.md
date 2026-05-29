@@ -282,15 +282,18 @@ docker push  ghcr.io/sentinella/sentinella-hub-k8s-agent:0.1.0
    ```
 2. (Required when `COLLECT_DEPENDENCIES_TETRAGON=true`) Render and apply the Tetragon manifest:
    ```bash
-   TETRAGON_VERSION=v1.7.0
-   helm repo add cilium https://helm.cilium.io
-   helm repo update
-   helm template tetragon cilium/tetragon \
-     --namespace kube-system \
-     --version "${TETRAGON_VERSION#v}" > tetragon.yaml
-   kubectl apply -f tetragon.yaml
-   kubectl rollout status -n kube-system ds/tetragon -w
-   ```
+    TETRAGON_VERSION=v1.7.0
+    helm repo add cilium https://helm.cilium.io
+    helm repo update
+    helm template tetragon cilium/tetragon \
+      --namespace kube-system \
+      --set tetragon.exportFilename=tetragon-events.jsonl \
+      --set exportDirectory=/var/run/tetragon \
+      --set tetragon.exportFilePerm=644 \
+      --version "${TETRAGON_VERSION#v}" > tetragon.yaml
+    kubectl apply -f tetragon.yaml
+    kubectl rollout status -n kube-system ds/tetragon -w
+    ```
 3. Edit `agent.yaml`:
     - `CLUSTER_ID` unique per cluster.
     - `image:` pointing to your registry.
