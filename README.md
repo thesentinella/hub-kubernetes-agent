@@ -187,6 +187,10 @@ The agent supports route compatibility by trying both legacy (`/v1/...`) and API
 
 Body: `InventorySnapshot` (see `src/model.rs`). Respond `2xx` to accept. `4xx` is not retried (except `408`/`429`); `5xx` and network errors are (3 attempts: 0s/2s/5s).
 
+`InventorySnapshot.k8s_uid` is populated from the `kube-system` namespace UID when available and is used by the Hub for duplicate physical cluster detection.
+
+On successful inventory ingest, when the Hub responds with `{"already_existed":true}`, the agent logs a warning indicating potential duplicate re-registration.
+
 `InventorySnapshot.configuration` includes `configmaps` and `secrets` entries. Secret entries are populated only when `COLLECT_SECRETS=true`. Secret and ConfigMap payloads include metadata and key names only; values are intentionally excluded.
 
 `InventorySnapshot` includes a bounded `pod_logs` section. Collection is fail-soft (log fetch errors do not fail full snapshot collection). Limits:
@@ -203,6 +207,10 @@ Long-poll. The Hub holds the connection until it has a `CommandBatch` or until `
 - `204`, or `200` with `{"commands":[]}` — normal timeout; the agent reopens.
 - `200` with an empty body is treated as no work.
 
+### GET `/v1/clusters/{cluster_id}`
+
+Startup preflight check (best-effort, fail-soft). The agent reads `last_seen_at` and logs a warning when the same `CLUSTER_ID` appears active in the last 5 minutes.
+
 ### POST `/v1/clusters/{cluster_id}/commands/{command_id}/ack`
 
 Body: `CommandResult` with `status` (`ok` | `error` | `skipped` | `not_implemented` | `unknown`) and an optional message. Successful resource previews also carry `dry_run`, `applied_patch`, `observed_before`, `observed_after`, and `warnings` for full audit.
@@ -216,6 +224,7 @@ Target API route family is `/api/v1/...` on `https://api.hub.sentinel.la`.
 | Inventory ingest | `POST /v1/clusters/{cluster_id}/inventory` | `POST /api/v1/agent/ingest` |
 | Command poll | `GET /v1/clusters/{cluster_id}/commands/poll?wait=30s` | `GET /api/v1/clusters/{cluster_id}/commands/poll?wait=30s` |
 | Command ack | `POST /v1/clusters/{cluster_id}/commands/{command_id}/ack` | `POST /api/v1/clusters/{cluster_id}/commands/{command_id}/ack` |
+| Cluster status | `GET /v1/clusters/{cluster_id}` | `GET /api/v1/clusters/{cluster_id}` |
 
 ### Troubleshooting route/response mismatches
 

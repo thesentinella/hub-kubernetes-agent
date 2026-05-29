@@ -89,7 +89,7 @@ impl HubClient {
                         let s = r.status();
                         let content_type = response_content_type(&r);
                         let content_length = r.content_length();
-                        let body = if self.cfg.http_debug_bodies {
+                        let body_text = if s.is_success() || self.cfg.http_debug_bodies {
                             Some(r.text().await.unwrap_or_default())
                         } else {
                             None
@@ -103,16 +103,31 @@ impl HubClient {
                                 content_type = %content_type,
                                 content_length = ?content_length,
                                 elapsed_ms = start.elapsed().as_millis(),
-                                body_preview = %body_preview_opt(if self.cfg.http_debug_bodies {
-                                    body.as_deref()
-                                } else {
-                                    None
-                                }),
+                                body_preview = %body_preview_opt(self.cfg.http_debug_bodies.then_some(body_text.as_deref().unwrap_or_default())),
                                 "inventory response"
                             );
                         }
 
                         if s.is_success() {
+                            if let Some(body_text) =
+                                body_text.as_deref().filter(|v| !v.trim().is_empty())
+                            {
+                                let body: SnapshotCreated = serde_json::from_str(body_text).map_err(|e| {
+                                    anyhow::anyhow!(
+                                        "error decoding inventory response body: {} (status={}, content_type={}, body_preview={})",
+                                        e,
+                                        s,
+                                        content_type,
+                                        error_body_preview(Some(body_text), self.cfg.http_debug_bodies)
+                                    )
+                                })?;
+                                if body.already_existed {
+                                    warn!(
+                                        cluster_id = %self.cfg.cluster_id,
+                                        "cluster was already registered - possible duplicate re-registration"
+                                    );
+                                }
+                            }
                             return Ok(());
                         }
 
@@ -136,7 +151,10 @@ impl HubClient {
                                 "hub rejected snapshot: {} (content_type={}, body_preview={})",
                                 s,
                                 content_type,
-                                error_body_preview_opt(body.as_deref(), self.cfg.http_debug_bodies)
+                                error_body_preview(
+                                    body_text.as_deref(),
+                                    self.cfg.http_debug_bodies
+                                )
                             ));
                         }
                         last_err = Some(anyhow::anyhow!("attempt {} status {}", i + 1, s));
@@ -148,6 +166,63 @@ impl HubClient {
             }
         }
         Err(last_err.unwrap_or_else(|| anyhow::anyhow!("snapshot retries exhausted")))
+    }
+
+    pub async fn get_cluster_status(&self) -> Result<ClusterStatus> {
+        let urls = self.routes.cluster_status_urls(&self.cfg.cluster_id);
+        for (url_index, url) in urls.iter().enumerate() {
+            let start = std::time::Instant::now();
+            let resp = self.auth(self.http.get(url)).send().await?;
+            let status = resp.status();
+            let content_type = response_content_type(&resp);
+            let content_length = resp.content_length();
+            let body = resp.text().await.unwrap_or_default();
+
+            if self.cfg.http_debug {
+                debug!(
+                    method = "GET",
+                    url = %url,
+                    status = %status,
+                    content_type = %content_type,
+                    content_length = ?content_length,
+                    elapsed_ms = start.elapsed().as_millis(),
+                    body_preview = %body_preview_opt(self.cfg.http_debug_bodies.then_some(body.as_str())),
+                    "cluster status response"
+                );
+            }
+
+            if status == StatusCode::NOT_FOUND {
+                if url_index + 1 < urls.len() {
+                    continue;
+                }
+                return Ok(ClusterStatus::default());
+            }
+
+            if !status.is_success() {
+                return Err(anyhow::anyhow!(
+                    "cluster status fetch failed: {} (content_type={}, body_preview={})",
+                    status,
+                    content_type,
+                    error_body_preview(Some(body.as_str()), self.cfg.http_debug_bodies)
+                ));
+            }
+
+            if body.trim().is_empty() {
+                return Ok(ClusterStatus::default());
+            }
+
+            return serde_json::from_str(&body).map_err(|e| {
+                anyhow::anyhow!(
+                    "error decoding cluster status body: {} (status={}, content_type={}, body_preview={})",
+                    e,
+                    status,
+                    content_type,
+                    error_body_preview(Some(body.as_str()), self.cfg.http_debug_bodies)
+                )
+            });
+        }
+
+        Ok(ClusterStatus::default())
     }
 
     /// Long-poll for commands. Returns an empty batch on timeout (normal).
@@ -370,6 +445,12 @@ impl HubRoutes {
             "{}/v1/clusters/{}/commands/poll?wait={}s",
             self.api_base, cluster_id, wait_secs
         );
+        self.ordered(legacy, api)
+    }
+
+    fn cluster_status_urls(&self, cluster_id: &str) -> Vec<String> {
+        let legacy = format!("{}/v1/clusters/{}", self.legacy_base, cluster_id);
+        let api = format!("{}/v1/clusters/{}", self.api_base, cluster_id);
         self.ordered(legacy, api)
     }
 

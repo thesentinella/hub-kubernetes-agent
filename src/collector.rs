@@ -26,6 +26,7 @@ pub async fn collect(
     collect_dependencies_tetragon: bool,
     tetragon_log_path: &str,
 ) -> Result<(
+    Option<String>,
     ClusterInfo,
     Vec<NamespaceInfo>,
     Workloads,
@@ -42,6 +43,7 @@ pub async fn collect(
 
     let nodes_fut = list_all::<Node>(client, &lp);
     let ns_fut = list_all::<Namespace>(client, &lp);
+    let k8s_uid_fut = kube_system_uid(client);
     let deploy_fut = list_all::<Deployment>(client, &lp);
     let sts_fut = list_all::<StatefulSet>(client, &lp);
     let ds_fut = list_all::<DaemonSet>(client, &lp);
@@ -88,6 +90,7 @@ pub async fn collect(
         volume_snapshots,
         events,
         version,
+        k8s_uid,
     ) = tokio::join!(
         nodes_fut,
         ns_fut,
@@ -105,7 +108,8 @@ pub async fn collect(
         volume_snapshot_classes_fut,
         volume_snapshots_fut,
         events_fut,
-        version_fut
+        version_fut,
+        k8s_uid_fut
     );
 
     let nodes = soft_unwrap("nodes", nodes);
@@ -170,6 +174,7 @@ pub async fn collect(
     let event_infos = events.into_iter().take(MAX_EVENTS).map(map_event).collect();
 
     Ok((
+        k8s_uid,
         cluster,
         ns_infos,
         workloads,
@@ -181,6 +186,17 @@ pub async fn collect(
         event_infos,
         pod_logs,
     ))
+}
+
+async fn kube_system_uid(client: &Client) -> Option<String> {
+    let api: Api<Namespace> = Api::all(client.clone());
+    match api.get("kube-system").await {
+        Ok(namespace) => namespace.metadata.uid,
+        Err(e) => {
+            warn!(error = %e, "failed to fetch kube-system namespace UID");
+            None
+        }
+    }
 }
 
 fn collect_dependency_inventory(

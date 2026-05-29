@@ -9,6 +9,7 @@ pub struct InventorySnapshot {
     pub agent: AgentInfo,
     pub cluster_id: String,
     pub timestamp_ms: u128,
+    pub k8s_uid: Option<String>,
     pub cluster: ClusterInfo,
     pub namespaces: Vec<NamespaceInfo>,
     pub workloads: Workloads,
@@ -19,6 +20,18 @@ pub struct InventorySnapshot {
     pub storage: StorageInventory,
     pub events: Vec<EventInfo>,
     pub pod_logs: Vec<PodLogInfo>,
+}
+
+#[derive(Deserialize, Debug, Default)]
+pub struct SnapshotCreated {
+    #[serde(default)]
+    pub already_existed: bool,
+}
+
+#[derive(Deserialize, Debug, Default)]
+pub struct ClusterStatus {
+    pub last_seen_at: Option<String>,
+    pub k8s_uid: Option<String>,
 }
 
 #[derive(Serialize, Debug, Default)]
@@ -590,5 +603,27 @@ mod tests {
         let spec: WorkloadResourcesSpec = serde_json::from_str(json).unwrap();
         assert!(spec.requests.is_none());
         assert!(spec.limits.is_none());
+    }
+
+    #[test]
+    fn snapshot_created_deserializes_already_existed() {
+        let json = r#"{"already_existed":true}"#;
+        let body: SnapshotCreated = serde_json::from_str(json).unwrap();
+        assert!(body.already_existed);
+    }
+
+    #[test]
+    fn snapshot_created_defaults_to_false() {
+        let json = r#"{}"#;
+        let body: SnapshotCreated = serde_json::from_str(json).unwrap();
+        assert!(!body.already_existed);
+    }
+
+    #[test]
+    fn cluster_status_deserializes_optional_fields() {
+        let json = r#"{"last_seen_at":"2026-05-29T16:00:00Z","k8s_uid":"uid-123"}"#;
+        let body: ClusterStatus = serde_json::from_str(json).unwrap();
+        assert_eq!(body.last_seen_at.as_deref(), Some("2026-05-29T16:00:00Z"));
+        assert_eq!(body.k8s_uid.as_deref(), Some("uid-123"));
     }
 }
