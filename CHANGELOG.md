@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.18.2](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.18.1...v0.18.2) (2026-05-29)
+
+
+### Bug Fixes
+
+* **install:** detect physical cluster conflicts via k8s_uid and show last_seen_at ([#67](https://github.com/thesentinella/hub-kubernetes-agent/issues/67)) ([ba52775](https://github.com/thesentinella/hub-kubernetes-agent/commit/ba52775843a2138bfde649cf83ff9169eb0aff1d))
+
 ## [0.18.1](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.18.0...v0.18.1) (2026-05-28)
 
 
