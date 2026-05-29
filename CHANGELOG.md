@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.19.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.18.2...v0.19.0) (2026-05-29)
+
+
+### Features
+
+* add k8s uid duplicate-cluster detection ([#69](https://github.com/thesentinella/hub-kubernetes-agent/issues/69)) ([ed54b43](https://github.com/thesentinella/hub-kubernetes-agent/commit/ed54b43c9f9e0f99a65c32124ac42e6726c82c37))
+
 ## [0.18.2](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.18.1...v0.18.2) (2026-05-29)
 
 
