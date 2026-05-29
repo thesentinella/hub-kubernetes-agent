@@ -154,7 +154,6 @@ async fn build_and_send(cfg: &Config, kube: &KubeClient, hub: &HubClient) -> Res
         configuration,
         storage,
         events,
-        pod_logs,
     ) = collector::collect(
         kube,
         cfg.collect_secrets,
@@ -184,7 +183,6 @@ async fn build_and_send(cfg: &Config, kube: &KubeClient, hub: &HubClient) -> Res
         configuration,
         storage,
         events,
-        pod_logs,
     };
     hub.send_snapshot(&snap).await
 }
