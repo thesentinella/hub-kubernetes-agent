@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.19.1](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.19.0...v0.19.1) (2026-05-29)
+
+
+### Bug Fixes
+
+* remove problematic pod logs collection ([#73](https://github.com/thesentinella/hub-kubernetes-agent/issues/73)) ([3e7f570](https://github.com/thesentinella/hub-kubernetes-agent/commit/3e7f570458694092f5174da6aa03c96ea4408462))
+
 ## [0.19.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.18.2...v0.19.0) (2026-05-29)
 
 
