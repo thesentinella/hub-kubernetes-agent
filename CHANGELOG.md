@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.19.2](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.19.1...v0.19.2) (2026-06-07)
+
+
+### Bug Fixes
+
+* **install:** pin manifest integrity ([745b798](https://github.com/thesentinella/hub-kubernetes-agent/commit/745b798865d87a10bbe08bb85c897fb36e8bf560))
+* **install:** support openshift auto-detect ([cfd1e5f](https://github.com/thesentinella/hub-kubernetes-agent/commit/cfd1e5f32505b2c46aa796589eddcf6400ecf494))
+
 ## [0.19.1](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.19.0...v0.19.1) (2026-05-29)
 
 
