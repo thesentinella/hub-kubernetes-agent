@@ -3,9 +3,11 @@ set -euo pipefail
 
 NAMESPACE="sentinella"
 MANIFEST_URL="https://raw.githubusercontent.com/thesentinella/hub-kubernetes-agent/main/agent.yaml"
+MANIFEST_SHA256="1631e019102b4284186d97cf7e1f676579ec7a8f4e6f4697830efe2fb9871372"
 HUB_URL="https://api.hub.sentinel.la"
 INSTALL_PLATFORM="${INSTALL_PLATFORM:-}"
 PLATFORM_OVERRIDE=""
+SHA256_CMD=""
 
 validate_cluster_id() {
   printf '%s' "$1" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$'
@@ -44,6 +46,20 @@ resolve_platform() {
   fi
 }
 
+resolve_sha256_cmd() {
+  if command -v shasum >/dev/null 2>&1; then
+    SHA256_CMD="shasum -a 256"
+    return 0
+  fi
+
+  if command -v sha256sum >/dev/null 2>&1; then
+    SHA256_CMD="sha256sum"
+    return 0
+  fi
+
+  return 1
+}
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --platform)
@@ -80,6 +96,11 @@ done
 
 if ! validate_cluster_id "$CLUSTER_ID"; then
   echo "Error: CLUSTER_ID must match [A-Za-z0-9][A-Za-z0-9._-]*" >&2
+  exit 1
+fi
+
+if ! resolve_sha256_cmd; then
+  echo "Error: no SHA-256 tool found (need shasum or sha256sum)." >&2
   exit 1
 fi
 
@@ -151,6 +172,10 @@ echo ""
 
 # Apply manifest (namespace + RBAC + ConfigMap + DaemonSet)
 curl -sfL "$MANIFEST_URL" > "$BASE_MANIFEST"
+if ! echo "${MANIFEST_SHA256}  ${BASE_MANIFEST}" | $SHA256_CMD -c - >/dev/null 2>&1; then
+  echo "Error: downloaded manifest checksum mismatch (expected ${MANIFEST_SHA256})." >&2
+  exit 1
+fi
 sed "s|REPLACE_ME|${CLUSTER_ID}|g" "$BASE_MANIFEST" > "$RENDERED_MANIFEST"
 
 if [ "$PLATFORM" = "openshift" ]; then
