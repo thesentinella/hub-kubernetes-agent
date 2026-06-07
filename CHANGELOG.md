@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.19.3](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.19.2...v0.19.3) (2026-06-07)
+
+
+### Bug Fixes
+
+* install openshift integrity ([#76](https://github.com/thesentinella/hub-kubernetes-agent/issues/76)) ([f70c4e8](https://github.com/thesentinella/hub-kubernetes-agent/commit/f70c4e8c70266becbb7e78ace8f3da7c7b98e82b))
+
 ## [0.19.2](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.19.1...v0.19.2) (2026-06-07)
 
 
