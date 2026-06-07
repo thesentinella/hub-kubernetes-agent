@@ -269,9 +269,10 @@ docker push  ghcr.io/sentinella/sentinella-hub-k8s-agent:0.1.0
 
 1. Create the auth Secret (once per namespace/cluster):
    ```bash
-   kubectl create secret generic sentinella-hub-k8s-agent-auth \
+   printf '%s' '<API_KEY>' | kubectl create secret generic sentinella-hub-k8s-agent-auth \
      --namespace sentinella \
-     --from-literal=api-key=<API_KEY>
+     --from-file=api-key=/dev/stdin \
+     --dry-run=client -o yaml | kubectl apply -f -
    ```
 2. (Required when `COLLECT_DEPENDENCIES_TETRAGON=true`) Render and apply the Tetragon manifest:
    ```bash
@@ -287,20 +288,35 @@ docker push  ghcr.io/sentinella/sentinella-hub-k8s-agent:0.1.0
     kubectl apply -f tetragon.yaml
     kubectl rollout status -n kube-system ds/tetragon -w
     ```
-3. Edit `agent.yaml`:
-    - `CLUSTER_ID` unique per cluster.
-    - `image:` pointing to your registry.
-    - For dependency collection: set `COLLECT_DEPENDENCIES_TETRAGON=true` and point `TETRAGON_LOG_PATH` to your Tetragon event file path.
-    - Toleration block — current value runs on every node including control plane; trim if you want a smaller footprint.
-4. `kubectl apply -f agent.yaml`
+3. Install the agent:
+   - Convenience path: `curl | bash` executes the installer directly. If you need to audit the script first, download `install.sh` and run it locally instead. The installer performs a checksum integrity check on the downloaded `agent.yaml` before applying it.
+   - Auto-detect the platform:
+     ```bash
+     curl -sfL https://raw.githubusercontent.com/thesentinella/hub-kubernetes-agent/main/install.sh \
+       | CLUSTER_ID="my-cluster" HUB_API_KEY="shub_..." bash
+     ```
+   - Force a platform when needed:
+     ```bash
+     curl -sfL https://raw.githubusercontent.com/thesentinella/hub-kubernetes-agent/main/install.sh \
+       | CLUSTER_ID="my-cluster" HUB_API_KEY="shub_..." bash -s -- --platform openshift
+     ```
+   - Or set `INSTALL_PLATFORM=kubernetes|openshift`.
+
+4. If you install manually, edit `agent.yaml`:
+      - `CLUSTER_ID` unique per cluster.
+      - `image:` pointing to your registry.
+      - For dependency collection: set `COLLECT_DEPENDENCIES_TETRAGON=true` and point `TETRAGON_LOG_PATH` to your Tetragon event file path.
+      - Toleration block — current value runs on every node including control plane; trim if you want a smaller footprint.
 5. Verify:
-   ```bash
-   kubectl -n sentinella get ds,po
-   kubectl -n sentinella get lease
-   kubectl -n sentinella logs ds/sentinella-hub-k8s-agent --tail=50
-   kubectl -n sentinella port-forward ds/sentinella-hub-k8s-agent 9090:9090
-   curl localhost:9090/metrics
-   ```
+    ```bash
+    kubectl -n sentinella get ds,po
+    kubectl -n sentinella get lease
+    kubectl -n sentinella logs ds/sentinella-hub-k8s-agent --tail=50
+    kubectl -n sentinella port-forward ds/sentinella-hub-k8s-agent 9090:9090
+    curl localhost:9090/metrics
+    ```
+
+OpenShift installs use the same agent image and code path, but the installer strips fixed UID/GID settings and fails fast if the cluster rejects the required `hostPath` mount used for Tetragon log ingestion.
 
 The `Lease` object will appear once the first pod is up; its `holderIdentity` is the leader node's name.
 
