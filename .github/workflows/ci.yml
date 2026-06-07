@@ -16,12 +16,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Verify installer manifest checksum
-        run: |
-          expected="$(awk -F'"' '/^MANIFEST_SHA256=/{print $2}' install.sh)"
-          actual="$(sha256sum agent.yaml | awk '{print $1}')"
-          test "$expected" = "$actual"
-
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:

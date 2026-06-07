@@ -289,7 +289,7 @@ docker push  ghcr.io/sentinella/sentinella-hub-k8s-agent:0.1.0
     kubectl rollout status -n kube-system ds/tetragon -w
     ```
 3. Install the agent:
-   - Convenience path: `curl | bash` executes the installer directly. If you need to audit the script first, download `install.sh` and run it locally instead. The installer performs a checksum integrity check on the downloaded `agent.yaml` before applying it.
+   - Convenience path: `curl | bash` executes the installer directly. If you need to audit the script first, download `install.sh` and run it locally instead.
    - Auto-detect the platform:
      ```bash
      curl -sfL https://raw.githubusercontent.com/thesentinella/hub-kubernetes-agent/main/install.sh \
