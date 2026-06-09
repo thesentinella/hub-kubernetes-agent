@@ -8,6 +8,7 @@ HUB_URL="https://api.hub.sentinel.la"
 INSTALL_PLATFORM="${INSTALL_PLATFORM:-}"
 PLATFORM_OVERRIDE=""
 SHA256_CMD=""
+VERIFY_MANIFEST_CHECKSUM="${VERIFY_MANIFEST_CHECKSUM:-false}"
 
 validate_cluster_id() {
   printf '%s' "$1" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$'
@@ -19,6 +20,7 @@ Usage: install.sh [--platform kubernetes|openshift]
 
 Environment:
   INSTALL_PLATFORM   Override platform detection (kubernetes|openshift)
+  VERIFY_MANIFEST_CHECKSUM  Set to true/1 to verify downloaded agent.yaml
   CLUSTER_ID         Required cluster identifier
   HUB_API_KEY        Required Hub API key
 EOF
@@ -99,11 +101,6 @@ if ! validate_cluster_id "$CLUSTER_ID"; then
   exit 1
 fi
 
-if ! resolve_sha256_cmd; then
-  echo "Error: no SHA-256 tool found (need shasum or sha256sum)." >&2
-  exit 1
-fi
-
 PLATFORM="$(resolve_platform)"
 case "$PLATFORM" in
   kubernetes|openshift) ;;
@@ -170,12 +167,35 @@ echo "  Namespace  : $NAMESPACE"
 echo "  Platform   : $PLATFORM"
 echo ""
 
+case "$VERIFY_MANIFEST_CHECKSUM" in
+  false|0|"")
+    echo "WARNING: manifest checksum verification is disabled (set VERIFY_MANIFEST_CHECKSUM=true to enable)."
+    echo ""
+    ;;
+esac
+
 # Apply manifest (namespace + RBAC + ConfigMap + DaemonSet)
 curl -sfL "$MANIFEST_URL" > "$BASE_MANIFEST"
-if ! echo "${MANIFEST_SHA256}  ${BASE_MANIFEST}" | $SHA256_CMD -c - >/dev/null 2>&1; then
-  echo "Error: downloaded manifest checksum mismatch (expected ${MANIFEST_SHA256})." >&2
-  exit 1
-fi
+
+case "$VERIFY_MANIFEST_CHECKSUM" in
+  true|1)
+    if ! resolve_sha256_cmd; then
+      echo "Error: no SHA-256 tool found (need shasum or sha256sum)." >&2
+      exit 1
+    fi
+    if ! echo "${MANIFEST_SHA256}  ${BASE_MANIFEST}" | $SHA256_CMD -c - >/dev/null 2>&1; then
+      echo "Error: downloaded manifest checksum mismatch (expected ${MANIFEST_SHA256})." >&2
+      exit 1
+    fi
+    ;;
+  false|0|"")
+    ;;
+  *)
+    echo "Error: VERIFY_MANIFEST_CHECKSUM must be true, 1, false, 0, or empty." >&2
+    exit 1
+    ;;
+esac
+
 sed "s|REPLACE_ME|${CLUSTER_ID}|g" "$BASE_MANIFEST" > "$RENDERED_MANIFEST"
 
 if [ "$PLATFORM" = "openshift" ]; then
