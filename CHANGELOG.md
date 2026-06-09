@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.19.4](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.19.3...v0.19.4) (2026-06-09)
+
+
+### Bug Fixes
+
+* make manifest verification opt-in ([#79](https://github.com/thesentinella/hub-kubernetes-agent/issues/79)) ([e5e3d5d](https://github.com/thesentinella/hub-kubernetes-agent/commit/e5e3d5d9e11325f8ec4a31dcdc7d0e69941be067))
+
 ## [0.19.3](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.19.2...v0.19.3) (2026-06-07)
 
 
