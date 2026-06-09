@@ -289,7 +289,8 @@ docker push  ghcr.io/sentinella/sentinella-hub-k8s-agent:0.1.0
     kubectl rollout status -n kube-system ds/tetragon -w
     ```
 3. Install the agent:
-   - Convenience path: `curl | bash` executes the installer directly. If you need to audit the script first, download `install.sh` and run it locally instead. The installer performs a checksum integrity check on the downloaded `agent.yaml` before applying it.
+   - Convenience path: `curl | bash` executes the installer directly. If you need to audit the script first, download `install.sh` and run it locally instead.
+   - Optional integrity check: set `VERIFY_MANIFEST_CHECKSUM=true` (or `1`) to verify the downloaded `agent.yaml` before apply.
    - Auto-detect the platform:
      ```bash
      curl -sfL https://raw.githubusercontent.com/thesentinella/hub-kubernetes-agent/main/install.sh \
@@ -316,7 +317,7 @@ docker push  ghcr.io/sentinella/sentinella-hub-k8s-agent:0.1.0
     curl localhost:9090/metrics
     ```
 
-OpenShift installs use the same agent image and code path, but the installer strips fixed UID/GID settings and fails fast if the cluster rejects the required `hostPath` mount used for Tetragon log ingestion.
+OpenShift installs use the same agent image and code path, but the installer strips fixed UID/GID settings and fails fast if the cluster rejects the required `hostPath` mount used for Tetragon log ingestion. The manifest checksum check is opt-in and off by default.
 
 The `Lease` object will appear once the first pod is up; its `holderIdentity` is the leader node's name.
 
