@@ -9,6 +9,7 @@ INSTALL_PLATFORM="${INSTALL_PLATFORM:-}"
 PLATFORM_OVERRIDE=""
 SHA256_CMD=""
 VERIFY_MANIFEST_CHECKSUM="${VERIFY_MANIFEST_CHECKSUM:-false}"
+COLLECT_DEPENDENCIES_TETRAGON="${COLLECT_DEPENDENCIES_TETRAGON:-false}"
 
 validate_cluster_id() {
   printf '%s' "$1" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$'
@@ -21,9 +22,61 @@ Usage: install.sh [--platform kubernetes|openshift]
 Environment:
   INSTALL_PLATFORM   Override platform detection (kubernetes|openshift)
   VERIFY_MANIFEST_CHECKSUM  Set to true/1 to verify downloaded agent.yaml
+  COLLECT_DEPENDENCIES_TETRAGON  Set to true/1 to keep Tetragon hostPath on OpenShift
   CLUSTER_ID         Required cluster identifier
   HUB_API_KEY        Required Hub API key
 EOF
+}
+
+strip_tetragon_hostpath() {
+  awk '
+    function indent(line) {
+      match(line, /[^ ]/)
+      return RSTART ? RSTART - 1 : length(line)
+    }
+
+    function emit(line,   retry) {
+      retry = 1
+      while (retry) {
+        retry = 0
+
+        if (skip_rest) {
+          return
+        }
+
+        if (in_mounts) {
+          if (indent(line) > mounts_indent) {
+            return
+          }
+
+          in_mounts = 0
+          retry = 1
+          continue
+        }
+
+        if (line ~ /^[[:space:]]*volumeMounts:[[:space:]]*$/) {
+          in_mounts = 1
+          mounts_indent = indent(line)
+          return
+        }
+
+        if (line ~ /^[[:space:]]*volumes:[[:space:]]*$/) {
+          skip_rest = 1
+          return
+        }
+      }
+
+      print line
+    }
+
+    BEGIN {
+      in_mounts = 0
+      skip_rest = 0
+    }
+
+    { emit($0) }
+  ' "$RENDERED_MANIFEST" > "$TMPDIR/agent.openshift.yaml"
+  mv "$TMPDIR/agent.openshift.yaml" "$RENDERED_MANIFEST"
 }
 
 detect_openshift() {
@@ -202,6 +255,18 @@ if [ "$PLATFORM" = "openshift" ]; then
   # OpenShift rejects fixed UID/GID settings under default SCCs.
   sed '/runAsUser: 65532/d;/runAsGroup: 65532/d' "$RENDERED_MANIFEST" > "$TMPDIR/agent.openshift.yaml"
   mv "$TMPDIR/agent.openshift.yaml" "$RENDERED_MANIFEST"
+
+  case "$COLLECT_DEPENDENCIES_TETRAGON" in
+    true|1)
+      ;;
+    false|0|"")
+      strip_tetragon_hostpath
+      ;;
+    *)
+      echo "Error: COLLECT_DEPENDENCIES_TETRAGON must be true, 1, false, 0, or empty." >&2
+      exit 1
+      ;;
+  esac
 fi
 
 echo "Validating manifest..."
