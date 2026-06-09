@@ -72,7 +72,7 @@ Unit tests are included in `tech.rs`. Extending coverage is one entry in the `RU
 
 Dependency collection is opt-in and disabled by default (`COLLECT_DEPENDENCIES_TETRAGON=false`).
 
-- Source: Tetragon logs/events (`source=tetragon_logs` in snapshot payload).
+- Source: Tetragon logs/events from the `tcp-connect.yaml` tracing policy (`source=tetragon_logs` in snapshot payload).
 - Output: metadata-only dependency edges (no packet payload capture, no process args/env collection).
 - Behavior: bounded, deterministic ordering, and fail-soft when the source is unavailable.
 - Unknown destinations/sources are included as `kind="unknown"` edges.
@@ -276,7 +276,7 @@ docker push  ghcr.io/sentinella/sentinella-hub-k8s-agent:0.1.0
      --dry-run=client -o yaml | kubectl apply -f -
    ```
 2. (Required when `COLLECT_DEPENDENCIES_TETRAGON=true`) Render and apply the Tetragon manifest:
-   ```bash
+    ```bash
     TETRAGON_VERSION=v1.7.0
     helm repo add cilium https://helm.cilium.io
     helm repo update
@@ -288,7 +288,9 @@ docker push  ghcr.io/sentinella/sentinella-hub-k8s-agent:0.1.0
       --version "${TETRAGON_VERSION#v}" > tetragon.yaml
     kubectl apply -f tetragon.yaml
     kubectl rollout status -n kube-system ds/tetragon -w
+    kubectl apply -f "https://raw.githubusercontent.com/cilium/tetragon/${TETRAGON_VERSION}/examples/tracingpolicy/tcp-connect.yaml"
     ```
+   Review the generated policy before applying if you need stricter supply-chain control.
 3. Install the agent:
    - Convenience path: `curl | bash` executes the installer directly. If you need to audit the script first, download `install.sh` and run it locally instead.
    - Optional integrity check: set `VERIFY_MANIFEST_CHECKSUM=true` (or `1`) to verify the downloaded `agent.yaml` before apply.

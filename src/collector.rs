@@ -383,10 +383,22 @@ struct ServiceIpInfo {
 }
 
 fn parse_tetragon_record(value: &Value) -> Option<TetragonDependencyRecord> {
-    let src_ip = get_string_path(value, &["/src_ip", "/flow/src_ip", "/flow/ip/source"])?;
-    let dst_ip = get_string_path(value, &["/dst_ip", "/flow/dst_ip", "/flow/ip/destination"])?;
-    let protocol = get_string_path(value, &["/protocol", "/flow/protocol"])
-        .unwrap_or_else(|| "UNKNOWN".to_string());
+    parse_tetragon_flow_record(value).or_else(|| parse_tetragon_kprobe_record(value))
+}
+
+fn parse_tetragon_flow_record(value: &Value) -> Option<TetragonDependencyRecord> {
+    let src_ip = normalize_tetragon_ip(get_string_path(
+        value,
+        &["/src_ip", "/flow/src_ip", "/flow/ip/source"],
+    )?);
+    let dst_ip = normalize_tetragon_ip(get_string_path(
+        value,
+        &["/dst_ip", "/flow/dst_ip", "/flow/ip/destination"],
+    )?);
+    let protocol = normalize_tetragon_protocol(
+        get_string_path(value, &["/protocol", "/flow/protocol"])
+            .unwrap_or_else(|| "UNKNOWN".to_string()),
+    );
     let destination_port = get_u64_path(
         value,
         &[
@@ -407,6 +419,59 @@ fn parse_tetragon_record(value: &Value) -> Option<TetragonDependencyRecord> {
     .unwrap_or(1);
     let timestamp_unix_ms = get_u128_path(
         value,
+        &[
+            "/timestamp_unix_ms",
+            "/time_unix_ms",
+            "/flow/timestamp_unix_ms",
+        ],
+    )
+    .unwrap_or_else(now_unix_ms);
+
+    Some(TetragonDependencyRecord {
+        src_ip,
+        dst_ip,
+        protocol,
+        destination_port,
+        bytes,
+        packets,
+        connections,
+        timestamp_unix_ms,
+    })
+}
+
+fn parse_tetragon_kprobe_record(value: &Value) -> Option<TetragonDependencyRecord> {
+    let kprobe = value.pointer("/process_kprobe")?;
+    let function_name = kprobe.pointer("/function_name").and_then(Value::as_str)?;
+    let args = kprobe.pointer("/args")?.as_array()?;
+    let sock_arg = match args.iter().find_map(|arg| arg.pointer("/sock_arg")) {
+        Some(sock_arg) => sock_arg,
+        None => {
+            warn!(function_name, "missing sock_arg in tetragon kprobe record");
+            return None;
+        }
+    };
+
+    let (bytes, packets, connections) = match function_name {
+        "tcp_sendmsg" => (
+            args.get(1)
+                .and_then(|arg| arg.pointer("/int_arg"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+            1,
+            0,
+        ),
+        "tcp_close" => (0, 0, 1),
+        _ => return None,
+    };
+
+    let src_ip = normalize_tetragon_ip(get_string_path(sock_arg, &["/saddr", "/src_ip"])?);
+    let dst_ip = normalize_tetragon_ip(get_string_path(sock_arg, &["/daddr", "/dst_ip"])?);
+    let protocol = normalize_tetragon_protocol(
+        get_string_path(sock_arg, &["/protocol"]).unwrap_or_else(|| "UNKNOWN".to_string()),
+    );
+    let destination_port = get_u64_path(sock_arg, &["/dport"]).unwrap_or(0) as u16;
+    let timestamp_unix_ms = get_u128_path(
+        kprobe,
         &[
             "/timestamp_unix_ms",
             "/time_unix_ms",
@@ -572,6 +637,18 @@ fn get_u128_path(value: &Value, pointers: &[&str]) -> Option<u128> {
                 .or_else(|| v.as_str().and_then(|text| text.trim().parse::<u128>().ok()))
         })
     })
+}
+
+fn normalize_tetragon_ip(ip: String) -> String {
+    ip.strip_prefix("::ffff:").unwrap_or(&ip).to_string()
+}
+
+fn normalize_tetragon_protocol(protocol: String) -> String {
+    let protocol = protocol.trim().to_lowercase();
+    protocol
+        .strip_prefix("ipproto_")
+        .unwrap_or(&protocol)
+        .to_string()
 }
 
 fn now_unix_ms() -> u128 {
@@ -1326,6 +1403,69 @@ mod tests {
     }
 
     #[test]
+    fn parse_tetragon_record_extracts_tcp_connect_sock_args() {
+        let value = json!({
+            "process_kprobe": {
+                "function_name": "tcp_sendmsg",
+                "args": [
+                    {
+                        "sock_arg": {
+                            "family": "AF_INET6",
+                            "type": "SOCK_STREAM",
+                            "protocol": "IPPROTO_TCP",
+                            "saddr": "::ffff:10.42.0.11",
+                            "daddr": "::ffff:10.42.1.233",
+                            "sport": 9234,
+                            "dport": 57924,
+                            "cookie": "18446619261531505280",
+                            "state": "TCP_ESTABLISHED"
+                        }
+                    },
+                    { "int_arg": 39 }
+                ]
+            }
+        });
+
+        let parsed = parse_tetragon_record(&value).expect("record should parse");
+        assert_eq!(parsed.src_ip, "10.42.0.11");
+        assert_eq!(parsed.dst_ip, "10.42.1.233");
+        assert_eq!(parsed.protocol, "tcp");
+        assert_eq!(parsed.destination_port, 57924);
+        assert_eq!(parsed.bytes, 39);
+        assert_eq!(parsed.packets, 1);
+        assert_eq!(parsed.connections, 0);
+    }
+
+    #[test]
+    fn parse_tetragon_record_counts_tcp_close_as_connection() {
+        let value = json!({
+            "process_kprobe": {
+                "function_name": "tcp_close",
+                "args": [
+                    {
+                        "sock_arg": {
+                            "family": "AF_INET6",
+                            "type": "SOCK_STREAM",
+                            "protocol": "IPPROTO_TCP",
+                            "saddr": "::ffff:10.42.0.11",
+                            "daddr": "::ffff:10.42.1.233",
+                            "sport": 9234,
+                            "dport": 57924,
+                            "cookie": "18446619261531505280",
+                            "state": "TCP_ESTABLISHED"
+                        }
+                    }
+                ]
+            }
+        });
+
+        let parsed = parse_tetragon_record(&value).expect("record should parse");
+        assert_eq!(parsed.bytes, 0);
+        assert_eq!(parsed.packets, 0);
+        assert_eq!(parsed.connections, 1);
+    }
+
+    #[test]
     fn resolve_endpoint_prefers_pod_then_service_then_unknown() {
         let mut pods = BTreeMap::new();
         pods.insert(
@@ -1359,6 +1499,23 @@ mod tests {
         let unknown = resolve_endpoint("10.99.0.1", &pods, &services);
         assert_eq!(unknown.kind, "unknown");
         assert_eq!(unknown.ip.as_deref(), Some("10.99.0.1"));
+    }
+
+    #[test]
+    fn normalize_tetragon_helpers_handle_ipv6_and_protocol_prefixes() {
+        assert_eq!(
+            normalize_tetragon_ip("::ffff:10.42.0.11".to_string()),
+            "10.42.0.11"
+        );
+        assert_eq!(
+            normalize_tetragon_ip("2001:db8::1".to_string()),
+            "2001:db8::1"
+        );
+        assert_eq!(
+            normalize_tetragon_protocol("IPPROTO_TCP".to_string()),
+            "tcp"
+        );
+        assert_eq!(normalize_tetragon_protocol("tcp".to_string()), "tcp");
     }
 
     #[test]
