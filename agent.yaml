@@ -115,6 +115,7 @@ data:
   COLLECT_SECRETS: "false"           # requires separate secrets-reader RBAC when true
   COLLECT_DEPENDENCIES_TETRAGON: "false"  # opt-in; requires Tetragon manifest applied (see README Deploy section)
   TETRAGON_LOG_PATH: "/var/run/tetragon/tetragon-events.jsonl"
+  FULL_DEBUG: "false"                 # last resort only; emits full payloads and bodies
   AGENT_HTTP_DEBUG: "false"
   AGENT_HTTP_DEBUG_BODIES: "false"
   AGENT_LOG: "info"

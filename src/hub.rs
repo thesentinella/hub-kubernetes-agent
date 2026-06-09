@@ -58,8 +58,8 @@ impl HubClient {
             debug!(
                 method = "POST",
                 urls = ?urls,
-                request_preview_enabled = self.cfg.http_debug_bodies,
-                request_body_preview = %body_preview_opt(request_body.as_deref()),
+                request_body_logging = if self.cfg.full_debug { "full" } else { "preview" },
+                request_body = %body_for_log(request_body.as_deref(), self.cfg.full_debug),
                 schema_version = snap.schema_version,
                 namespaces = snap.namespaces.len(),
                 deployments = snap.workloads.deployments.len(),
@@ -97,13 +97,13 @@ impl HubClient {
 
                         if self.cfg.http_debug {
                             debug!(
-                                method = "POST",
-                                url = %url,
+                                        method = "POST",
+                                        url = %url,
                                 status = %s,
                                 content_type = %content_type,
                                 content_length = ?content_length,
                                 elapsed_ms = start.elapsed().as_millis(),
-                                body_preview = %body_preview_opt(self.cfg.http_debug_bodies.then_some(body_text.as_deref().unwrap_or_default())),
+                                body_preview = %body_for_log(self.cfg.http_debug_bodies.then_some(body_text.as_deref().unwrap_or_default()), self.cfg.full_debug),
                                 "inventory response"
                             );
                         }
@@ -118,7 +118,7 @@ impl HubClient {
                                         e,
                                         s,
                                         content_type,
-                                        error_body_preview(Some(body_text), self.cfg.http_debug_bodies)
+                                        error_body_for_log(Some(body_text), self.cfg.full_debug, self.cfg.http_debug_bodies)
                                     )
                                 })?;
                                 if body.already_existed {
@@ -151,8 +151,9 @@ impl HubClient {
                                 "hub rejected snapshot: {} (content_type={}, body_preview={})",
                                 s,
                                 content_type,
-                                error_body_preview(
+                                error_body_for_log(
                                     body_text.as_deref(),
+                                    self.cfg.full_debug,
                                     self.cfg.http_debug_bodies
                                 )
                             ));
@@ -186,7 +187,7 @@ impl HubClient {
                     content_type = %content_type,
                     content_length = ?content_length,
                     elapsed_ms = start.elapsed().as_millis(),
-                    body_preview = %body_preview_opt(self.cfg.http_debug_bodies.then_some(body.as_str())),
+                    body_preview = %body_for_log(self.cfg.http_debug_bodies.then_some(body.as_str()), self.cfg.full_debug),
                     "cluster status response"
                 );
             }
@@ -203,7 +204,11 @@ impl HubClient {
                     "cluster status fetch failed: {} (content_type={}, body_preview={})",
                     status,
                     content_type,
-                    error_body_preview(Some(body.as_str()), self.cfg.http_debug_bodies)
+                    error_body_for_log(
+                        Some(body.as_str()),
+                        self.cfg.full_debug,
+                        self.cfg.http_debug_bodies
+                    )
                 ));
             }
 
@@ -217,7 +222,7 @@ impl HubClient {
                     e,
                     status,
                     content_type,
-                    error_body_preview(Some(body.as_str()), self.cfg.http_debug_bodies)
+                    error_body_for_log(Some(body.as_str()), self.cfg.full_debug, self.cfg.http_debug_bodies)
                 )
             });
         }
@@ -278,7 +283,7 @@ impl HubClient {
                     content_type = %content_type,
                     content_length = ?content_length,
                     elapsed_ms = start.elapsed().as_millis(),
-                    body_preview = %body_preview_opt(self.cfg.http_debug_bodies.then_some(body.as_str())),
+                    body_preview = %body_for_log(self.cfg.http_debug_bodies.then_some(body.as_str()), self.cfg.full_debug),
                     "poll response"
                 );
             }
@@ -300,7 +305,11 @@ impl HubClient {
                     "poll status {} (content_type={}, body_preview={})",
                     status,
                     content_type,
-                    error_body_preview(Some(body.as_str()), self.cfg.http_debug_bodies)
+                    error_body_for_log(
+                        Some(body.as_str()),
+                        self.cfg.full_debug,
+                        self.cfg.http_debug_bodies
+                    )
                 ));
             }
 
@@ -314,7 +323,7 @@ impl HubClient {
                     e,
                     status,
                     content_type,
-                    error_body_preview(Some(body.as_str()), self.cfg.http_debug_bodies)
+                    error_body_for_log(Some(body.as_str()), self.cfg.full_debug, self.cfg.http_debug_bodies)
                 )
             });
         }
@@ -339,8 +348,8 @@ impl HubClient {
             debug!(
                 method = "POST",
                 urls = ?urls,
-                request_preview_enabled = self.cfg.http_debug_bodies,
-                request_body_preview = %body_preview_opt(request_body.as_deref()),
+                request_body_logging = if self.cfg.full_debug { "full" } else { "preview" },
+                request_body = %body_for_log(request_body.as_deref(), self.cfg.full_debug),
                 command_id = %result.command_id,
                 status = result.status,
                 dry_run = ?result.dry_run,
@@ -369,11 +378,7 @@ impl HubClient {
                     content_type = %content_type,
                     content_length = ?content_length,
                     elapsed_ms = start.elapsed().as_millis(),
-                    body_preview = %body_preview_opt(if self.cfg.http_debug_bodies {
-                        body.as_deref()
-                    } else {
-                        None
-                    }),
+                    body_preview = %body_for_log(if self.cfg.http_debug_bodies { body.as_deref() } else { None }, self.cfg.full_debug),
                     "ack response"
                 );
             }
@@ -395,7 +400,11 @@ impl HubClient {
                     "ack returned {} (content_type={}, body_preview={})",
                     status,
                     content_type,
-                    error_body_preview_opt(body.as_deref(), self.cfg.http_debug_bodies)
+                    error_body_for_log_opt(
+                        body.as_deref(),
+                        self.cfg.full_debug,
+                        self.cfg.http_debug_bodies
+                    )
                 );
             }
             break;
@@ -493,9 +502,15 @@ fn response_content_type(resp: &reqwest::Response) -> String {
         .to_string()
 }
 
-fn body_preview_opt(body: Option<&str>) -> String {
+fn body_for_log(body: Option<&str>, full_debug: bool) -> String {
     match body {
-        Some(b) => body_preview(b),
+        Some(b) => {
+            if full_debug {
+                body_full(b)
+            } else {
+                body_preview(b)
+            }
+        }
         None => "<disabled>".into(),
     }
 }
@@ -511,6 +526,10 @@ fn body_preview(body: &str) -> String {
     preview
 }
 
+fn body_full(body: &str) -> String {
+    sanitize_for_log(body).trim().to_string()
+}
+
 fn sanitize_for_log(input: &str) -> String {
     input
         .chars()
@@ -518,16 +537,16 @@ fn sanitize_for_log(input: &str) -> String {
         .collect()
 }
 
-fn error_body_preview(body: Option<&str>, bodies_enabled: bool) -> String {
+fn error_body_for_log(body: Option<&str>, full_debug: bool, bodies_enabled: bool) -> String {
     if !bodies_enabled {
         return "<body logging disabled>".into();
     }
-    body_preview_opt(body)
+    body_for_log(body, full_debug)
 }
 
-fn error_body_preview_opt(body: Option<&str>, bodies_enabled: bool) -> String {
+fn error_body_for_log_opt(body: Option<&str>, full_debug: bool, bodies_enabled: bool) -> String {
     if !bodies_enabled {
         return "<body logging disabled>".into();
     }
-    body_preview_opt(body)
+    body_for_log(body, full_debug)
 }
