@@ -43,6 +43,9 @@ pub struct Config {
     /// Enables bounded response/request body previews in Hub HTTP debug logs.
     pub http_debug_bodies: bool,
 
+    /// Enables full request/response body logging for debugging.
+    pub full_debug: bool,
+
     /// Pod name (downward API).
     pub pod_name: String,
 
@@ -74,8 +77,9 @@ impl Config {
         let http_timeout = parse_secs("HTTP_TIMEOUT_SECS", 20);
         let lease_ttl = parse_secs("LEASE_TTL_SECS", 30);
 
-        let http_debug = env_flag("AGENT_HTTP_DEBUG");
-        let http_debug_bodies = env_flag("AGENT_HTTP_DEBUG_BODIES");
+        let full_debug = env_flag("FULL_DEBUG");
+        let http_debug = full_debug || env_flag("AGENT_HTTP_DEBUG");
+        let http_debug_bodies = full_debug || env_flag("AGENT_HTTP_DEBUG_BODIES");
 
         let actions_enabled = env::var("ACTIONS_ENABLED")
             .ok()
@@ -107,6 +111,7 @@ impl Config {
             http_timeout,
             http_debug,
             http_debug_bodies,
+            full_debug,
             pod_name,
             pod_namespace,
             node_name,
@@ -158,6 +163,7 @@ mod tests {
             "POLL_WAIT_SECS",
             "HTTP_TIMEOUT_SECS",
             "LEASE_TTL_SECS",
+            "FULL_DEBUG",
             "AGENT_HTTP_DEBUG",
             "AGENT_HTTP_DEBUG_BODIES",
             "ACTIONS_ENABLED",
@@ -391,6 +397,21 @@ mod tests {
             }
             env::remove_var("AGENT_HTTP_DEBUG");
             env::remove_var("AGENT_HTTP_DEBUG_BODIES");
+            clear_required();
+        }
+    }
+
+    #[test]
+    fn full_debug_implies_http_debug_flags() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        unsafe {
+            reset_env();
+            set_required("https://hub.example.com", "cluster-1");
+            env::set_var("FULL_DEBUG", "true");
+            let cfg = Config::from_env().unwrap();
+            assert!(cfg.full_debug);
+            assert!(cfg.http_debug);
+            assert!(cfg.http_debug_bodies);
             clear_required();
         }
     }

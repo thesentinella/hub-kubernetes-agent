@@ -355,6 +355,7 @@ mod tests {
             http_timeout: Duration::from_secs(20),
             http_debug: false,
             http_debug_bodies: false,
+            full_debug: false,
             pod_name: "pod-1".into(),
             pod_namespace: "sentinella".into(),
             node_name: "node-1".into(),

@@ -223,7 +223,7 @@ Target API route family is `/api/v1/...` on `https://api.hub.sentinel.la`.
 
 - `command poll failed: poll status 404 Not Found` usually means route mismatch (`/v1/...` vs `/api/v1/...`) or missing backend endpoint.
 - `error decoding response body: expected value at line 1 column 1` usually means the poll endpoint returned non-JSON or empty body where JSON was expected.
-- For temporary wire diagnostics, set `AGENT_LOG=debug` and `AGENT_HTTP_DEBUG=true`. Set `AGENT_HTTP_DEBUG_BODIES=true` only when needed; logs include bounded (`200` chars) response body previews and POST request body previews.
+- For temporary wire diagnostics, set `AGENT_LOG=debug` and `AGENT_HTTP_DEBUG=true`. Set `AGENT_HTTP_DEBUG_BODIES=true` only when needed; logs include bounded (`200` chars) response body previews and POST request body previews. `FULL_DEBUG=true` is a last resort only and prints full payloads and bodies.
 
 ## Configuration (env vars from ConfigMap/Secret)
 
@@ -244,6 +244,7 @@ Recommended `HUB_URL` is `https://api.hub.sentinel.la`.
 | `COLLECT_SECRETS` | ConfigMap | `false` |
 | `COLLECT_DEPENDENCIES_TETRAGON` | ConfigMap | `false` |
 | `TETRAGON_LOG_PATH` | ConfigMap | `/var/run/tetragon/tetragon-events.jsonl` |
+| `FULL_DEBUG` | ConfigMap | `false` |
 | `AGENT_HTTP_DEBUG` | ConfigMap | `false` |
 | `AGENT_HTTP_DEBUG_BODIES` | ConfigMap | `false` |
 | `AGENT_LOG` | ConfigMap | `info` |
@@ -318,7 +319,7 @@ docker push  ghcr.io/sentinella/sentinella-hub-k8s-agent:0.1.0
     curl localhost:9090/metrics
     ```
 
-OpenShift installs use the same agent image and code path, but the installer strips fixed UID/GID settings and removes the Tetragon `hostPath` mount unless `COLLECT_DEPENDENCIES_TETRAGON=true`. The manifest checksum check is opt-in and off by default.
+OpenShift installs use the same agent image and code path, but the installer strips fixed UID/GID settings and removes the Tetragon `hostPath` mount unless `COLLECT_DEPENDENCIES_TETRAGON=true`. The manifest checksum check is opt-in and off by default. `FULL_DEBUG` is a last resort only.
 
 The `Lease` object will appear once the first pod is up; its `holderIdentity` is the leader node's name.
 
