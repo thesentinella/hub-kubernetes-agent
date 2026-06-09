@@ -302,6 +302,7 @@ docker push  ghcr.io/sentinella/sentinella-hub-k8s-agent:0.1.0
        | CLUSTER_ID="my-cluster" HUB_API_KEY="shub_..." bash -s -- --platform openshift
      ```
    - Or set `INSTALL_PLATFORM=kubernetes|openshift`.
+   - OpenShift installs work without Tetragon by default; set `COLLECT_DEPENDENCIES_TETRAGON=true` only if your cluster SCC allows the `hostPath` mount.
 
 4. If you install manually, edit `agent.yaml`:
       - `CLUSTER_ID` unique per cluster.
@@ -317,7 +318,7 @@ docker push  ghcr.io/sentinella/sentinella-hub-k8s-agent:0.1.0
     curl localhost:9090/metrics
     ```
 
-OpenShift installs use the same agent image and code path, but the installer strips fixed UID/GID settings and fails fast if the cluster rejects the required `hostPath` mount used for Tetragon log ingestion. The manifest checksum check is opt-in and off by default.
+OpenShift installs use the same agent image and code path, but the installer strips fixed UID/GID settings and removes the Tetragon `hostPath` mount unless `COLLECT_DEPENDENCIES_TETRAGON=true`. The manifest checksum check is opt-in and off by default.
 
 The `Lease` object will appear once the first pod is up; its `holderIdentity` is the leader node's name.
 
