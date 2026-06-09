@@ -167,6 +167,43 @@ TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 BASE_MANIFEST="$TMPDIR/agent.yaml"
 RENDERED_MANIFEST="$TMPDIR/agent.rendered.yaml"
+NAMESPACE_MANIFEST="$TMPDIR/agent.namespace.yaml"
+WORKLOAD_MANIFEST="$TMPDIR/agent.workload.yaml"
+
+split_namespace_manifest() {
+  awk -v ns="$NAMESPACE_MANIFEST" -v rest="$WORKLOAD_MANIFEST" '
+    BEGIN {
+      seen_first_separator = 0
+      in_rest = 0
+    }
+
+    /^[[:space:]]*---[[:space:]]*$/ {
+      if (!seen_first_separator) {
+        seen_first_separator = 1
+        print > ns
+      } else {
+        in_rest = 1
+        print > rest
+      }
+      next
+    }
+
+    {
+      if (!seen_first_separator) {
+        print > ns
+      } else if (in_rest) {
+        print > rest
+      } else {
+        print > ns
+      }
+    }
+
+    END {
+      close(ns)
+      close(rest)
+    }
+  ' "$RENDERED_MANIFEST"
+}
 
 # Validate API key before touching the cluster
 echo "Validating API key..."
@@ -269,8 +306,24 @@ if [ "$PLATFORM" = "openshift" ]; then
   esac
 fi
 
+: > "$NAMESPACE_MANIFEST"
+: > "$WORKLOAD_MANIFEST"
+split_namespace_manifest
+
+if ! grep -q '^kind: Namespace$' "$NAMESPACE_MANIFEST"; then
+  echo "Error: namespace manifest does not contain a Namespace resource." >&2
+  exit 1
+fi
+
+if [ ! -s "$WORKLOAD_MANIFEST" ]; then
+  echo "Error: workload manifest is empty after split." >&2
+  exit 1
+fi
+
+kubectl apply -f "$NAMESPACE_MANIFEST"
+
 echo "Validating manifest..."
-if ! kubectl apply --dry-run=server -f "$RENDERED_MANIFEST" >/dev/null; then
+if ! kubectl apply --dry-run=server -f "$WORKLOAD_MANIFEST" >/dev/null; then
   if [ "$PLATFORM" = "openshift" ]; then
     echo "Error: OpenShift rejected the agent manifest. The cluster may not allow hostPath mounts for Tetragon or the current SCC is too restrictive." >&2
   else
@@ -279,7 +332,7 @@ if ! kubectl apply --dry-run=server -f "$RENDERED_MANIFEST" >/dev/null; then
   exit 1
 fi
 
-kubectl apply -f "$RENDERED_MANIFEST"
+kubectl apply -f "$WORKLOAD_MANIFEST"
 
 # Create secret separately (not in agent.yaml)
 printf '%s' "$HUB_API_KEY" | kubectl create secret generic sentinella-hub-k8s-agent-auth \
