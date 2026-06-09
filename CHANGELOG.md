@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.19.8](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.19.7...v0.19.8) (2026-06-09)
+
+
+### Bug Fixes
+
+* tetragon TCP tracing policy ([#87](https://github.com/thesentinella/hub-kubernetes-agent/issues/87)) ([4df31fc](https://github.com/thesentinella/hub-kubernetes-agent/commit/4df31fcb5c1e2a7f122732d2520ab9545e28fbb2))
+
 ## [0.19.7](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.19.6...v0.19.7) (2026-06-09)
 
 
