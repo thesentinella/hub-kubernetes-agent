@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.20.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.19.8...v0.20.0) (2026-06-10)
+
+
+### Features
+
+* add Tetragon gRPC sidecar ingestion ([#89](https://github.com/thesentinella/hub-kubernetes-agent/issues/89)) ([072c4a0](https://github.com/thesentinella/hub-kubernetes-agent/commit/072c4a05f3395239444ebbc0179ced6b6ca274d0))
+
 ## [0.19.8](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.19.7...v0.19.8) (2026-06-09)
 
 
