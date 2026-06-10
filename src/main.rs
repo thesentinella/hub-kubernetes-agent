@@ -158,7 +158,7 @@ async fn build_and_send(cfg: &Config, kube: &KubeClient, hub: &HubClient) -> Res
         kube,
         cfg.collect_secrets,
         cfg.collect_dependencies_tetragon,
-        &cfg.tetragon_log_path,
+        &cfg.tetragon_sidecar_url,
     )
     .await?;
     let snap = InventorySnapshot {
@@ -351,7 +351,7 @@ mod tests {
             actions_enabled: false,
             collect_secrets: false,
             collect_dependencies_tetragon: false,
-            tetragon_log_path: "/var/run/tetragon/tetragon-events.jsonl".into(),
+            tetragon_sidecar_url: "http://127.0.0.1:9801/events".into(),
             http_timeout: Duration::from_secs(20),
             http_debug: false,
             http_debug_bodies: false,

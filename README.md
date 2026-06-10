@@ -13,7 +13,7 @@ Inventory collector and (future) action executor for Kubernetes and OpenShift cl
   - **Pods**: age in seconds (`age_seconds`), each container with image, **detected technology** (vendor/product/version inferred from the image), `requests` and `limits` (CPU and memory).
   - **Configuration**: ConfigMaps metadata by default, and optional Secrets metadata when `COLLECT_SECRETS=true` (name/namespace/type/immutability/labels/annotations) plus key names only (`data_keys`, `binary_data_keys` where applicable), never raw values.
   - **Network**: Services (type, selector, ports, exposure metadata) and Ingresses (class, hosts/paths/backends, TLS summary, load balancer status hints).
-  - **Dependencies (optional)**: bounded pod/service dependency edges derived from Tetragon logs/events (`source=tetragon_logs`), including unresolved `unknown` edges when endpoint mapping is unavailable.
+  - **Dependencies (optional)**: bounded pod/service dependency edges derived from a node-local Tetragon gRPC sidecar (`source=tetragon_grpc_sidecar`), including unresolved `unknown` edges when endpoint mapping is unavailable.
   - **Storage**: StorageClasses (name/provisioner/safe parameter subset), PersistentVolumes, PersistentVolumeClaims, VolumeSnapshotClasses, and VolumeSnapshots.
   - **Events**: Kubernetes `Warning` and `Normal` events with bounded payload (max 500 events per snapshot, event message truncated to 500 chars).
 - Maintains an open long-poll against the Hub for command delivery. **Action execution is disabled by default** (`ACTIONS_ENABLED=false`); the agent replies with `skipped` and an explanatory message to any command received. When actions are explicitly enabled, the agent can preview workload resource patches with a Kubernetes server-side dry-run.
@@ -68,16 +68,15 @@ Technology detection in this release is intentionally image-derived only. Proces
 
 Unit tests are included in `tech.rs`. Extending coverage is one entry in the `RULES` table.
 
-### Dependency collection (Tetragon, phase 1)
+### Dependency collection (Tetragon)
 
 Dependency collection is opt-in and disabled by default (`COLLECT_DEPENDENCIES_TETRAGON=false`).
 
-- Source: Tetragon logs/events from the `tcp-connect.yaml` tracing policy (`source=tetragon_logs` in snapshot payload).
+- Source: node-local Tetragon gRPC stream, re-exposed to the agent by a sidecar (`source=tetragon_grpc_sidecar` in snapshot payload).
 - Output: metadata-only dependency edges (no packet payload capture, no process args/env collection).
 - Behavior: bounded, deterministic ordering, and fail-soft when the source is unavailable.
+- The sidecar auto-loads a node-local `tcp_sendmsg`/`tcp_close` tracing policy through Tetragon gRPC so users do not have to apply a policy manually.
 - Unknown destinations/sources are included as `kind="unknown"` edges.
-
-Direct Tetragon gRPC ingestion is deferred to a follow-up issue (`SEN-253`).
 
 ### Actions — designed for gradual rollout
 
@@ -243,7 +242,8 @@ Recommended `HUB_URL` is `https://api.hub.sentinel.la`.
 | `ACTIONS_ENABLED` | ConfigMap | `false` |
 | `COLLECT_SECRETS` | ConfigMap | `false` |
 | `COLLECT_DEPENDENCIES_TETRAGON` | ConfigMap | `false` |
-| `TETRAGON_LOG_PATH` | ConfigMap | `/var/run/tetragon/tetragon-events.jsonl` |
+| `TETRAGON_SIDECAR_URL` | ConfigMap | `http://127.0.0.1:9801/events` |
+| `TETRAGON_GRPC_ADDRESS` | ConfigMap | optional override; defaults to `unix:///var/run/tetragon/tetragon.sock` |
 | `FULL_DEBUG` | ConfigMap | `false` |
 | `AGENT_HTTP_DEBUG` | ConfigMap | `false` |
 | `AGENT_HTTP_DEBUG_BODIES` | ConfigMap | `false` |
@@ -255,15 +255,22 @@ When `AGENT_VERSION_OVERRIDE` is set to a non-empty value, snapshots report that
 
 When `COLLECT_SECRETS=true`, the agent attempts to collect Secret metadata and key names. This requires separate read RBAC for `secrets` (`get/list/watch`).
 
-When `COLLECT_DEPENDENCIES_TETRAGON=true`, the agent attempts to ingest Tetragon events from `TETRAGON_LOG_PATH`. If the source is unavailable or unreadable, dependency collection is fail-soft and snapshots continue.
+When `COLLECT_DEPENDENCIES_TETRAGON=true`, the sidecar attempts to connect to Tetragon gRPC at `TETRAGON_GRPC_ADDRESS` when set, otherwise at the default Unix socket `unix:///var/run/tetragon/tetragon.sock`. The agent reads recent events from `TETRAGON_SIDECAR_URL`.
+
+Dependency collection remains fail-soft at the snapshot layer, but the sidecar's readiness probe blocks the pod from becoming Ready while dependency collection is enabled and Tetragon is not connected.
 
 ## Build
 
-The container build uses `rust:1.95-alpine3.23` as the builder base image.
+This repository now produces two images from the same `Dockerfile`:
+
+- `agent-runtime` — the Rust agent image
+- `sidecar-runtime` — the Go-based Tetragon sidecar image
 
 ```bash
-docker build -t ghcr.io/sentinella/sentinella-hub-k8s-agent:0.1.0 .
-docker push  ghcr.io/sentinella/sentinella-hub-k8s-agent:0.1.0
+podman build --target agent-runtime -t ghcr.io/sentinella/sentinella-hub-k8s-agent:0.1.0 .
+podman build --target sidecar-runtime -t ghcr.io/sentinella/sentinella-hub-k8s-tetragon-sidecar:0.1.0 .
+podman push ghcr.io/sentinella/sentinella-hub-k8s-agent:0.1.0
+podman push ghcr.io/sentinella/sentinella-hub-k8s-tetragon-sidecar:0.1.0
 ```
 
 ## Deploy
@@ -275,22 +282,21 @@ docker push  ghcr.io/sentinella/sentinella-hub-k8s-agent:0.1.0
      --from-file=api-key=/dev/stdin \
      --dry-run=client -o yaml | kubectl apply -f -
    ```
-2. (Required when `COLLECT_DEPENDENCIES_TETRAGON=true`) Render and apply the Tetragon manifest:
+2. (Required when `COLLECT_DEPENDENCIES_TETRAGON=true`) Install Tetragon with gRPC enabled:
     ```bash
     TETRAGON_VERSION=v1.7.0
     helm repo add cilium https://helm.cilium.io
     helm repo update
-    helm template tetragon cilium/tetragon \
+    helm upgrade --install tetragon cilium/tetragon \
       --namespace kube-system \
-      --set tetragon.exportFilename=tetragon-events.jsonl \
-      --set exportDirectory=/var/run/tetragon \
-      --set tetragon.exportFilePerm=644 \
-      --version "${TETRAGON_VERSION#v}" > tetragon.yaml
-    kubectl apply -f tetragon.yaml
+      --create-namespace \
+      --set tetragon.grpc.enabled=true \
+      --set tetragon.grpc.address=unix:///var/run/tetragon/tetragon.sock \
+      --version "${TETRAGON_VERSION#v}"
     kubectl rollout status -n kube-system ds/tetragon -w
-    kubectl apply -f "https://raw.githubusercontent.com/cilium/tetragon/${TETRAGON_VERSION}/examples/tracingpolicy/tcp-connect.yaml"
     ```
-   Review the generated policy before applying if you need stricter supply-chain control.
+   The agent sidecar loads its own node-local tracing policy over gRPC; no separate `kubectl apply` is required.
+   If you do not override `tetragon.grpc.address`, the sidecar uses Tetragon's default Unix socket path.
 3. Install the agent:
    - Convenience path: `curl | bash` executes the installer directly. If you need to audit the script first, download `install.sh` and run it locally instead.
    - Optional integrity check: set `VERIFY_MANIFEST_CHECKSUM=true` (or `1`) to verify the downloaded `agent.yaml` before apply.
@@ -309,8 +315,9 @@ docker push  ghcr.io/sentinella/sentinella-hub-k8s-agent:0.1.0
 
 4. If you install manually, edit `agent.yaml`:
       - `CLUSTER_ID` unique per cluster.
-      - `image:` pointing to your registry.
-      - For dependency collection: set `COLLECT_DEPENDENCIES_TETRAGON=true` and point `TETRAGON_LOG_PATH` to your Tetragon event file path.
+      - `image:` for the `agent` container pointing to your Rust agent image.
+      - `image:` for the `tetragon-sidecar` container pointing to your Go sidecar image.
+      - For dependency collection: set `COLLECT_DEPENDENCIES_TETRAGON=true`. The sidecar defaults to `unix:///var/run/tetragon/tetragon.sock`; set `TETRAGON_GRPC_ADDRESS` only for nonstandard Tetragon installs. The agent reads `TETRAGON_SIDECAR_URL`.
       - Toleration block — current value runs on every node including control plane; trim if you want a smaller footprint.
 5. Verify:
     ```bash
@@ -321,7 +328,7 @@ docker push  ghcr.io/sentinella/sentinella-hub-k8s-agent:0.1.0
     curl localhost:9090/metrics
     ```
 
-OpenShift installs use the same agent image and code path, but the installer strips fixed UID/GID settings and removes the Tetragon `hostPath` mount unless `COLLECT_DEPENDENCIES_TETRAGON=true`. The manifest checksum check is opt-in and off by default. `FULL_DEBUG` is a last resort only.
+OpenShift installs use the same agent image and code path, but the installer strips fixed UID/GID settings and removes the Tetragon `hostPath` mount unless `COLLECT_DEPENDENCIES_TETRAGON=true`. With dependency collection disabled, the sidecar stays dormant and does not affect pod readiness. With dependency collection enabled, sidecar readiness blocks pod readiness until Tetragon is connected. The manifest checksum check is opt-in and off by default. `FULL_DEBUG` is a last resort only.
 
 The `Lease` object will appear once the first pod is up; its `holderIdentity` is the leader node's name.
 

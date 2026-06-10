@@ -14,17 +14,17 @@ use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kube::api::{ApiResource, DynamicObject, ListParams};
 use kube::core::GroupVersionKind;
 use kube::{Api, Client};
+use reqwest::StatusCode;
+use serde::Deserialize;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::File;
-use std::io::{BufRead, BufReader};
 use tracing::warn;
 
 pub async fn collect(
     client: &Client,
     collect_secrets: bool,
     collect_dependencies_tetragon: bool,
-    tetragon_log_path: &str,
+    tetragon_sidecar_url: &str,
 ) -> Result<(
     Option<String>,
     ClusterInfo,
@@ -139,10 +139,11 @@ pub async fn collect(
     sort_ingresses_for_snapshot(&mut ingresses);
     let dependencies = collect_dependency_inventory(
         collect_dependencies_tetragon,
-        tetragon_log_path,
+        tetragon_sidecar_url,
         &pods,
         &services,
-    );
+    )
+    .await;
     let pod_infos = pods.into_iter().map(map_pod).collect();
     let network = NetworkInventory {
         services: services.into_iter().map(map_service).collect(),
@@ -196,30 +197,30 @@ async fn kube_system_uid(client: &Client) -> Option<String> {
     }
 }
 
-fn collect_dependency_inventory(
+async fn collect_dependency_inventory(
     enabled: bool,
-    tetragon_log_path: &str,
+    tetragon_sidecar_url: &str,
     pods: &[Pod],
     services: &[Service],
 ) -> DependencyInventory {
     if !enabled {
         return DependencyInventory {
-            source: "tetragon_logs",
+            source: "tetragon_grpc_sidecar",
             window_seconds: DEP_WINDOW_SECONDS,
             ..DependencyInventory::default()
         };
     }
 
-    let file = match File::open(tetragon_log_path) {
-        Ok(file) => file,
+    let body = match fetch_tetragon_event_stream(tetragon_sidecar_url).await {
+        Ok(body) => body,
         Err(e) => {
             warn!(
-                path = %tetragon_log_path,
+                url = %tetragon_sidecar_url,
                 error = %e,
-                "tetragon log source unavailable; returning empty dependency inventory"
+                "tetragon sidecar unavailable; returning empty dependency inventory"
             );
             return DependencyInventory {
-                source: "tetragon_logs",
+                source: "tetragon_grpc_sidecar",
                 window_seconds: DEP_WINDOW_SECONDS,
                 ..DependencyInventory::default()
             };
@@ -233,18 +234,13 @@ fn collect_dependency_inventory(
     let mut dropped_edges = 0u64;
     let mut skipped_for_fanout = 0u64;
 
-    let reader = BufReader::new(file);
-    for line in reader.lines().take(MAX_TETRAGON_LINES) {
-        let line = match line {
-            Ok(line) if !line.trim().is_empty() => line,
-            Ok(_) => continue,
-            Err(e) => {
-                warn!(error = %e, "failed to read tetragon event line");
-                continue;
-            }
-        };
+    for line in body.lines().take(MAX_TETRAGON_LINES) {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
 
-        let value: Value = match serde_json::from_str(&line) {
+        let value: Value = match serde_json::from_str(line) {
             Ok(value) => value,
             Err(e) => {
                 warn!(error = %e, "failed to parse tetragon event json line");
@@ -319,14 +315,29 @@ fn collect_dependency_inventory(
     let truncated = dropped_total > 0;
     DependencyInventory {
         edges,
-        source: "tetragon_logs",
+        source: "tetragon_grpc_sidecar",
         window_seconds: DEP_WINDOW_SECONDS,
         truncated,
         dropped_edges: dropped_total,
     }
 }
 
-#[derive(Debug)]
+async fn fetch_tetragon_event_stream(tetragon_sidecar_url: &str) -> Result<String, reqwest::Error> {
+    let response = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()?
+        .get(tetragon_sidecar_url)
+        .send()
+        .await?;
+
+    if response.status() == StatusCode::SERVICE_UNAVAILABLE {
+        return Ok(String::new());
+    }
+
+    response.error_for_status()?.text().await
+}
+
+#[derive(Debug, Deserialize)]
 struct TetragonDependencyRecord {
     src_ip: String,
     dst_ip: String,
