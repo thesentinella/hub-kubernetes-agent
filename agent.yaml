@@ -113,8 +113,8 @@ data:
   LEASE_TTL_SECS: "30"
   ACTIONS_ENABLED: "false"           # read-only by default
   COLLECT_SECRETS: "false"           # requires separate secrets-reader RBAC when true
-  COLLECT_DEPENDENCIES_TETRAGON: "false"  # opt-in; requires Tetragon manifest applied (see README Deploy section)
-  TETRAGON_LOG_PATH: "/var/run/tetragon/tetragon-events.jsonl"
+  COLLECT_DEPENDENCIES_TETRAGON: "false"  # opt-in; requires Tetragon with gRPC enabled on each node
+  TETRAGON_SIDECAR_URL: "http://127.0.0.1:9801/events"
   FULL_DEBUG: "false"                 # last resort only; emits full payloads and bodies
   AGENT_HTTP_DEBUG: "false"
   AGENT_HTTP_DEBUG_BODIES: "false"
@@ -191,10 +191,6 @@ spec:
             - name: metrics
               containerPort: 9090
               protocol: TCP
-          volumeMounts:
-            - name: tetragon-events
-              mountPath: /var/run/tetragon
-              readOnly: true
           livenessProbe:
             httpGet:
               path: /livez
@@ -213,6 +209,39 @@ spec:
             limits:
               cpu: 200m
               memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+        - name: tetragon-sidecar
+          image: us-east1-docker.pkg.dev/sentinella-hub/kubernetes-agent/sentinella-hub-k8s-tetragon-sidecar:v0.19.8
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: sentinella-hub-k8s-agent-config
+          volumeMounts:
+            - name: tetragon-events
+              mountPath: /var/run/tetragon
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: 9801
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 9801
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
