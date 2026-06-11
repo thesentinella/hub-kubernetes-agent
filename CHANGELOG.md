@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.25.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.24.0...v0.25.0) (2026-06-11)
+
+
+### Features
+
+* add pod usage metrics ([#100](https://github.com/thesentinella/hub-kubernetes-agent/issues/100)) ([531bab6](https://github.com/thesentinella/hub-kubernetes-agent/commit/531bab6ca6e543ce822c4460c6de03b5698f5797))
+
 ## [0.24.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.23.0...v0.24.0) (2026-06-11)
 
 
