@@ -24,6 +24,12 @@ use tracing::warn;
 
 const AGENT_CONFIGMAP_NAME: &str = "sentinella-hub-k8s-agent-config";
 
+#[derive(Default)]
+struct PodUsageTotals {
+    cpu_nano: i128,
+    memory_bytes: i128,
+}
+
 pub async fn collect(
     client: &Client,
     collect_secrets: bool,
@@ -71,6 +77,7 @@ pub async fn collect(
     );
     let volume_snapshots_fut =
         list_dynamic_all(client, "snapshot.storage.k8s.io", "v1", "VolumeSnapshot");
+    let pod_metrics_fut = list_dynamic_all(client, "metrics.k8s.io", "v1beta1", "PodMetrics");
     let events_fut = list_all::<Event>(client, &lp);
     let version_fut = client.apiserver_version();
 
@@ -90,6 +97,7 @@ pub async fn collect(
         pvcs,
         volume_snapshot_classes,
         volume_snapshots,
+        pod_metrics,
         events,
         version,
         k8s_uid,
@@ -109,6 +117,7 @@ pub async fn collect(
         pvcs_fut,
         volume_snapshot_classes_fut,
         volume_snapshots_fut,
+        pod_metrics_fut,
         events_fut,
         version_fut,
         k8s_uid_fut
@@ -129,6 +138,7 @@ pub async fn collect(
     let pvcs = soft_unwrap("persistentvolumeclaims", pvcs);
     let volume_snapshot_classes = soft_unwrap("volumesnapshotclasses", volume_snapshot_classes);
     let volume_snapshots = soft_unwrap("volumesnapshots", volume_snapshots);
+    let pod_metrics = soft_unwrap("podmetrics", pod_metrics);
     let mut events = soft_unwrap("events", events);
 
     let cluster = build_cluster_info(version.ok(), &nodes);
@@ -142,7 +152,11 @@ pub async fn collect(
     sort_ingresses_for_snapshot(&mut ingresses);
     let dependencies =
         collect_dependency_inventory(collect_dependencies_tetragon, &pods, &services).await;
-    let pod_infos = pods.into_iter().map(map_pod).collect();
+    let pod_usage = build_pod_usage_index(&pod_metrics);
+    let pod_infos = pods
+        .into_iter()
+        .map(|pod| map_pod(pod, &pod_usage))
+        .collect();
     let network = NetworkInventory {
         services: services.into_iter().map(map_service).collect(),
         ingresses: ingresses.into_iter().map(map_ingress).collect(),
@@ -926,12 +940,15 @@ fn map_daemonset(d: DaemonSet) -> WorkloadRef {
     }
 }
 
-fn map_pod(p: Pod) -> PodInfo {
+fn map_pod(p: Pod, pod_usage: &BTreeMap<(String, String), PodUsageTotals>) -> PodInfo {
     let owner = p
         .metadata
         .owner_references
         .as_ref()
         .and_then(|refs| refs.first().cloned());
+    let namespace = p.metadata.namespace.clone().unwrap_or_default();
+    let name = p.metadata.name.clone().unwrap_or_default();
+    let usage = pod_usage.get(&(namespace.clone(), name.clone()));
 
     let containers = p
         .spec
@@ -951,15 +968,139 @@ fn map_pod(p: Pod) -> PodInfo {
         .unwrap_or_default();
 
     PodInfo {
-        namespace: p.metadata.namespace.unwrap_or_default(),
-        name: p.metadata.name.unwrap_or_default(),
+        namespace,
+        name,
         age_seconds: pod_age_seconds(p.metadata.creation_timestamp.as_ref()),
         node: p.spec.as_ref().and_then(|s| s.node_name.clone()),
         phase: p.status.and_then(|s| s.phase),
+        usage_cpu: usage.and_then(|usage| format_cpu_quantity(usage.cpu_nano)),
+        usage_memory: usage.and_then(|usage| format_memory_quantity(usage.memory_bytes)),
         owner_kind: owner.as_ref().map(|o| o.kind.clone()),
         owner_name: owner.as_ref().map(|o| o.name.clone()),
         containers,
     }
+}
+
+fn build_pod_usage_index(
+    pod_metrics: &[DynamicObject],
+) -> BTreeMap<(String, String), PodUsageTotals> {
+    pod_metrics.iter().filter_map(map_pod_metrics).collect()
+}
+
+fn map_pod_metrics(metric: &DynamicObject) -> Option<((String, String), PodUsageTotals)> {
+    let as_value = serde_json::to_value(metric).ok()?;
+    let namespace = as_value
+        .pointer("/metadata/namespace")
+        .and_then(Value::as_str)?
+        .to_string();
+    let name = as_value
+        .pointer("/metadata/name")
+        .and_then(Value::as_str)?
+        .to_string();
+
+    let containers = as_value.pointer("/containers")?.as_array()?;
+    let mut totals = PodUsageTotals::default();
+    for container in containers {
+        let usage = container.pointer("/usage")?;
+        let cpu = usage.pointer("/cpu").and_then(Value::as_str)?;
+        let memory = usage.pointer("/memory").and_then(Value::as_str)?;
+        totals.cpu_nano = totals.cpu_nano.checked_add(parse_cpu_quantity(cpu)?)?;
+        totals.memory_bytes = totals
+            .memory_bytes
+            .checked_add(parse_memory_quantity(memory)?)?;
+    }
+
+    Some(((namespace, name), totals))
+}
+
+fn parse_cpu_quantity(quantity: &str) -> Option<i128> {
+    parse_scaled_decimal(
+        quantity,
+        &[
+            ("n", 1),
+            ("u", 1_000),
+            ("m", 1_000_000),
+            ("", 1_000_000_000),
+        ],
+    )
+}
+
+fn parse_memory_quantity(quantity: &str) -> Option<i128> {
+    parse_scaled_decimal(
+        quantity,
+        &[
+            ("Ki", 1024),
+            ("Mi", 1024_i128.pow(2)),
+            ("Gi", 1024_i128.pow(3)),
+            ("Ti", 1024_i128.pow(4)),
+            ("Pi", 1024_i128.pow(5)),
+            ("Ei", 1024_i128.pow(6)),
+            ("k", 1_000),
+            ("M", 1_000_000),
+            ("G", 1_000_000_000),
+            ("T", 1_000_000_000_000),
+            ("P", 1_000_000_000_000_000),
+            ("E", 1_000_000_000_000_000_000),
+            ("", 1),
+        ],
+    )
+}
+
+fn parse_scaled_decimal(quantity: &str, suffixes: &[(&str, i128)]) -> Option<i128> {
+    for (suffix, scale) in suffixes {
+        if let Some(number) = quantity.strip_suffix(suffix) {
+            if suffix.is_empty() || !number.is_empty() {
+                return parse_decimal_scaled(number, *scale);
+            }
+        }
+    }
+    None
+}
+
+fn parse_decimal_scaled(number: &str, scale: i128) -> Option<i128> {
+    let trimmed = number.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let (whole, frac) = trimmed.split_once('.').unwrap_or((trimmed, ""));
+    let whole_value = whole.parse::<i128>().ok()?;
+    let mut total = whole_value.checked_mul(scale)?;
+    if !frac.is_empty() {
+        let frac_value = frac.parse::<i128>().ok()?;
+        let denom = 10_i128.checked_pow(frac.len() as u32)?;
+        total = total.checked_add(frac_value.checked_mul(scale)?.checked_div(denom)?)?;
+    }
+    Some(total)
+}
+
+fn format_cpu_quantity(cpu_nano: i128) -> Option<String> {
+    if cpu_nano < 0 {
+        return None;
+    }
+    if cpu_nano % 1_000_000 == 0 {
+        Some(format!("{}m", cpu_nano / 1_000_000))
+    } else {
+        Some(format!("{}n", cpu_nano))
+    }
+}
+
+fn format_memory_quantity(memory_bytes: i128) -> Option<String> {
+    if memory_bytes < 0 {
+        return None;
+    }
+    for (suffix, scale) in [
+        ("Ei", 1024_i128.pow(6)),
+        ("Pi", 1024_i128.pow(5)),
+        ("Ti", 1024_i128.pow(4)),
+        ("Gi", 1024_i128.pow(3)),
+        ("Mi", 1024_i128.pow(2)),
+        ("Ki", 1024_i128),
+    ] {
+        if memory_bytes >= scale && memory_bytes % scale == 0 {
+            return Some(format!("{}{}", memory_bytes / scale, suffix));
+        }
+    }
+    Some(memory_bytes.to_string())
 }
 
 fn map_service(svc: Service) -> ServiceInfo {
@@ -1633,6 +1774,86 @@ mod tests {
         assert_eq!(mapped.annotations.len(), 1);
         assert_eq!(mapped.data_keys, vec!["A", "B"]);
         assert_eq!(mapped.binary_data_keys, vec!["BIN"]);
+    }
+
+    #[test]
+    fn build_pod_usage_index_sums_container_metrics() {
+        let pod_metrics = vec![
+            serde_json::from_value(json!({
+                "apiVersion": "metrics.k8s.io/v1beta1",
+                "kind": "PodMetrics",
+                "metadata": {
+                    "namespace": "prod",
+                    "name": "api-1"
+                },
+                "containers": [
+                    {"name": "app", "usage": {"cpu": "100m", "memory": "200Mi"}},
+                    {"name": "proxy", "usage": {"cpu": "25m", "memory": "56Mi"}}
+                ]
+            }))
+            .unwrap(),
+        ];
+
+        let index = build_pod_usage_index(&pod_metrics);
+        let usage = index
+            .get(&("prod".to_string(), "api-1".to_string()))
+            .unwrap();
+        assert_eq!(format_cpu_quantity(usage.cpu_nano).as_deref(), Some("125m"));
+        assert_eq!(
+            format_memory_quantity(usage.memory_bytes).as_deref(),
+            Some("256Mi")
+        );
+    }
+
+    #[test]
+    fn quantity_helpers_parse_and_format_common_values() {
+        assert_eq!(parse_cpu_quantity("125m"), Some(125_000_000));
+        assert_eq!(parse_cpu_quantity("500u"), Some(500_000));
+        assert_eq!(format_cpu_quantity(125_000_000).as_deref(), Some("125m"));
+
+        assert_eq!(parse_memory_quantity("256Mi"), Some(268_435_456));
+        assert_eq!(parse_memory_quantity("1Gi"), Some(1_073_741_824));
+        assert_eq!(
+            format_memory_quantity(268_435_456).as_deref(),
+            Some("256Mi")
+        );
+    }
+
+    #[test]
+    fn map_pod_includes_usage_when_present() {
+        let pod: Pod = serde_json::from_value(json!({
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {
+                "namespace": "prod",
+                "name": "api-1"
+            },
+            "spec": {
+                "nodeName": "node-1",
+                "containers": [
+                    {
+                        "name": "app",
+                        "image": "nginx:1.25",
+                        "resources": {}
+                    }
+                ]
+            },
+            "status": {
+                "phase": "Running"
+            }
+        }))
+        .unwrap();
+        let usage = BTreeMap::from([(
+            ("prod".to_string(), "api-1".to_string()),
+            PodUsageTotals {
+                cpu_nano: 125_000_000,
+                memory_bytes: 268_435_456,
+            },
+        )]);
+
+        let mapped = map_pod(pod, &usage);
+        assert_eq!(mapped.usage_cpu.as_deref(), Some("125m"));
+        assert_eq!(mapped.usage_memory.as_deref(), Some("256Mi"));
     }
 
     #[test]
