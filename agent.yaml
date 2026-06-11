@@ -171,7 +171,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: agent
-          image: us-east1-docker.pkg.dev/sentinella-hub/kubernetes-agent/sentinella-hub-k8s-agent:v0.25.0  # x-release-please-version
+          image: us-east1-docker.pkg.dev/sentinella-hub/kubernetes-agent/sentinella-hub-k8s-agent:v0.26.0  # x-release-please-version
           imagePullPolicy: IfNotPresent
           envFrom:
             - configMapRef:
