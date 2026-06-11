@@ -113,8 +113,8 @@ data:
   LEASE_TTL_SECS: "30"
   ACTIONS_ENABLED: "false"           # read-only by default
   COLLECT_SECRETS: "false"           # requires separate secrets-reader RBAC when true
-  COLLECT_DEPENDENCIES_TETRAGON: "false"  # opt-in; requires Tetragon with gRPC enabled on each node
-  TETRAGON_SIDECAR_URL: "http://127.0.0.1:9801/events"
+  COLLECT_DEPENDENCIES_TETRAGON: "false"  # opt-in; requires Tetragon with gRPC enabled
+  TETRAGON_GRPC_ADDRESS: "tetragon-grpc.tetragon.svc.cluster.local:54321"
   FULL_DEBUG: "false"                 # last resort only; emits full payloads and bodies
   AGENT_HTTP_DEBUG: "false"
   AGENT_HTTP_DEBUG_BODIES: "false"
@@ -214,41 +214,3 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
-        - name: tetragon-sidecar
-          image: us-east1-docker.pkg.dev/sentinella-hub/kubernetes-agent/sentinella-hub-k8s-tetragon-sidecar:v0.19.8
-          imagePullPolicy: IfNotPresent
-          envFrom:
-            - configMapRef:
-                name: sentinella-hub-k8s-agent-config
-          volumeMounts:
-            - name: tetragon-events
-              mountPath: /var/run/tetragon
-              readOnly: true
-          livenessProbe:
-            httpGet:
-              path: /livez
-              port: 9801
-            initialDelaySeconds: 5
-            periodSeconds: 30
-          readinessProbe:
-            httpGet:
-              path: /readyz
-              port: 9801
-            periodSeconds: 10
-          resources:
-            requests:
-              cpu: 10m
-              memory: 32Mi
-            limits:
-              cpu: 100m
-              memory: 128Mi
-          securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities:
-              drop: ["ALL"]
-      volumes:
-        - name: tetragon-events
-          hostPath:
-            path: /var/run/tetragon
-            type: DirectoryOrCreate

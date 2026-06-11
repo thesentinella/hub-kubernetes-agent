@@ -13,7 +13,7 @@ Inventory collector and (future) action executor for Kubernetes and OpenShift cl
   - **Pods**: age in seconds (`age_seconds`), each container with image, **detected technology** (vendor/product/version inferred from the image), `requests` and `limits` (CPU and memory).
   - **Configuration**: ConfigMaps metadata by default, and optional Secrets metadata when `COLLECT_SECRETS=true` (name/namespace/type/immutability/labels/annotations) plus key names only (`data_keys`, `binary_data_keys` where applicable), never raw values.
   - **Network**: Services (type, selector, ports, exposure metadata) and Ingresses (class, hosts/paths/backends, TLS summary, load balancer status hints).
-  - **Dependencies (optional)**: bounded pod/service dependency edges derived from a node-local Tetragon gRPC sidecar (`source=tetragon_grpc_sidecar`), including unresolved `unknown` edges when endpoint mapping is unavailable.
+  - **Dependencies (optional)**: bounded pod/service dependency edges derived from Tetragon gRPC (`source=tetragon_grpc`), including unresolved `unknown` edges when endpoint mapping is unavailable.
   - **Storage**: StorageClasses (name/provisioner/safe parameter subset), PersistentVolumes, PersistentVolumeClaims, VolumeSnapshotClasses, and VolumeSnapshots.
   - **Events**: Kubernetes `Warning` and `Normal` events with bounded payload (max 500 events per snapshot, event message truncated to 500 chars).
 - Maintains an open long-poll against the Hub for command delivery. **Action execution is disabled by default** (`ACTIONS_ENABLED=false`); the agent replies with `skipped` and an explanatory message to any command received. When actions are explicitly enabled, the agent can preview workload resource patches with a Kubernetes server-side dry-run.
@@ -72,11 +72,86 @@ Unit tests are included in `tech.rs`. Extending coverage is one entry in the `RU
 
 Dependency collection is opt-in and disabled by default (`COLLECT_DEPENDENCIES_TETRAGON=false`).
 
-- Source: node-local Tetragon gRPC stream, re-exposed to the agent by a sidecar (`source=tetragon_grpc_sidecar` in snapshot payload).
+- Source: Tetragon gRPC exposed on an internal Kubernetes service. When dependency collection is enabled, the default address is `tetragon-grpc.tetragon.svc.cluster.local:54321` via `TETRAGON_GRPC_ADDRESS`.
 - Output: metadata-only dependency edges (no packet payload capture, no process args/env collection).
 - Behavior: bounded, deterministic ordering, and fail-soft when the source is unavailable.
 - The sidecar auto-loads a node-local `tcp_sendmsg`/`tcp_close` tracing policy through Tetragon gRPC so users do not have to apply a policy manually.
 - Unknown destinations/sources are included as `kind="unknown"` edges.
+- Portability note: this remains optional and disabled by default so clusters without Tetragon are unaffected.
+- Deployment note: this feature depends on Tetragon being installed; it does not assume Cilium/Hubble.
+
+Current payload contract:
+
+- The agent publishes dependency data inside `InventorySnapshot.dependencies`.
+- `dependencies.source` is always `tetragon_grpc` when this feature is enabled.
+- Each edge contains:
+  - `from`, `to`: endpoint identity with `kind`, `namespace`, `name`, `workload_kind`, `workload_name`, `ip`
+  - `protocol`
+  - `destination_port`
+  - `direction` (`egress` in the current implementation)
+  - `bytes`, `packets`, `connections`
+  - `first_seen_unix_ms`, `last_seen_unix_ms`
+- Endpoint resolution order is:
+  - pod IP
+  - service ClusterIP
+  - `unknown` with raw IP preserved
+
+Current Tetragon normalization:
+
+- The direct Rust gRPC client consumes `ProcessKprobe` events from Tetragon.
+- The current tracing policy watches `tcp_sendmsg` and `tcp_close`.
+- Those events are normalized into an internal JSON shape with:
+  - `src_ip`
+  - `dst_ip`
+  - `protocol`
+  - `destination_port`
+  - `bytes`
+  - `packets`
+  - `connections`
+  - `timestamp_unix_ms`
+
+Example snapshot payload:
+
+```json
+{
+  "dependencies": {
+    "edges": [
+      {
+        "from": {
+          "kind": "pod",
+          "namespace": "production",
+          "name": "api-server-7d9b8c6f4-x2kjp",
+          "workload_kind": "Deployment",
+          "workload_name": "api-server",
+          "ip": "10.244.1.15"
+        },
+        "to": {
+          "kind": "service",
+          "namespace": "production",
+          "name": "postgres-primary",
+          "workload_kind": null,
+          "workload_name": null,
+          "ip": "10.96.42.10"
+        },
+        "protocol": "TCP",
+        "destination_port": 5432,
+        "direction": "egress",
+        "bytes": 1048576,
+        "packets": 8923,
+        "connections": 34,
+        "first_seen_unix_ms": 1748523600000,
+        "last_seen_unix_ms": 1748524260000
+      }
+    ],
+    "source": "tetragon_grpc",
+    "window_seconds": 60,
+    "truncated": false,
+    "dropped_edges": 0
+  }
+}
+```
+
+**Storage note:** TimescaleDB is the recommended first choice for server-side topology history and rollups. Move to ClickHouse later if event volume, retention, or analytics complexity grows beyond what a Postgres-based time-series stack handles comfortably.
 
 ### Actions — designed for gradual rollout
 
@@ -242,8 +317,7 @@ Recommended `HUB_URL` is `https://api.hub.sentinel.la`.
 | `ACTIONS_ENABLED` | ConfigMap | `false` |
 | `COLLECT_SECRETS` | ConfigMap | `false` |
 | `COLLECT_DEPENDENCIES_TETRAGON` | ConfigMap | `false` |
-| `TETRAGON_SIDECAR_URL` | ConfigMap | `http://127.0.0.1:9801/events` |
-| `TETRAGON_GRPC_ADDRESS` | ConfigMap | optional override; defaults to `unix:///var/run/tetragon/tetragon.sock` |
+| `TETRAGON_GRPC_ADDRESS` | ConfigMap | when `COLLECT_DEPENDENCIES_TETRAGON=true`, default `tetragon-grpc.tetragon.svc.cluster.local:54321` |
 | `FULL_DEBUG` | ConfigMap | `false` |
 | `AGENT_HTTP_DEBUG` | ConfigMap | `false` |
 | `AGENT_HTTP_DEBUG_BODIES` | ConfigMap | `false` |
@@ -255,22 +329,17 @@ When `AGENT_VERSION_OVERRIDE` is set to a non-empty value, snapshots report that
 
 When `COLLECT_SECRETS=true`, the agent attempts to collect Secret metadata and key names. This requires separate read RBAC for `secrets` (`get/list/watch`).
 
-When `COLLECT_DEPENDENCIES_TETRAGON=true`, the sidecar attempts to connect to Tetragon gRPC at `TETRAGON_GRPC_ADDRESS` when set, otherwise at the default Unix socket `unix:///var/run/tetragon/tetragon.sock`. The agent reads recent events from `TETRAGON_SIDECAR_URL`.
+When `COLLECT_DEPENDENCIES_TETRAGON=true`, Sentinella connects to Tetragon over internal Kubernetes gRPC using `TETRAGON_GRPC_ADDRESS`. The default address is `tetragon-grpc.tetragon.svc.cluster.local:54321`.
 
-Dependency collection remains fail-soft at the snapshot layer, but the sidecar's readiness probe blocks the pod from becoming Ready while dependency collection is enabled and Tetragon is not connected.
+Dependency collection remains fail-soft at the snapshot layer, but the agent readiness probe blocks the pod from becoming Ready while dependency collection is enabled and Tetragon is not connected.
 
 ## Build
 
-This repository now produces two images from the same `Dockerfile`:
-
-- `agent-runtime` — the Rust agent image
-- `sidecar-runtime` — the Go-based Tetragon sidecar image
+This repository produces a single Rust agent image from the `agent-runtime` target in `Dockerfile`.
 
 ```bash
 podman build --target agent-runtime -t ghcr.io/sentinella/sentinella-hub-k8s-agent:0.1.0 .
-podman build --target sidecar-runtime -t ghcr.io/sentinella/sentinella-hub-k8s-tetragon-sidecar:0.1.0 .
 podman push ghcr.io/sentinella/sentinella-hub-k8s-agent:0.1.0
-podman push ghcr.io/sentinella/sentinella-hub-k8s-tetragon-sidecar:0.1.0
 ```
 
 ## Deploy
@@ -282,21 +351,11 @@ podman push ghcr.io/sentinella/sentinella-hub-k8s-tetragon-sidecar:0.1.0
      --from-file=api-key=/dev/stdin \
      --dry-run=client -o yaml | kubectl apply -f -
    ```
-2. (Required when `COLLECT_DEPENDENCIES_TETRAGON=true`) Install Tetragon with gRPC enabled:
+2. (Required when `COLLECT_DEPENDENCIES_TETRAGON=true`) Install Tetragon with internal gRPC exposed on TCP:
     ```bash
-    TETRAGON_VERSION=v1.7.0
-    helm repo add cilium https://helm.cilium.io
-    helm repo update
-    helm upgrade --install tetragon cilium/tetragon \
-      --namespace kube-system \
-      --create-namespace \
-      --set tetragon.grpc.enabled=true \
-      --set tetragon.grpc.address=unix:///var/run/tetragon/tetragon.sock \
-      --version "${TETRAGON_VERSION#v}"
-    kubectl rollout status -n kube-system ds/tetragon -w
+    helm repo add cilium https://helm.cilium.io >/dev/null 2>&1 || true; helm repo update; kubectl create namespace tetragon --dry-run=client -o yaml | kubectl apply -f -; helm upgrade --install tetragon cilium/tetragon -n tetragon --reset-values --set tetragonOperator.enabled=false --set crds.installMethod=helm --set tetragon.grpc.enabled=true --set-string tetragon.grpc.address="0.0.0.0:54321"; printf '%s\n' 'apiVersion: v1' 'kind: Service' 'metadata:' '  name: tetragon-grpc' '  namespace: tetragon' 'spec:' '  type: ClusterIP' '  internalTrafficPolicy: Local' '  selector:' '    app.kubernetes.io/name: tetragon' '    app.kubernetes.io/instance: tetragon' '  ports:' '    - name: grpc' '      protocol: TCP' '      port: 54321' '      targetPort: 54321' | kubectl apply -f -
     ```
-   The agent sidecar loads its own node-local tracing policy over gRPC; no separate `kubectl apply` is required.
-   If you do not override `tetragon.grpc.address`, the sidecar uses Tetragon's default Unix socket path.
+   This creates the internal service `tetragon-grpc.tetragon.svc.cluster.local:54321` with `internalTrafficPolicy: Local` so each agent pod talks to a Tetragon pod on the same node.
 3. Install the agent:
    - Convenience path: `curl | bash` executes the installer directly. If you need to audit the script first, download `install.sh` and run it locally instead.
    - Optional integrity check: set `VERIFY_MANIFEST_CHECKSUM=true` (or `1`) to verify the downloaded `agent.yaml` before apply.
@@ -311,13 +370,12 @@ podman push ghcr.io/sentinella/sentinella-hub-k8s-tetragon-sidecar:0.1.0
        | CLUSTER_ID="my-cluster" HUB_API_KEY="shub_..." bash -s -- --platform openshift
      ```
    - Or set `INSTALL_PLATFORM=kubernetes|openshift`.
-   - OpenShift installs work without Tetragon by default; set `COLLECT_DEPENDENCIES_TETRAGON=true` only if your cluster SCC allows the `hostPath` mount.
+    - OpenShift installs work without Tetragon by default; set `COLLECT_DEPENDENCIES_TETRAGON=true` only when the Tetragon gRPC service is installed.
 
 4. If you install manually, edit `agent.yaml`:
       - `CLUSTER_ID` unique per cluster.
       - `image:` for the `agent` container pointing to your Rust agent image.
-      - `image:` for the `tetragon-sidecar` container pointing to your Go sidecar image.
-      - For dependency collection: set `COLLECT_DEPENDENCIES_TETRAGON=true`. The sidecar defaults to `unix:///var/run/tetragon/tetragon.sock`; set `TETRAGON_GRPC_ADDRESS` only for nonstandard Tetragon installs. The agent reads `TETRAGON_SIDECAR_URL`.
+      - For dependency collection: set `COLLECT_DEPENDENCIES_TETRAGON=true`. The default `TETRAGON_GRPC_ADDRESS` in that mode is `tetragon-grpc.tetragon.svc.cluster.local:54321`.
       - Toleration block — current value runs on every node including control plane; trim if you want a smaller footprint.
 5. Verify:
     ```bash
@@ -328,7 +386,7 @@ podman push ghcr.io/sentinella/sentinella-hub-k8s-tetragon-sidecar:0.1.0
     curl localhost:9090/metrics
     ```
 
-OpenShift installs use the same agent image and code path, but the installer strips fixed UID/GID settings and removes the Tetragon `hostPath` mount unless `COLLECT_DEPENDENCIES_TETRAGON=true`. With dependency collection disabled, the sidecar stays dormant and does not affect pod readiness. With dependency collection enabled, sidecar readiness blocks pod readiness until Tetragon is connected. The manifest checksum check is opt-in and off by default. `FULL_DEBUG` is a last resort only.
+OpenShift installs use the same agent image and code path. With dependency collection disabled, the agent behaves like a normal inventory collector. With dependency collection enabled, readiness blocks until Tetragon is connected. The manifest checksum check is opt-in and off by default. `FULL_DEBUG` is a last resort only.
 
 The `Lease` object will appear once the first pod is up; its `holderIdentity` is the leader node's name.
 

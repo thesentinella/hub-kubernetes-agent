@@ -1,0 +1,60 @@
+syntax = "proto3";
+
+package tetragon;
+
+import "google/protobuf/timestamp.proto";
+
+enum EventType {
+  UNDEF = 0;
+  PROCESS_EXEC = 1;
+  PROCESS_EXIT = 5;
+  PROCESS_KPROBE = 9;
+}
+
+message Filter {
+  repeated EventType event_set = 6;
+  repeated string policy_names = 10;
+}
+
+message GetEventsRequest {
+  repeated Filter allow_list = 1;
+}
+
+message KprobeSock {
+  string protocol = 3;
+  string saddr = 6;
+  string daddr = 7;
+  uint32 dport = 9;
+}
+
+message KprobeArgument {
+  oneof arg {
+    int32 int_arg = 2;
+    KprobeSock sock_arg = 9;
+  }
+}
+
+message ProcessKprobe {
+  string function_name = 3;
+  repeated KprobeArgument args = 4;
+}
+
+message GetEventsResponse {
+  oneof event {
+    ProcessKprobe process_kprobe = 9;
+  }
+
+  google.protobuf.Timestamp time = 1001;
+}
+
+message AddTracingPolicyRequest {
+  string yaml = 1;
+  string domain = 2;
+}
+
+message AddTracingPolicyResponse {}
+
+service FineGuidanceSensors {
+  rpc GetEvents(GetEventsRequest) returns (stream GetEventsResponse) {}
+  rpc AddTracingPolicy(AddTracingPolicyRequest) returns (AddTracingPolicyResponse) {}
+}

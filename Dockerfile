@@ -2,10 +2,12 @@
 FROM rust:1.95-alpine3.23 AS rust-builder
 WORKDIR /build
 
-RUN apk add --no-cache build-base binutils
+RUN apk add --no-cache build-base binutils protobuf-dev
 
 # Cache deps
 COPY Cargo.toml Cargo.lock* ./
+COPY build.rs ./
+COPY proto/ ./proto/
 RUN mkdir src && echo "fn main() {}" > src/main.rs && \
     cargo build --release && \
     rm -rf src target/release/deps/sentinella_hub_k8s_agent*
@@ -13,12 +15,6 @@ RUN mkdir src && echo "fn main() {}" > src/main.rs && \
 COPY src/ ./src/
 RUN cargo build --release && \
     strip target/release/sentinella-hub-k8s-agent
-
-FROM golang:1.26-bookworm AS go-builder
-WORKDIR /build/sidecar
-
-COPY sidecar/ ./
-RUN CGO_ENABLED=0 go build -o /out/tetragon-sidecar .
 
 FROM gcr.io/distroless/cc-debian12:nonroot AS agent-runtime
 COPY --from=rust-builder /build/target/release/sentinella-hub-k8s-agent /usr/local/bin/sentinella-hub-k8s-agent

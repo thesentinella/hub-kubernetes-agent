@@ -8,6 +8,7 @@ use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
 use once_cell::sync::Lazy;
 use prometheus::{Encoder, IntCounter, IntCounterVec, IntGauge, Registry, TextEncoder};
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::net::TcpListener;
 use tracing::{info, warn};
 
@@ -58,6 +59,17 @@ pub static IS_LEADER: Lazy<IntGauge> = Lazy::new(|| {
     g
 });
 
+static DEPENDENCY_REQUIRED: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
+static DEPENDENCY_READY: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(true));
+
+pub fn set_dependency_required(required: bool) {
+    DEPENDENCY_REQUIRED.store(required, Ordering::Relaxed);
+}
+
+pub fn set_dependency_ready(ready: bool) {
+    DEPENDENCY_READY.store(ready, Ordering::Relaxed);
+}
+
 pub async fn run() -> Result<()> {
     // Force lazy init so /metrics shows the families even before first use.
     let _ = &*SNAPSHOTS_SENT;
@@ -88,7 +100,19 @@ async fn handle(
     req: Request<hyper::body::Incoming>,
 ) -> Result<Response<Full<Bytes>>, std::convert::Infallible> {
     let resp = match req.uri().path() {
-        "/healthz" | "/livez" | "/readyz" => Response::new(Full::new(Bytes::from("ok"))),
+        "/healthz" | "/livez" => Response::new(Full::new(Bytes::from("ok"))),
+        "/readyz" => {
+            if DEPENDENCY_REQUIRED.load(Ordering::Relaxed)
+                && !DEPENDENCY_READY.load(Ordering::Relaxed)
+            {
+                Response::builder()
+                    .status(503)
+                    .body(Full::new(Bytes::from("dependency stream not ready")))
+                    .expect("failed to build readiness response")
+            } else {
+                Response::new(Full::new(Bytes::from("ok")))
+            }
+        }
         "/metrics" => {
             let mut buf = Vec::new();
             let encoder = TextEncoder::new();

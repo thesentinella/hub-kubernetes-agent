@@ -6,6 +6,7 @@ mod hub;
 mod leader;
 mod model;
 mod tech;
+mod tetragon;
 
 use crate::config::Config;
 use crate::executor::Executor;
@@ -59,6 +60,11 @@ async fn main() -> Result<()> {
     let leader_state = LeaderState::new();
 
     startup_duplicate_cluster_check(&cfg, hub.as_ref()).await;
+
+    tetragon::init(
+        cfg.collect_dependencies_tetragon,
+        cfg.tetragon_grpc_address.clone(),
+    );
 
     // Health/metrics server
     tokio::spawn(async {
@@ -154,13 +160,7 @@ async fn build_and_send(cfg: &Config, kube: &KubeClient, hub: &HubClient) -> Res
         configuration,
         storage,
         events,
-    ) = collector::collect(
-        kube,
-        cfg.collect_secrets,
-        cfg.collect_dependencies_tetragon,
-        &cfg.tetragon_sidecar_url,
-    )
-    .await?;
+    ) = collector::collect(kube, cfg.collect_secrets, cfg.collect_dependencies_tetragon).await?;
     let snap = InventorySnapshot {
         schema_version: 1,
         agent: AgentInfo {
@@ -351,7 +351,7 @@ mod tests {
             actions_enabled: false,
             collect_secrets: false,
             collect_dependencies_tetragon: false,
-            tetragon_sidecar_url: "http://127.0.0.1:9801/events".into(),
+            tetragon_grpc_address: tetragon::DEFAULT_GRPC_ADDRESS.into(),
             http_timeout: Duration::from_secs(20),
             http_debug: false,
             http_debug_bodies: false,

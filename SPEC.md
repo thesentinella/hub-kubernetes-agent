@@ -39,9 +39,8 @@
 | `LEASE_NAME` | no | `sentinella-hub-k8s-agent-leader` | Lease object name. |
 | `ACTIONS_ENABLED` | no | `false` | Only `true` or `1` enables action dispatch. |
 | `COLLECT_SECRETS` | no | `false` | When `true`, collect Secret metadata and key names only; requires separate `secrets` read RBAC. |
-| `COLLECT_DEPENDENCIES_TETRAGON` | no | `false` | When `true`, collect dependency edges from the local Tetragon gRPC sidecar. |
-| `TETRAGON_SIDECAR_URL` | no | `http://127.0.0.1:9801/events` | Local HTTP endpoint that serves recent Tetragon events from the sidecar. |
-| `TETRAGON_GRPC_ADDRESS` | no | none | Optional override for the Tetragon gRPC server address consumed by the sidecar. When unset, the sidecar defaults to `unix:///var/run/tetragon/tetragon.sock`. |
+| `COLLECT_DEPENDENCIES_TETRAGON` | no | `false` | When `true`, collect dependency edges from Tetragon gRPC. |
+| `TETRAGON_GRPC_ADDRESS` | no | when `COLLECT_DEPENDENCIES_TETRAGON=true`, `tetragon-grpc.tetragon.svc.cluster.local:54321` | Tetragon gRPC server address used for dependency collection. |
 | `AGENT_LOG` | no | `info` | Primary log filter variable for JSON tracing output. |
 | `RUST_LOG` | no | none | Optional legacy alias if `AGENT_LOG` is not set. |
 | `POD_NAME` | no | `unknown` | Usually set by downward API. |
@@ -349,12 +348,11 @@ Compatibility note:
 - Technology detection is image-based and table-driven in `src/tech.rs`.
 - Process-level/runtime technology inspection is out of scope for this release and tracked as a separate follow-up.
 - Unknown images are still reported with `vendor: null`, `product: <image-name>`, `version: <tag>`, `source: "image"`.
-- Dependency collection from the Tetragon sidecar is opt-in (`COLLECT_DEPENDENCIES_TETRAGON=true`) and fail-soft.
-- When dependency collection is enabled, the sidecar readiness probe blocks the pod from becoming Ready until it has connected to Tetragon.
-- When dependency collection is disabled, the sidecar stays dormant and does not affect pod readiness.
+- Dependency collection from Tetragon gRPC is opt-in (`COLLECT_DEPENDENCIES_TETRAGON=true`) and fail-soft.
+- When dependency collection is enabled, the agent readiness probe blocks the pod from becoming Ready until it has connected to Tetragon.
 - Dependency output is bounded by internal caps (max edges and max fanout per source). Truncation sets `dependencies.truncated=true` and increments `dependencies.dropped_edges`.
 - Unknown endpoint mappings are included as `kind: "unknown"` edges and still include `ip` when known.
-- Dependency source is `tetragon_grpc_sidecar`; the sidecar consumes Tetragon gRPC directly and manages its own node-local tracing policy.
+- Dependency source is `tetragon_grpc`; the agent consumes Tetragon gRPC directly and manages its own node-local tracing policy.
 
 ## Command Schema
 
@@ -444,7 +442,6 @@ Known command kinds:
 
 - The deploy manifest is root `agent.yaml`.
 - The `agent` container image is `us-east1-docker.pkg.dev/sentinella-hub/kubernetes-agent/sentinella-hub-k8s-agent:<tag>`.
-- The `tetragon-sidecar` container image is `us-east1-docker.pkg.dev/sentinella-hub/kubernetes-agent/sentinella-hub-k8s-tetragon-sidecar:<tag>`.
 - `agent.yaml` stores runtime config in ConfigMap `sentinella-hub-k8s-agent-config` and auth in Secret `sentinella-hub-k8s-agent-auth` key `api-key`.
 - The DaemonSet injects `HUB_API_KEY` from Secret key `api-key`, optionally.
 - The pod runs as non-root UID/GID `65532`, with `readOnlyRootFilesystem: true`, no privilege escalation, all capabilities dropped, and `RuntimeDefault` seccomp.
@@ -480,8 +477,8 @@ Secret/config values are intentionally excluded from the snapshot payload.
 EBP is reported inside `InventorySnapshot.dependencies` and is opt-in via
 `COLLECT_DEPENDENCIES_TETRAGON=true`.
 
-- Source is `tetragon_grpc_sidecar` from `TETRAGON_SIDECAR_URL`.
-- Collection is fail-soft: if the sidecar or Tetragon gRPC is unavailable, snapshots
+- Source is `tetragon_grpc` from `TETRAGON_GRPC_ADDRESS`.
+- Collection is fail-soft: if Tetragon gRPC is unavailable, snapshots
   still succeed and `dependencies.edges` is empty.
 
 ### DependencyInventory schema
@@ -489,7 +486,7 @@ EBP is reported inside `InventorySnapshot.dependencies` and is opt-in via
 | Field | Type | Description |
 |---|---|---|
 | `edges` | `DependencyEdge[]` | Aggregated dependency edges for the current collection window. |
-| `source` | `string` | Fixed value: `tetragon_grpc_sidecar`. |
+| `source` | `string` | Fixed value: `tetragon_grpc`. |
 | `window_seconds` | `u64` | Aggregation window length in seconds. Phase-1 value is `60`. |
 | `truncated` | `bool` | `true` when internal edge/fanout caps dropped data in this snapshot. |
 | `dropped_edges` | `u64` | Number of edges dropped due to cap enforcement. |
@@ -539,7 +536,7 @@ EBP is reported inside `InventorySnapshot.dependencies` and is opt-in via
 
 | Limit | Value | Behavior |
 |---|---:|---|
-| `MAX_TETRAGON_LINES` | `20_000` | Max NDJSON lines read from the local sidecar per collection cycle. |
+| `MAX_TETRAGON_LINES` | `20_000` | Max normalized Tetragon event records buffered per collection cycle. |
 | `MAX_DEP_EDGES_PER_SNAPSHOT` | `2_000` | Max unique edge keys in `edges`. New unique keys are dropped when full. |
 | `MAX_DEP_FANOUT_PER_SOURCE` | `200` | Max distinct targets per source endpoint. New source->target pairs are dropped after this cap. |
 
@@ -559,10 +556,10 @@ Resolution is best-effort and evaluated in this order:
 Unknown edges are intentionally preserved so the backend can surface external or
 unresolved traffic.
 
-### Tetragon sidecar event contract
+### Tetragon event contract
 
-The agent reads one JSON object per line from `TETRAGON_SIDECAR_URL`. The sidecar emits a synthetic
-`process_kprobe` envelope compatible with the agent parser and attempts
+The agent normalizes observed Tetragon gRPC `ProcessKprobe` messages into an internal event envelope
+compatible with the dependency parser and attempts
 the following pointer fallbacks for each field:
 
 | Output field | JSON pointers (first match wins) | Default |
@@ -576,6 +573,10 @@ the following pointer fallbacks for each field:
 | `connections` | `/connections`, `/flow/connections`, `/summary/connections` | `1` |
 | `timestamp_unix_ms` | `/timestamp_unix_ms`, `/time_unix_ms`, `/flow/timestamp_unix_ms` | Current time (`now`) |
 
+Additional normalized endpoint hint fields may be present:
+
+| Output field | JSON pointer | Description |
+|---|---|---|
 Invalid JSON lines are skipped (warn-level log), preserving fail-soft behavior.
 
 ### JSON examples
@@ -639,7 +640,7 @@ Invalid JSON lines are skipped (warn-level log), preserving fail-soft behavior.
         "last_seen_unix_ms": 1748524260000
       }
     ],
-    "source": "tetragon_grpc_sidecar",
+    "source": "tetragon_grpc",
     "window_seconds": 60,
     "truncated": false,
     "dropped_edges": 0
@@ -653,7 +654,7 @@ Invalid JSON lines are skipped (warn-level log), preserving fail-soft behavior.
 {
   "dependencies": {
     "edges": [],
-    "source": "tetragon_grpc_sidecar",
+    "source": "tetragon_grpc",
     "window_seconds": 60,
     "truncated": false,
     "dropped_edges": 0
@@ -680,7 +681,7 @@ Invalid JSON lines are skipped (warn-level log), preserving fail-soft behavior.
         "last_seen_unix_ms": 1748523605000
       }
     ],
-    "source": "tetragon_grpc_sidecar",
+    "source": "tetragon_grpc",
     "window_seconds": 60,
     "truncated": true,
     "dropped_edges": 487

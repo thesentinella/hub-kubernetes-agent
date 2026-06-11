@@ -28,11 +28,11 @@ pub struct Config {
     /// Enables cluster-wide secret metadata/key-name collection.
     pub collect_secrets: bool,
 
-    /// Enables Tetragon-based dependency collection from the local sidecar.
+    /// Enables Tetragon-based dependency collection over gRPC.
     pub collect_dependencies_tetragon: bool,
 
-    /// Local sidecar HTTP endpoint that serves recent Tetragon events.
-    pub tetragon_sidecar_url: String,
+    /// Tetragon gRPC server address for dependency collection.
+    pub tetragon_grpc_address: String,
 
     /// HTTP request timeout to the Hub.
     pub http_timeout: Duration,
@@ -87,8 +87,8 @@ impl Config {
             .unwrap_or(false);
         let collect_secrets = env_flag("COLLECT_SECRETS");
         let collect_dependencies_tetragon = env_flag("COLLECT_DEPENDENCIES_TETRAGON");
-        let tetragon_sidecar_url = env::var("TETRAGON_SIDECAR_URL")
-            .unwrap_or_else(|_| "http://127.0.0.1:9801/events".to_string());
+        let tetragon_grpc_address = env::var("TETRAGON_GRPC_ADDRESS")
+            .unwrap_or_else(|_| crate::tetragon::DEFAULT_GRPC_ADDRESS.to_string());
 
         let pod_name = env::var("POD_NAME").unwrap_or_else(|_| "unknown".to_string());
         let pod_namespace = env::var("POD_NAMESPACE").unwrap_or_else(|_| "default".to_string());
@@ -107,7 +107,7 @@ impl Config {
             actions_enabled,
             collect_secrets,
             collect_dependencies_tetragon,
-            tetragon_sidecar_url,
+            tetragon_grpc_address,
             http_timeout,
             http_debug,
             http_debug_bodies,
@@ -169,7 +169,7 @@ mod tests {
             "ACTIONS_ENABLED",
             "COLLECT_SECRETS",
             "COLLECT_DEPENDENCIES_TETRAGON",
-            "TETRAGON_SIDECAR_URL",
+            "TETRAGON_GRPC_ADDRESS",
             "POD_NAME",
             "POD_NAMESPACE",
             "NODE_NAME",
@@ -200,7 +200,10 @@ mod tests {
             assert_eq!(cfg.hub_url, "https://hub.example.com");
             assert_eq!(cfg.cluster_id, "cluster-1");
             assert!(!cfg.collect_dependencies_tetragon);
-            assert_eq!(cfg.tetragon_sidecar_url, "http://127.0.0.1:9801/events");
+            assert_eq!(
+                cfg.tetragon_grpc_address,
+                crate::tetragon::DEFAULT_GRPC_ADDRESS
+            );
             clear_required();
         }
     }
@@ -368,10 +371,16 @@ mod tests {
             reset_env();
             set_required("https://hub.example.com", "cluster-1");
             env::set_var("COLLECT_DEPENDENCIES_TETRAGON", "true");
-            env::set_var("TETRAGON_SIDECAR_URL", "http://127.0.0.1:7777/events");
+            env::set_var(
+                "TETRAGON_GRPC_ADDRESS",
+                "tetragon-grpc.tetragon.svc.cluster.local:54321",
+            );
             let cfg = Config::from_env().unwrap();
             assert!(cfg.collect_dependencies_tetragon);
-            assert_eq!(cfg.tetragon_sidecar_url, "http://127.0.0.1:7777/events");
+            assert_eq!(
+                cfg.tetragon_grpc_address,
+                "tetragon-grpc.tetragon.svc.cluster.local:54321"
+            );
             clear_required();
         }
     }
