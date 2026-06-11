@@ -15,6 +15,7 @@ pub struct InventorySnapshot {
     pub workloads: Workloads,
     pub pods: Vec<PodInfo>,
     pub network: NetworkInventory,
+    pub security: SecurityInventory,
     pub dependencies: DependencyInventory,
     pub configuration: ConfigurationInventory,
     pub storage: StorageInventory,
@@ -118,6 +119,52 @@ pub struct Workloads {
 pub struct NetworkInventory {
     pub services: Vec<ServiceInfo>,
     pub ingresses: Vec<IngressInfo>,
+}
+
+#[derive(Serialize, Debug, Default)]
+pub struct SecurityInventory {
+    pub network_policies: Vec<NetworkPolicyInfo>,
+    pub cluster_role_bindings: Vec<ClusterRoleBindingInfo>,
+    pub pod_security_admission: PodSecurityAdmissionInfo,
+}
+
+#[derive(Serialize, Debug)]
+pub struct NetworkPolicyInfo {
+    pub namespace: String,
+    pub name: String,
+    pub policy_types: Vec<String>,
+    pub pod_selector: Vec<KV>,
+    pub ingress_rules_count: usize,
+    pub egress_rules_count: usize,
+}
+
+#[derive(Serialize, Debug)]
+pub struct ClusterRoleBindingInfo {
+    pub name: String,
+    pub role_ref_name: String,
+    pub role_ref_kind: String,
+    pub risk_level: String,
+    pub subjects: Vec<SecuritySubjectInfo>,
+}
+
+#[derive(Serialize, Debug)]
+pub struct SecuritySubjectInfo {
+    pub kind: String,
+    pub name: String,
+    pub namespace: Option<String>,
+}
+
+#[derive(Serialize, Debug, Default)]
+pub struct PodSecurityAdmissionInfo {
+    pub namespaces: Vec<PodSecurityNamespaceInfo>,
+}
+
+#[derive(Serialize, Debug)]
+pub struct PodSecurityNamespaceInfo {
+    pub namespace: String,
+    pub enforce: Option<String>,
+    pub audit: Option<String>,
+    pub warn: Option<String>,
 }
 
 #[derive(Serialize, Debug, Default)]

@@ -150,6 +150,7 @@ Path parameter note:
 - `workloads`: `Workloads`.
 - `pods`: array of `PodInfo`.
 - `network`: `NetworkInventory`.
+- `security`: `SecurityInventory`.
 - `dependencies`: `DependencyInventory`.
 - `configuration`: `ConfigurationInventory`.
 - `storage`: `StorageInventory`.
@@ -164,6 +165,48 @@ Path parameter note:
 - `node_name`: node name.
 - `actions_enabled`: boolean indicating whether this agent instance is currently allowed to execute actions.
 - `collect_dependencies_tetragon`: boolean indicating whether this agent instance currently has Tetragon dependency collection enabled.
+
+`SecurityInventory` fields:
+
+- `network_policies`: array of `NetworkPolicyInfo`.
+- `cluster_role_bindings`: array of `ClusterRoleBindingInfo`.
+- `pod_security_admission`: `PodSecurityAdmissionInfo`.
+
+`NetworkPolicyInfo` fields:
+
+- `namespace`: string.
+- `name`: string.
+- `policy_types`: array of strings (`Ingress`, `Egress`).
+- `pod_selector`: array of key/value pairs from `spec.podSelector.matchLabels`.
+- `ingress_rules_count`: integer.
+- `egress_rules_count`: integer.
+
+`ClusterRoleBindingInfo` fields:
+
+- `name`: string.
+- `role_ref_name`: string.
+- `role_ref_kind`: string.
+- `risk_level`: string; `high` for `cluster-admin`, `admin`, and `edit`, otherwise `review` for other included `ClusterRole` bindings. This is a best-effort heuristic and does not analyze referenced ClusterRole rule bodies.
+- `subjects`: array of `SecuritySubjectInfo`.
+
+`SecuritySubjectInfo` fields:
+
+- `kind`: string.
+- `name`: string.
+- `namespace`: optional string.
+
+`PodSecurityAdmissionInfo` fields:
+
+- `namespaces`: array of `PodSecurityNamespaceInfo`.
+
+`PodSecurityNamespaceInfo` fields:
+
+- `namespace`: string.
+- `enforce`: optional string from label `pod-security.kubernetes.io/enforce`.
+- `audit`: optional string from label `pod-security.kubernetes.io/audit`.
+- `warn`: optional string from label `pod-security.kubernetes.io/warn`.
+
+Namespaces are included even when all three PSA labels are missing. NetworkPolicy and ClusterRoleBinding collection are fail-soft; snapshots still succeed when those APIs are unavailable. ClusterRoleBinding summaries intentionally exclude well-known `system:*` bindings to avoid exporting low-signal cluster-internal assignments.
 
 `ClusterInfo` fields:
 
