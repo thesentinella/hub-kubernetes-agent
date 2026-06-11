@@ -1,5 +1,6 @@
 //! Collects cluster inventory via the Kubernetes API.
 
+use crate::health;
 use crate::model::*;
 use crate::tech;
 use crate::tetragon;
@@ -210,10 +211,16 @@ async fn collect_dependency_inventory(
     let service_index = build_service_ip_index(services);
     let mut agg: BTreeMap<DependencyEdgeKey, DependencyEdgeAgg> = BTreeMap::new();
     let mut fanout: BTreeMap<EndpointKey, BTreeSet<EndpointKey>> = BTreeMap::new();
+    let mut parse_failures = 0u64;
+    let mut dropped_for_line_cap = 0u64;
     let mut dropped_edges = 0u64;
     let mut skipped_for_fanout = 0u64;
 
-    for line in body.lines().take(MAX_TETRAGON_LINES) {
+    for (line_index, line) in body.lines().enumerate() {
+        if line_index >= MAX_TETRAGON_LINES {
+            dropped_for_line_cap += 1;
+            continue;
+        }
         let line = line.trim();
         if line.is_empty() {
             continue;
@@ -221,15 +228,18 @@ async fn collect_dependency_inventory(
 
         let value: Value = match serde_json::from_str(line) {
             Ok(value) => value,
-            Err(e) => {
-                warn!(error = %e, "failed to parse dependency event json line");
+            Err(_) => {
+                parse_failures += 1;
                 continue;
             }
         };
 
         let record = match parse_tetragon_record(&value) {
             Some(record) => record,
-            None => continue,
+            None => {
+                parse_failures += 1;
+                continue;
+            }
         };
 
         let from = resolve_endpoint(
@@ -300,8 +310,32 @@ async fn collect_dependency_inventory(
         .collect::<Vec<_>>();
     sort_dependency_edges(&mut edges);
 
-    let dropped_total = dropped_edges.saturating_add(skipped_for_fanout);
+    let dropped_events_total = dropped_edges.saturating_add(dropped_for_line_cap);
+    let dropped_total = dropped_events_total.saturating_add(skipped_for_fanout);
     let truncated = dropped_total > 0;
+    if parse_failures > 0 {
+        health::DEPENDENCY_PARSE_FAILURES.inc_by(parse_failures);
+    }
+    if dropped_events_total > 0 {
+        health::DEPENDENCY_EVENTS_DROPPED.inc_by(dropped_events_total);
+    }
+    if skipped_for_fanout > 0 {
+        health::DEPENDENCY_EVENTS_SKIPPED.inc_by(skipped_for_fanout);
+    }
+    if truncated {
+        health::DEPENDENCY_SNAPSHOTS_TRUNCATED.inc();
+    }
+    if parse_failures > 0 || dropped_events_total > 0 || skipped_for_fanout > 0 {
+        warn!(
+            parse_failures,
+            dropped_events = dropped_events_total,
+            dropped_for_snapshot_cap = dropped_edges,
+            dropped_for_line_cap,
+            skipped_for_fanout,
+            kept_edges = edges.len(),
+            "dependency collection reduced observed tetragon events"
+        );
+    }
     DependencyInventory {
         edges,
         source: "tetragon_grpc",

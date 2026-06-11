@@ -51,6 +51,7 @@ static STARTED: Lazy<Mutex<bool>> = Lazy::new(|| Mutex::new(false));
 
 pub fn init(enabled: bool, address: String) {
     health::set_dependency_required(enabled);
+    health::TETRAGON_CONNECTED.set(0);
     if !enabled {
         health::set_dependency_ready(true);
         return;
@@ -88,12 +89,26 @@ async fn run_loop(address: String, state: Arc<State>) {
     loop {
         match connect_and_stream(&address, state.clone()).await {
             Ok(()) => {
+                health::TETRAGON_CONNECTED.set(0);
                 health::set_dependency_ready(false);
+                health::TETRAGON_RECONNECTS.inc();
                 warn!(address = %address, "tetragon stream ended; reconnecting");
             }
             Err(error) => {
+                let was_ready = health::dependency_ready();
+                health::TETRAGON_CONNECTED.set(0);
                 health::set_dependency_ready(false);
-                warn!(address = %address, error = %error, "tetragon stream unavailable");
+                if was_ready {
+                    health::TETRAGON_RECONNECTS.inc();
+                    warn!(
+                        address = %address,
+                        error = %error,
+                        "tetragon stream lost; reconnecting"
+                    );
+                } else {
+                    health::TETRAGON_CONNECTION_FAILURES.inc();
+                    warn!(address = %address, error = %error, "tetragon stream unavailable");
+                }
             }
         }
         sleep(Duration::from_secs(5)).await;
@@ -112,6 +127,7 @@ async fn connect_and_stream(address: &str, state: Arc<State>) -> anyhow::Result<
         }],
     };
     let mut stream = client.get_events(request).await?.into_inner();
+    health::TETRAGON_CONNECTED.set(1);
     health::set_dependency_ready(true);
     info!(address = %address, "connected to tetragon gRPC");
 
@@ -153,7 +169,14 @@ async fn ensure_policy(
         Err(status) if status.code() == Code::AlreadyExists || already_exists_like(&status) => {
             Ok(())
         }
-        Err(status) => Err(status.into()),
+        Err(status) => {
+            health::TETRAGON_POLICY_APPLY_FAILURES.inc();
+            Err(anyhow::anyhow!(
+                "failed to ensure tracing policy {}: {}",
+                POLICY_NAME,
+                status
+            ))
+        }
     }
 }
 
