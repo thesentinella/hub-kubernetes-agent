@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.23.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.22.0...v0.23.0) (2026-06-11)
+
+
+### Features
+
+* telemetry metrics ([#96](https://github.com/thesentinella/hub-kubernetes-agent/issues/96)) ([d8a3c0a](https://github.com/thesentinella/hub-kubernetes-agent/commit/d8a3c0a95a5716698db59038a1813c6b44d2661d))
+
 ## [0.22.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.21.0...v0.22.0) (2026-06-11)
 
 
