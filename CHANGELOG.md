@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.27.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.26.0...v0.27.0) (2026-06-11)
+
+
+### Features
+
+* add operational maturity inventory ([#104](https://github.com/thesentinella/hub-kubernetes-agent/issues/104)) ([cdeae72](https://github.com/thesentinella/hub-kubernetes-agent/commit/cdeae7249cfa7ead43e9c462021375043e0f0e4f))
+
 ## [0.26.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.25.0...v0.26.0) (2026-06-11)
 
 
