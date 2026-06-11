@@ -16,6 +16,7 @@ pub struct InventorySnapshot {
     pub pods: Vec<PodInfo>,
     pub network: NetworkInventory,
     pub security: SecurityInventory,
+    pub operational_maturity: OperationalMaturityInventory,
     pub dependencies: DependencyInventory,
     pub configuration: ConfigurationInventory,
     pub storage: StorageInventory,
@@ -113,6 +114,46 @@ pub struct Workloads {
     pub deployments: Vec<WorkloadRef>,
     pub statefulsets: Vec<WorkloadRef>,
     pub daemonsets: Vec<WorkloadRef>,
+}
+
+#[derive(Serialize, Debug, Default)]
+pub struct OperationalMaturityInventory {
+    pub descheduler: DeschedulerInfo,
+    pub vpa: VpaInfo,
+    pub scheduled_jobs: Vec<ScheduledJobInfo>,
+    pub truncated_jobs: bool,
+}
+
+#[derive(Serialize, Debug, Default)]
+pub struct DeschedulerInfo {
+    pub installed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detected_by: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strategy: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<String>,
+}
+
+#[derive(Serialize, Debug, Default)]
+pub struct VpaInfo {
+    pub installed: bool,
+    pub objects_count: usize,
+    pub update_modes: Vec<String>,
+}
+
+#[derive(Serialize, Debug)]
+pub struct ScheduledJobInfo {
+    pub namespace: String,
+    pub name: String,
+    pub schedule: String,
+    pub suspend: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_schedule_time: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_successful_time: Option<String>,
 }
 
 #[derive(Serialize, Debug, Default)]
