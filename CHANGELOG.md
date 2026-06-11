@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.28.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.27.0...v0.28.0) (2026-06-11)
+
+
+### ⚠ BREAKING CHANGES
+
+* add process-level technology detection ([#106](https://github.com/thesentinella/hub-kubernetes-agent/issues/106))
+
+### Features
+
+* add process-level technology detection ([#106](https://github.com/thesentinella/hub-kubernetes-agent/issues/106)) ([953bb3d](https://github.com/thesentinella/hub-kubernetes-agent/commit/953bb3d31dc79234fd8949cf9b488d2bd6df0272))
+
 ## [0.27.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.26.0...v0.27.0) (2026-06-11)
 
 
