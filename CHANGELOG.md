@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.22.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.21.0...v0.22.0) (2026-06-11)
+
+
+### Features
+
+* tetragon grpc clean ([#93](https://github.com/thesentinella/hub-kubernetes-agent/issues/93)) ([02a3d24](https://github.com/thesentinella/hub-kubernetes-agent/commit/02a3d24d670b0f94e7b3ad40faaaa5627bc44fd8))
+
+
+### Bug Fixes
+
+* remove stale sidecar remnants ([#95](https://github.com/thesentinella/hub-kubernetes-agent/issues/95)) ([d1ff2c1](https://github.com/thesentinella/hub-kubernetes-agent/commit/d1ff2c13a4ccd499ad08922a7542fb3fc7e1e6bb))
+
 ## [0.21.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.20.0...v0.21.0) (2026-06-11)
 
 
