@@ -251,6 +251,8 @@ Path parameter note:
 - `age_seconds`: optional integer; pod age in seconds at collection time (`0` if clock skew makes creation time appear in the future).
 - `node`: optional string.
 - `phase`: optional string.
+- `usage_cpu`: optional Kubernetes quantity string from the metrics API; omitted when pod usage is unavailable.
+- `usage_memory`: optional Kubernetes quantity string from the metrics API; omitted when pod usage is unavailable.
 - `owner_kind`: optional string.
 - `owner_name`: optional string.
 - `containers`: array of `ContainerInfo`.
@@ -258,6 +260,7 @@ Path parameter note:
 Compatibility note:
 
 - Older agent versions may omit `age_seconds`; Hub should treat missing values as unknown.
+- When metrics-server is unavailable, `usage_cpu` and `usage_memory` are omitted and the snapshot still succeeds.
 
 `ContainerInfo` fields:
 

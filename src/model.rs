@@ -258,6 +258,8 @@ pub struct PodInfo {
     pub age_seconds: Option<u64>,
     pub node: Option<String>,
     pub phase: Option<String>,
+    pub usage_cpu: Option<String>,
+    pub usage_memory: Option<String>,
     pub owner_kind: Option<String>,
     pub owner_name: Option<String>,
     pub containers: Vec<ContainerInfo>,

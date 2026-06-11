@@ -10,7 +10,7 @@ Inventory collector and (future) action executor for Kubernetes and OpenShift cl
   - **Cluster**: Kubernetes version, detected platform (vanilla / openshift / eks / gke / aks), nodes with capacity/allocatable, kubelet version, container runtime, OS image, roles.
   - **Namespaces** with labels and phase.
   - **Workloads**: deployments, statefulsets, daemonsets (name, namespace, desired/ready replicas).
-  - **Pods**: age in seconds (`age_seconds`), each container with image, **detected technology** (vendor/product/version inferred from the image), `requests` and `limits` (CPU and memory).
+  - **Pods**: age in seconds (`age_seconds`), actual pod `usage_cpu` / `usage_memory` when metrics-server is available, and each container with image, **detected technology** (vendor/product/version inferred from the image), `requests` and `limits` (CPU and memory).
   - **Configuration**: ConfigMaps metadata by default, and optional Secrets metadata when `COLLECT_SECRETS=true` (name/namespace/type/immutability/labels/annotations) plus key names only (`data_keys`, `binary_data_keys` where applicable), never raw values.
   - **Network**: Services (type, selector, ports, exposure metadata) and Ingresses (class, hosts/paths/backends, TLS summary, load balancer status hints).
   - **Dependencies (optional)**: bounded pod/service dependency edges derived from Tetragon gRPC (`source=tetragon_grpc`), including unresolved `unknown` edges when endpoint mapping is unavailable.
