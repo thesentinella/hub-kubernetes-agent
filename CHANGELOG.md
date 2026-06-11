@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.24.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.23.0...v0.24.0) (2026-06-11)
+
+
+### Features
+
+* expose agent config drift env ([#98](https://github.com/thesentinella/hub-kubernetes-agent/issues/98)) ([5c581a4](https://github.com/thesentinella/hub-kubernetes-agent/commit/5c581a494efbfc9ceb08455feab2da0b46773313))
+
 ## [0.23.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.22.0...v0.23.0) (2026-06-11)
 
 
