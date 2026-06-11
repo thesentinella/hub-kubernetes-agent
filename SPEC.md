@@ -355,7 +355,7 @@ Compatibility note:
 - `product`: optional string.
 - `version`: optional string.
 - `language`: optional string.
-- `source`: currently `image`.
+- `source`: provenance string. `image` when detected from the container image name. `process` when detected via `TECH_DETECT_PROCESS` from container `command`/`args`.
 
 `StorageInventory` fields:
 
