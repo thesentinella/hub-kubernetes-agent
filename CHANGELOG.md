@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.26.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.25.0...v0.26.0) (2026-06-11)
+
+
+### Features
+
+* add security inventory ([#102](https://github.com/thesentinella/hub-kubernetes-agent/issues/102)) ([020b80f](https://github.com/thesentinella/hub-kubernetes-agent/commit/020b80f5f8245165caafa2141dd5c2fe3a99518e))
+
 ## [0.25.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.24.0...v0.25.0) (2026-06-11)
 
 
