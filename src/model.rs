@@ -74,6 +74,7 @@ pub struct AgentInfo {
     pub pod_namespace: String,
     pub node_name: String,
     pub actions_enabled: bool,
+    pub collect_dependencies_tetragon: bool,
 }
 
 #[derive(Serialize, Debug, Default)]
@@ -123,6 +124,8 @@ pub struct NetworkInventory {
 pub struct ConfigurationInventory {
     pub configmaps: Vec<ConfigMapInfo>,
     pub secrets: Vec<SecretInfo>,
+    pub agent_runtime_env: Vec<KV>,
+    pub agent_configured_env: Vec<KV>,
 }
 
 #[derive(Serialize, Debug)]
@@ -310,7 +313,7 @@ pub struct Technology {
     pub source: &'static str, // "image" for now; future: "labels", "exec"
 }
 
-#[derive(Serialize, Debug, Default, Clone)]
+#[derive(Serialize, Debug, Default, Clone, PartialEq, Eq)]
 pub struct KV {
     pub key: String,
     pub value: String,
@@ -614,5 +617,21 @@ mod tests {
         let body: ClusterStatus = serde_json::from_str(json).unwrap();
         assert_eq!(body.last_seen_at.as_deref(), Some("2026-05-29T16:00:00Z"));
         assert_eq!(body.k8s_uid.as_deref(), Some("uid-123"));
+    }
+
+    #[test]
+    fn agent_info_serializes_collect_dependencies_tetragon() {
+        let agent = AgentInfo {
+            name: "agent",
+            version: "1.0.0".into(),
+            pod_name: "pod-1".into(),
+            pod_namespace: "sentinella".into(),
+            node_name: "node-1".into(),
+            actions_enabled: false,
+            collect_dependencies_tetragon: true,
+        };
+
+        let value = serde_json::to_value(&agent).unwrap();
+        assert_eq!(value["collect_dependencies_tetragon"], true);
     }
 }

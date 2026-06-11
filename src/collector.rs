@@ -1,5 +1,6 @@
 //! Collects cluster inventory via the Kubernetes API.
 
+use crate::config;
 use crate::health;
 use crate::model::*;
 use crate::tech;
@@ -20,6 +21,8 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use tracing::warn;
+
+const AGENT_CONFIGMAP_NAME: &str = "sentinella-hub-k8s-agent-config";
 
 pub async fn collect(
     client: &Client,
@@ -146,9 +149,12 @@ pub async fn collect(
     };
     sort_configmaps_for_snapshot(&mut configmaps);
     sort_secrets_for_snapshot(&mut secrets);
+    let agent_configured_env = collect_agent_configured_env(&configmaps);
     let configuration = ConfigurationInventory {
         configmaps: configmaps.into_iter().map(map_configmap).collect(),
         secrets: secrets.into_iter().map(map_secret).collect(),
+        agent_runtime_env: Vec::new(),
+        agent_configured_env,
     };
     let storage = StorageInventory {
         storage_classes: storage_classes.into_iter().map(map_storage_class).collect(),
@@ -844,6 +850,15 @@ fn map_configmap(cm: ConfigMap) -> ConfigMapInfo {
         data_keys: map_data_keys(cm.data.unwrap_or_default()),
         binary_data_keys: map_data_keys(cm.binary_data.unwrap_or_default()),
     }
+}
+
+fn collect_agent_configured_env(configmaps: &[ConfigMap]) -> Vec<KV> {
+    configmaps
+        .iter()
+        .find(|cm| cm.metadata.name.as_deref() == Some(AGENT_CONFIGMAP_NAME))
+        .and_then(|cm| cm.data.as_ref())
+        .map(config::agent_configured_env)
+        .unwrap_or_default()
 }
 
 fn map_secret(secret: Secret) -> SecretInfo {
@@ -1618,6 +1633,61 @@ mod tests {
         assert_eq!(mapped.annotations.len(), 1);
         assert_eq!(mapped.data_keys, vec!["A", "B"]);
         assert_eq!(mapped.binary_data_keys, vec!["BIN"]);
+    }
+
+    #[test]
+    fn collect_agent_configured_env_filters_agent_configmap_values() {
+        let configmaps = vec![
+            serde_json::from_value(json!({
+                "apiVersion": "v1",
+                "kind": "ConfigMap",
+                "metadata": {
+                    "namespace": "sentinella",
+                    "name": "sentinella-hub-k8s-agent-config"
+                },
+                "data": {
+                    "HUB_URL": "https://hub.example.com",
+                    "COLLECT_DEPENDENCIES_TETRAGON": "true",
+                    "HUB_API_KEY": "secret",
+                    "POD_NAME": "pod-1",
+                    "UNRELATED": "value"
+                }
+            }))
+            .unwrap(),
+            serde_json::from_value(json!({
+                "apiVersion": "v1",
+                "kind": "ConfigMap",
+                "metadata": {
+                    "namespace": "default",
+                    "name": "other"
+                },
+                "data": {
+                    "HUB_URL": "https://ignore.example.com"
+                }
+            }))
+            .unwrap(),
+        ];
+
+        let env = collect_agent_configured_env(&configmaps);
+        assert_eq!(
+            env,
+            vec![
+                KV {
+                    key: "COLLECT_DEPENDENCIES_TETRAGON".into(),
+                    value: "true".into(),
+                },
+                KV {
+                    key: "HUB_URL".into(),
+                    value: "https://hub.example.com".into(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn collect_agent_configured_env_missing_configmap_is_empty() {
+        let configmaps: Vec<ConfigMap> = Vec::new();
+        assert!(collect_agent_configured_env(&configmaps).is_empty());
     }
 
     #[test]

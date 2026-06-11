@@ -163,6 +163,7 @@ Path parameter note:
 - `pod_namespace`: pod namespace.
 - `node_name`: node name.
 - `actions_enabled`: boolean indicating whether this agent instance is currently allowed to execute actions.
+- `collect_dependencies_tetragon`: boolean indicating whether this agent instance currently has Tetragon dependency collection enabled.
 
 `ClusterInfo` fields:
 
@@ -450,6 +451,29 @@ Known command kinds:
 
 - `configmaps`: array of `ConfigMapInfo`.
 - `secrets`: array of `SecretInfo`.
+- `agent_runtime_env`: array of `KV` entries representing the running agent's applied non-secret config values.
+- `agent_configured_env`: array of `KV` entries representing allowlisted non-secret values from `sentinella-hub-k8s-agent-config`.
+
+`agent_runtime_env` and `agent_configured_env` are intentionally limited to the agent config allowlist:
+
+- `HUB_URL`
+- `CLUSTER_ID`
+- `COLLECT_INTERVAL_SECS`
+- `POLL_WAIT_SECS`
+- `HTTP_TIMEOUT_SECS`
+- `LEASE_TTL_SECS`
+- `ACTIONS_ENABLED`
+- `COLLECT_SECRETS`
+- `COLLECT_DEPENDENCIES_TETRAGON`
+- `TETRAGON_GRPC_ADDRESS`
+- `FULL_DEBUG`
+- `AGENT_HTTP_DEBUG`
+- `AGENT_HTTP_DEBUG_BODIES`
+- `AGENT_LOG`
+- `AGENT_VERSION_OVERRIDE`
+- `LEASE_NAME`
+
+Excluded keys include `HUB_API_KEY`, `POD_NAME`, `POD_NAMESPACE`, and `NODE_NAME`. This is a special-case agent config drift view, not a generic ConfigMap value export.
 
 `ConfigMapInfo` fields:
 

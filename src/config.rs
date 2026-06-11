@@ -1,6 +1,27 @@
+use crate::model::KV;
 use anyhow::{Context, Result};
+use std::collections::BTreeMap;
 use std::env;
 use std::time::Duration;
+
+pub const AGENT_CONFIG_ENV_ALLOWLIST: &[&str] = &[
+    "ACTIONS_ENABLED",
+    "AGENT_HTTP_DEBUG",
+    "AGENT_HTTP_DEBUG_BODIES",
+    "AGENT_LOG",
+    "AGENT_VERSION_OVERRIDE",
+    "CLUSTER_ID",
+    "COLLECT_DEPENDENCIES_TETRAGON",
+    "COLLECT_INTERVAL_SECS",
+    "COLLECT_SECRETS",
+    "FULL_DEBUG",
+    "HTTP_TIMEOUT_SECS",
+    "HUB_URL",
+    "LEASE_NAME",
+    "LEASE_TTL_SECS",
+    "POLL_WAIT_SECS",
+    "TETRAGON_GRPC_ADDRESS",
+];
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -46,6 +67,9 @@ pub struct Config {
     /// Enables full request/response body logging for debugging.
     pub full_debug: bool,
 
+    /// Base log filter for tracing subscriber initialization.
+    pub agent_log: String,
+
     /// Pod name (downward API).
     pub pod_name: String,
 
@@ -80,6 +104,11 @@ impl Config {
         let full_debug = env_flag("FULL_DEBUG");
         let http_debug = full_debug || env_flag("AGENT_HTTP_DEBUG");
         let http_debug_bodies = full_debug || env_flag("AGENT_HTTP_DEBUG_BODIES");
+        let agent_log = env::var("AGENT_LOG")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "info".to_string());
 
         let actions_enabled = env::var("ACTIONS_ENABLED")
             .ok()
@@ -112,12 +141,105 @@ impl Config {
             http_debug,
             http_debug_bodies,
             full_debug,
+            agent_log,
             pod_name,
             pod_namespace,
             node_name,
             lease_name,
             lease_ttl,
         })
+    }
+}
+
+pub fn agent_runtime_env(cfg: &Config) -> Vec<KV> {
+    AGENT_CONFIG_ENV_ALLOWLIST
+        .iter()
+        .filter_map(|key| {
+            runtime_env_value(cfg, key).map(|value| KV {
+                key: (*key).to_string(),
+                value,
+            })
+        })
+        .collect()
+}
+
+pub fn agent_configured_env(values: &BTreeMap<String, String>) -> Vec<KV> {
+    AGENT_CONFIG_ENV_ALLOWLIST
+        .iter()
+        .filter_map(|key| {
+            values.get(*key).and_then(|value| {
+                configured_env_value(key, value).map(|value| KV {
+                    key: (*key).to_string(),
+                    value,
+                })
+            })
+        })
+        .collect()
+}
+
+fn runtime_env_value(cfg: &Config, key: &str) -> Option<String> {
+    match key {
+        "ACTIONS_ENABLED" => Some(bool_string(cfg.actions_enabled)),
+        "AGENT_HTTP_DEBUG" => Some(bool_string(cfg.http_debug)),
+        "AGENT_HTTP_DEBUG_BODIES" => Some(bool_string(cfg.http_debug_bodies)),
+        "AGENT_LOG" => Some(cfg.agent_log.clone()),
+        "AGENT_VERSION_OVERRIDE" => cfg.agent_version_override.clone(),
+        "CLUSTER_ID" => Some(cfg.cluster_id.clone()),
+        "COLLECT_DEPENDENCIES_TETRAGON" => Some(bool_string(cfg.collect_dependencies_tetragon)),
+        "COLLECT_INTERVAL_SECS" => Some(cfg.collect_interval.as_secs().to_string()),
+        "COLLECT_SECRETS" => Some(bool_string(cfg.collect_secrets)),
+        "FULL_DEBUG" => Some(bool_string(cfg.full_debug)),
+        "HTTP_TIMEOUT_SECS" => Some(cfg.http_timeout.as_secs().to_string()),
+        "HUB_URL" => Some(cfg.hub_url.clone()),
+        "LEASE_NAME" => Some(cfg.lease_name.clone()),
+        "LEASE_TTL_SECS" => Some(cfg.lease_ttl.as_secs().to_string()),
+        "POLL_WAIT_SECS" => Some(cfg.poll_wait.as_secs().to_string()),
+        "TETRAGON_GRPC_ADDRESS" => Some(cfg.tetragon_grpc_address.clone()),
+        _ => None,
+    }
+}
+
+fn configured_env_value(key: &str, value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    match key {
+        "ACTIONS_ENABLED"
+        | "AGENT_HTTP_DEBUG"
+        | "AGENT_HTTP_DEBUG_BODIES"
+        | "COLLECT_DEPENDENCIES_TETRAGON"
+        | "COLLECT_SECRETS"
+        | "FULL_DEBUG" => Some(bool_string(trimmed == "true" || trimmed == "1")),
+        "AGENT_LOG" => Some(if trimmed.is_empty() {
+            "info".to_string()
+        } else {
+            trimmed.to_string()
+        }),
+        "AGENT_VERSION_OVERRIDE" => parse_non_empty_value(trimmed),
+        "COLLECT_INTERVAL_SECS" | "HTTP_TIMEOUT_SECS" | "LEASE_TTL_SECS" | "POLL_WAIT_SECS" => {
+            trimmed
+                .parse::<u64>()
+                .map(|value| value.to_string())
+                .ok()
+                .or_else(|| Some(trimmed.to_string()))
+        }
+        "HUB_URL" => Some(trimmed.trim_end_matches('/').to_string()),
+        _ => Some(trimmed.to_string()),
+    }
+}
+
+fn bool_string(value: bool) -> String {
+    if value {
+        "true".to_string()
+    } else {
+        "false".to_string()
+    }
+}
+
+fn parse_non_empty_value(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.len() > 128 {
+        None
+    } else {
+        Some(trimmed.to_string())
     }
 }
 
@@ -383,6 +505,83 @@ mod tests {
             );
             clear_required();
         }
+    }
+
+    #[test]
+    fn agent_runtime_env_filters_and_normalizes_values() {
+        let cfg = Config {
+            hub_url: "https://hub.example.com".into(),
+            cluster_id: "cluster-1".into(),
+            api_key: Some("shub_secret".into()),
+            agent_version_override: Some("dev".into()),
+            collect_interval: Duration::from_secs(60),
+            poll_wait: Duration::from_secs(30),
+            actions_enabled: true,
+            collect_secrets: false,
+            collect_dependencies_tetragon: true,
+            tetragon_grpc_address: "tetragon:54321".into(),
+            http_timeout: Duration::from_secs(20),
+            http_debug: true,
+            http_debug_bodies: false,
+            full_debug: false,
+            agent_log: "debug".into(),
+            pod_name: "pod-1".into(),
+            pod_namespace: "sentinella".into(),
+            node_name: "node-1".into(),
+            lease_name: "lease".into(),
+            lease_ttl: Duration::from_secs(30),
+        };
+
+        let env = agent_runtime_env(&cfg);
+        let keys = env
+            .iter()
+            .map(|entry| entry.key.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(keys, AGENT_CONFIG_ENV_ALLOWLIST);
+        assert!(!keys.contains(&"HUB_API_KEY"));
+        assert!(!keys.contains(&"POD_NAME"));
+        assert!(!keys.contains(&"POD_NAMESPACE"));
+        assert!(!keys.contains(&"NODE_NAME"));
+        assert_eq!(
+            env.iter()
+                .find(|entry| entry.key == "ACTIONS_ENABLED")
+                .unwrap()
+                .value,
+            "true"
+        );
+        assert_eq!(
+            env.iter()
+                .find(|entry| entry.key == "COLLECT_INTERVAL_SECS")
+                .unwrap()
+                .value,
+            "60"
+        );
+    }
+
+    #[test]
+    fn agent_configured_env_filters_allowlisted_keys_only() {
+        let values = BTreeMap::from([
+            ("HUB_URL".to_string(), "https://hub.example.com".to_string()),
+            ("AGENT_LOG".to_string(), "info".to_string()),
+            ("HUB_API_KEY".to_string(), "shub_secret".to_string()),
+            ("POD_NAME".to_string(), "pod-1".to_string()),
+            ("UNRELATED".to_string(), "value".to_string()),
+        ]);
+
+        let env = agent_configured_env(&values);
+        assert_eq!(
+            env,
+            vec![
+                KV {
+                    key: "AGENT_LOG".into(),
+                    value: "info".into(),
+                },
+                KV {
+                    key: "HUB_URL".into(),
+                    value: "https://hub.example.com".into(),
+                },
+            ]
+        );
     }
 
     #[test]

@@ -17,7 +17,7 @@ Inventory collector and (future) action executor for Kubernetes and OpenShift cl
   - **Storage**: StorageClasses (name/provisioner/safe parameter subset), PersistentVolumes, PersistentVolumeClaims, VolumeSnapshotClasses, and VolumeSnapshots.
   - **Events**: Kubernetes `Warning` and `Normal` events with bounded payload (max 500 events per snapshot, event message truncated to 500 chars).
 - Maintains an open long-poll against the Hub for command delivery. **Action execution is disabled by default** (`ACTIONS_ENABLED=false`); the agent replies with `skipped` and an explanatory message to any command received. When actions are explicitly enabled, the agent can preview workload resource patches with a Kubernetes server-side dry-run.
-- Snapshot agent metadata includes whether actions are enabled (`agent.actions_enabled`) so the Hub can accurately reflect agent execution capability.
+- Snapshot agent metadata includes whether actions are enabled (`agent.actions_enabled`) and whether Tetragon dependency collection is enabled (`agent.collect_dependencies_tetragon`) so the Hub can accurately reflect agent execution capability.
 
 ## Architecture
 
@@ -264,7 +264,9 @@ Body: `InventorySnapshot` (see `src/model.rs`). Respond `2xx` to accept. `4xx` i
 
 On successful inventory ingest, when the Hub responds with `{"already_existed":true}`, the agent logs a warning indicating potential duplicate re-registration.
 
-`InventorySnapshot.configuration` includes `configmaps` and `secrets` entries. Secret entries are populated only when `COLLECT_SECRETS=true`. Secret and ConfigMap payloads include metadata and key names only; values are intentionally excluded.
+`InventorySnapshot.configuration` includes `configmaps` and `secrets` entries. Secret entries are populated only when `COLLECT_SECRETS=true`. Secret and generic ConfigMap payloads include metadata and key names only; values are intentionally excluded.
+
+`InventorySnapshot.configuration.agent_runtime_env` and `InventorySnapshot.configuration.agent_configured_env` are special-case allowlisted views for the agent's own non-secret configuration only. They are used to compare the running agent's applied settings against values present in `sentinella-hub-k8s-agent-config`. They do not expose arbitrary ConfigMap values.
 
 ### GET `/v1/clusters/{cluster_id}/commands/poll?wait=30s`
 
