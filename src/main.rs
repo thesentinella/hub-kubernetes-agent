@@ -157,10 +157,11 @@ async fn build_and_send(cfg: &Config, kube: &KubeClient, hub: &HubClient) -> Res
         pods,
         network,
         dependencies,
-        configuration,
+        mut configuration,
         storage,
         events,
     ) = collector::collect(kube, cfg.collect_secrets, cfg.collect_dependencies_tetragon).await?;
+    configuration.agent_runtime_env = config::agent_runtime_env(cfg);
     let snap = InventorySnapshot {
         schema_version: 1,
         agent: AgentInfo {
@@ -170,6 +171,7 @@ async fn build_and_send(cfg: &Config, kube: &KubeClient, hub: &HubClient) -> Res
             pod_namespace: cfg.pod_namespace.clone(),
             node_name: cfg.node_name.clone(),
             actions_enabled: cfg.actions_enabled,
+            collect_dependencies_tetragon: cfg.collect_dependencies_tetragon,
         },
         cluster_id: cfg.cluster_id.clone(),
         timestamp_ms: now_ms(),
@@ -356,6 +358,7 @@ mod tests {
             http_debug: false,
             http_debug_bodies: false,
             full_debug: false,
+            agent_log: "info".into(),
             pod_name: "pod-1".into(),
             pod_namespace: "sentinella".into(),
             node_name: "node-1".into(),
