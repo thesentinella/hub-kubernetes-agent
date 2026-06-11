@@ -75,7 +75,7 @@ Dependency collection is opt-in and disabled by default (`COLLECT_DEPENDENCIES_T
 - Source: Tetragon gRPC exposed on an internal Kubernetes service. When dependency collection is enabled, the default address is `tetragon-grpc.tetragon.svc.cluster.local:54321` via `TETRAGON_GRPC_ADDRESS`.
 - Output: metadata-only dependency edges (no packet payload capture, no process args/env collection).
 - Behavior: bounded, deterministic ordering, and fail-soft when the source is unavailable.
-- The sidecar auto-loads a node-local `tcp_sendmsg`/`tcp_close` tracing policy through Tetragon gRPC so users do not have to apply a policy manually.
+- The direct Rust Tetragon gRPC client auto-loads a node-local `tcp_sendmsg`/`tcp_close` tracing policy so users do not have to apply a policy manually.
 - Unknown destinations/sources are included as `kind="unknown"` edges.
 - Portability note: this remains optional and disabled by default so clusters without Tetragon are unaffected.
 - Deployment note: this feature depends on Tetragon being installed; it does not assume Cilium/Hubble.
