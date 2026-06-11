@@ -13,7 +13,7 @@ Inventory collector and (future) action executor for Kubernetes and OpenShift cl
   - **Pods**: age in seconds (`age_seconds`), each container with image, **detected technology** (vendor/product/version inferred from the image), `requests` and `limits` (CPU and memory).
   - **Configuration**: ConfigMaps metadata by default, and optional Secrets metadata when `COLLECT_SECRETS=true` (name/namespace/type/immutability/labels/annotations) plus key names only (`data_keys`, `binary_data_keys` where applicable), never raw values.
   - **Network**: Services (type, selector, ports, exposure metadata) and Ingresses (class, hosts/paths/backends, TLS summary, load balancer status hints).
-- **Dependencies (optional)**: bounded pod/service dependency edges derived from Tetragon gRPC (`source=tetragon_grpc`), including unresolved `unknown` edges when endpoint mapping is unavailable.
+  - **Dependencies (optional)**: bounded pod/service dependency edges derived from Tetragon gRPC (`source=tetragon_grpc`), including unresolved `unknown` edges when endpoint mapping is unavailable.
   - **Storage**: StorageClasses (name/provisioner/safe parameter subset), PersistentVolumes, PersistentVolumeClaims, VolumeSnapshotClasses, and VolumeSnapshots.
   - **Events**: Kubernetes `Warning` and `Normal` events with bounded payload (max 500 events per snapshot, event message truncated to 500 chars).
 - Maintains an open long-poll against the Hub for command delivery. **Action execution is disabled by default** (`ACTIONS_ENABLED=false`); the agent replies with `skipped` and an explanatory message to any command received. When actions are explicitly enabled, the agent can preview workload resource patches with a Kubernetes server-side dry-run.
@@ -75,6 +75,7 @@ Dependency collection is opt-in and disabled by default (`COLLECT_DEPENDENCIES_T
 - Source: Tetragon gRPC exposed on an internal Kubernetes service. When dependency collection is enabled, the default address is `tetragon-grpc.tetragon.svc.cluster.local:54321` via `TETRAGON_GRPC_ADDRESS`.
 - Output: metadata-only dependency edges (no packet payload capture, no process args/env collection).
 - Behavior: bounded, deterministic ordering, and fail-soft when the source is unavailable.
+- The sidecar auto-loads a node-local `tcp_sendmsg`/`tcp_close` tracing policy through Tetragon gRPC so users do not have to apply a policy manually.
 - Unknown destinations/sources are included as `kind="unknown"` edges.
 - Portability note: this remains optional and disabled by default so clusters without Tetragon are unaffected.
 - Deployment note: this feature depends on Tetragon being installed; it does not assume Cilium/Hubble.

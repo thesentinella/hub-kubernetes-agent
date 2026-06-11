@@ -21,3 +21,9 @@ COPY --from=rust-builder /build/target/release/sentinella-hub-k8s-agent /usr/loc
 USER nonroot:nonroot
 EXPOSE 9090
 ENTRYPOINT ["/usr/local/bin/sentinella-hub-k8s-agent"]
+
+FROM gcr.io/distroless/static-debian12:nonroot AS sidecar-runtime
+COPY --from=go-builder /out/tetragon-sidecar /usr/local/bin/tetragon-sidecar
+USER nonroot:nonroot
+EXPOSE 9801
+ENTRYPOINT ["/usr/local/bin/tetragon-sidecar"]
