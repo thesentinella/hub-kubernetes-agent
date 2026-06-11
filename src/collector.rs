@@ -7,6 +7,7 @@ use crate::tech;
 use crate::tetragon;
 use anyhow::Result;
 use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, StatefulSet};
+use k8s_openapi::api::batch::v1::CronJob;
 use k8s_openapi::api::core::v1::{
     ConfigMap, Event, Namespace, Node, PersistentVolume, PersistentVolumeClaim, Pod, Secret,
     Service,
@@ -46,6 +47,7 @@ pub async fn collect(
     Vec<PodInfo>,
     NetworkInventory,
     SecurityInventory,
+    OperationalMaturityInventory,
     DependencyInventory,
     ConfigurationInventory,
     StorageInventory,
@@ -85,6 +87,8 @@ pub async fn collect(
     let volume_snapshots_fut =
         list_dynamic_all(client, "snapshot.storage.k8s.io", "v1", "VolumeSnapshot");
     let pod_metrics_fut = list_dynamic_all(client, "metrics.k8s.io", "v1beta1", "PodMetrics");
+    let vpa_fut = list_dynamic_all(client, "autoscaling.k8s.io", "v1", "VerticalPodAutoscaler");
+    let cronjobs_fut = list_all::<CronJob>(client, &lp);
     let events_fut = list_all::<Event>(client, &lp);
     let version_fut = client.apiserver_version();
 
@@ -107,6 +111,8 @@ pub async fn collect(
         volume_snapshot_classes,
         volume_snapshots,
         pod_metrics,
+        vpa,
+        cronjobs,
         events,
         version,
         k8s_uid,
@@ -129,6 +135,8 @@ pub async fn collect(
         volume_snapshot_classes_fut,
         volume_snapshots_fut,
         pod_metrics_fut,
+        vpa_fut,
+        cronjobs_fut,
         events_fut,
         version_fut,
         k8s_uid_fut
@@ -152,9 +160,12 @@ pub async fn collect(
     let volume_snapshot_classes = soft_unwrap("volumesnapshotclasses", volume_snapshot_classes);
     let volume_snapshots = soft_unwrap("volumesnapshots", volume_snapshots);
     let pod_metrics = soft_unwrap("podmetrics", pod_metrics);
+    let vpa = soft_unwrap("vpa", vpa);
+    let mut cronjobs = soft_unwrap("cronjobs", cronjobs);
     let mut events = soft_unwrap("events", events);
 
     let cluster = build_cluster_info(version.ok(), &nodes);
+    let descheduler = detect_descheduler(&deployments);
     let ns_infos = namespaces
         .into_iter()
         .map(map_namespace)
@@ -191,6 +202,19 @@ pub async fn collect(
         cluster_role_bindings: cluster_role_binding_infos,
         pod_security_admission: build_pod_security_admission(&ns_infos),
     };
+    sort_cronjobs_for_snapshot(&mut cronjobs);
+    let vpa_info = build_vpa_info(&vpa);
+    let scheduled_jobs = cronjobs
+        .into_iter()
+        .take(MAX_SCHEDULED_JOBS)
+        .map(map_scheduled_job)
+        .collect();
+    let operational_maturity = OperationalMaturityInventory {
+        descheduler,
+        vpa: vpa_info,
+        scheduled_jobs,
+        truncated_jobs: false,
+    };
     sort_configmaps_for_snapshot(&mut configmaps);
     sort_secrets_for_snapshot(&mut secrets);
     let agent_configured_env = collect_agent_configured_env(&configmaps);
@@ -225,6 +249,7 @@ pub async fn collect(
         pod_infos,
         network,
         security,
+        operational_maturity,
         dependencies,
         configuration,
         storage,
@@ -1338,6 +1363,101 @@ fn sort_network_policies_for_snapshot(network_policies: &mut [NetworkPolicy]) {
     });
 }
 
+const DESCHEDULER_DEPLOYMENT_NAMES: &[&str] =
+    &["descheduler", "openshift-descheduler", "kube-descheduler"];
+const DESCHEDULER_NS: &str = "openshift-kube-descheduler-operator";
+
+fn detect_descheduler(deployments: &[Deployment]) -> DeschedulerInfo {
+    if let Some(dep) = deployments.iter().find(|dep| {
+        let name = dep.metadata.name.as_deref().unwrap_or_default();
+        DESCHEDULER_DEPLOYMENT_NAMES.contains(&name)
+    }) {
+        return DeschedulerInfo {
+            installed: true,
+            detected_by: Some("deployment".into()),
+            namespace: dep.metadata.namespace.clone(),
+            strategy: dep.spec.as_ref().and_then(|spec| {
+                spec.selector.match_labels.clone().and_then(|labels| {
+                    labels
+                        .get("descheduler")
+                        .or_else(|| labels.get("app"))
+                        .cloned()
+                })
+            }),
+            schedule: None,
+        };
+    }
+
+    if deployments
+        .iter()
+        .any(|dep| dep.metadata.namespace.as_deref() == Some(DESCHEDULER_NS))
+    {
+        return DeschedulerInfo {
+            installed: true,
+            detected_by: Some("namespace".into()),
+            namespace: Some(DESCHEDULER_NS.into()),
+            strategy: None,
+            schedule: None,
+        };
+    }
+
+    DeschedulerInfo::default()
+}
+
+fn build_vpa_info(vpa_objects: &[DynamicObject]) -> VpaInfo {
+    let mut modes = BTreeSet::new();
+    for vpa in vpa_objects {
+        let as_value = serde_json::to_value(vpa).unwrap_or_default();
+        let mode = as_value
+            .pointer("/spec/updatePolicy/updateMode")
+            .and_then(Value::as_str)
+            .unwrap_or("Auto")
+            .to_string();
+        modes.insert(mode);
+    }
+
+    VpaInfo {
+        installed: !vpa_objects.is_empty(),
+        objects_count: vpa_objects.len(),
+        update_modes: modes.into_iter().collect(),
+    }
+}
+
+fn map_scheduled_job(cj: CronJob) -> ScheduledJobInfo {
+    let namespace = cj.metadata.namespace.unwrap_or_default();
+    let name = cj.metadata.name.unwrap_or_default();
+    let spec = cj.spec;
+    let status = cj.status;
+
+    ScheduledJobInfo {
+        namespace,
+        name,
+        schedule: spec
+            .as_ref()
+            .map(|s| s.schedule.clone())
+            .unwrap_or_default(),
+        suspend: spec.as_ref().and_then(|s| s.suspend).unwrap_or(false),
+        last_schedule_time: status
+            .as_ref()
+            .and_then(|status| status.last_schedule_time.clone())
+            .map(|time| time.0.to_string()),
+        last_successful_time: status
+            .as_ref()
+            .and_then(|status| status.last_successful_time.clone())
+            .map(|time| time.0.to_string()),
+    }
+}
+
+fn sort_cronjobs_for_snapshot(cronjobs: &mut [CronJob]) {
+    cronjobs.sort_by(|a, b| {
+        let a_ns = a.metadata.namespace.as_deref().unwrap_or_default();
+        let b_ns = b.metadata.namespace.as_deref().unwrap_or_default();
+        let a_name = a.metadata.name.as_deref().unwrap_or_default();
+        let b_name = b.metadata.name.as_deref().unwrap_or_default();
+        a_ns.cmp(b_ns).then_with(|| a_name.cmp(b_name))
+    });
+}
+
 fn map_ingress(ingress: Ingress) -> IngressInfo {
     let namespace = ingress.metadata.namespace.unwrap_or_default();
     let name = ingress.metadata.name.unwrap_or_default();
@@ -1573,6 +1693,7 @@ const MAX_EVENT_MESSAGE_CHARS: usize = 500;
 const MAX_TETRAGON_LINES: usize = 20_000;
 const MAX_DEP_EDGES_PER_SNAPSHOT: usize = 2_000;
 const MAX_DEP_FANOUT_PER_SOURCE: usize = 200;
+const MAX_SCHEDULED_JOBS: usize = 500;
 const DEP_WINDOW_SECONDS: u64 = 60;
 
 fn map_storage_class(sc: StorageClass) -> StorageClassInfo {
@@ -2140,6 +2261,131 @@ mod tests {
         assert_eq!(psa.namespaces[1].enforce.as_deref(), Some("restricted"));
         assert_eq!(psa.namespaces[1].audit, None);
         assert_eq!(psa.namespaces[1].warn.as_deref(), Some("baseline"));
+    }
+
+    #[test]
+    fn detect_descheduler_finds_deployment_by_name() {
+        let deployments = vec![
+            serde_json::from_value(json!({
+                "apiVersion": "apps/v1",
+                "kind": "Deployment",
+                "metadata": {
+                    "namespace": "kube-system",
+                    "name": "coredns"
+                },
+                "spec": {
+                    "selector": {"matchLabels": {"app": "coredns"}}
+                }
+            }))
+            .unwrap(),
+            serde_json::from_value(json!({
+                "apiVersion": "apps/v1",
+                "kind": "Deployment",
+                "metadata": {
+                    "namespace": "kube-system",
+                    "name": "descheduler"
+                },
+                "spec": {
+                    "selector": {"matchLabels": {"descheduler": "true"}}
+                }
+            }))
+            .unwrap(),
+        ];
+
+        let info = detect_descheduler(&deployments);
+        assert!(info.installed);
+        assert_eq!(info.detected_by.as_deref(), Some("deployment"));
+        assert_eq!(info.namespace.as_deref(), Some("kube-system"));
+    }
+
+    #[test]
+    fn detect_descheduler_returns_default_when_not_found() {
+        let deployments: Vec<Deployment> = vec![
+            serde_json::from_value(json!({
+                "apiVersion": "apps/v1",
+                "kind": "Deployment",
+                "metadata": {"namespace": "default", "name": "nginx"},
+                "spec": {"selector": {"matchLabels": {"app": "nginx"}}}
+            }))
+            .unwrap(),
+        ];
+
+        let info = detect_descheduler(&deployments);
+        assert!(!info.installed);
+    }
+
+    #[test]
+    fn build_vpa_info_counts_objects_and_modes() {
+        let vpa_objects = vec![
+            serde_json::from_value(json!({
+                "apiVersion": "autoscaling.k8s.io/v1",
+                "kind": "VerticalPodAutoscaler",
+                "metadata": {"namespace": "prod", "name": "vpa-app"},
+                "spec": {
+                    "targetRef": {"kind": "Deployment", "name": "app"},
+                    "updatePolicy": {"updateMode": "Auto"}
+                }
+            }))
+            .unwrap(),
+            serde_json::from_value(json!({
+                "apiVersion": "autoscaling.k8s.io/v1",
+                "kind": "VerticalPodAutoscaler",
+                "metadata": {"namespace": "prod", "name": "vpa-db"},
+                "spec": {
+                    "targetRef": {"kind": "Deployment", "name": "db"},
+                    "updatePolicy": {"updateMode": "Off"}
+                }
+            }))
+            .unwrap(),
+        ];
+
+        let info = build_vpa_info(&vpa_objects);
+        assert!(info.installed);
+        assert_eq!(info.objects_count, 2);
+        assert_eq!(info.update_modes.len(), 2);
+    }
+
+    #[test]
+    fn build_vpa_info_empty_when_no_vpa_objects() {
+        let info = build_vpa_info(&[]);
+        assert!(!info.installed);
+        assert_eq!(info.objects_count, 0);
+        assert!(info.update_modes.is_empty());
+    }
+
+    #[test]
+    fn map_scheduled_job_extracts_cronjob_fields() {
+        let cronjob: CronJob = serde_json::from_value(json!({
+            "apiVersion": "batch/v1",
+            "kind": "CronJob",
+            "metadata": {
+                "namespace": "kube-tools",
+                "name": "descheduler-cron"
+            },
+            "spec": {
+                "schedule": "0 */6 * * *",
+                "suspend": false
+            },
+            "status": {
+                "lastScheduleTime": "2026-06-11T20:00:00Z",
+                "lastSuccessfulTime": "2026-06-11T20:00:05Z"
+            }
+        }))
+        .unwrap();
+
+        let mapped = map_scheduled_job(cronjob);
+        assert_eq!(mapped.namespace, "kube-tools");
+        assert_eq!(mapped.name, "descheduler-cron");
+        assert_eq!(mapped.schedule, "0 */6 * * *");
+        assert!(!mapped.suspend);
+        assert_eq!(
+            mapped.last_schedule_time.as_deref(),
+            Some("2026-06-11T20:00:00Z")
+        );
+        assert_eq!(
+            mapped.last_successful_time.as_deref(),
+            Some("2026-06-11T20:00:05Z")
+        );
     }
 
     #[test]

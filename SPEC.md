@@ -151,6 +151,7 @@ Path parameter note:
 - `pods`: array of `PodInfo`.
 - `network`: `NetworkInventory`.
 - `security`: `SecurityInventory`.
+- `operational_maturity`: `OperationalMaturityInventory`.
 - `dependencies`: `DependencyInventory`.
 - `configuration`: `ConfigurationInventory`.
 - `storage`: `StorageInventory`.
@@ -207,6 +208,37 @@ Path parameter note:
 - `warn`: optional string from label `pod-security.kubernetes.io/warn`.
 
 Namespaces are included even when all three PSA labels are missing. NetworkPolicy and ClusterRoleBinding collection are fail-soft; snapshots still succeed when those APIs are unavailable. ClusterRoleBinding summaries intentionally exclude well-known `system:*` bindings to avoid exporting low-signal cluster-internal assignments.
+
+`OperationalMaturityInventory` fields:
+
+- `descheduler`: `DeschedulerInfo`.
+- `vpa`: `VpaInfo`.
+- `scheduled_jobs`: array of `ScheduledJobInfo`.
+
+`DeschedulerInfo` fields:
+
+- `installed`: boolean; `true` when a known descheduler deployment or namespace is detected.
+- `detected_by`: optional string; detection method (e.g. `deployment`, `namespace`).
+- `namespace`: optional string.
+- `strategy`: optional string.
+- `schedule`: optional string.
+
+`VpaInfo` fields:
+
+- `installed`: boolean; `true` when at least one `VerticalPodAutoscaler` object exists in the cluster.
+- `objects_count`: number of VPA objects found.
+- `update_modes`: array of unique `updateMode` strings across all VPA objects.
+
+`ScheduledJobInfo` fields:
+
+- `namespace`: string.
+- `name`: string.
+- `schedule`: string.
+- `suspend`: boolean.
+- `last_schedule_time`: optional string.
+- `last_successful_time`: optional string.
+
+All operational maturity detection paths are fail-soft: snapshots still succeed when VPA, descheduler, or CronJob APIs are unavailable. CronJob reporting is capped at 500 entries; `truncated_jobs=true` when the cap is exceeded.
 
 `ClusterInfo` fields:
 

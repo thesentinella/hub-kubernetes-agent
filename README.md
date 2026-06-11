@@ -14,6 +14,7 @@ Inventory collector and (future) action executor for Kubernetes and OpenShift cl
   - **Configuration**: ConfigMaps metadata by default, and optional Secrets metadata when `COLLECT_SECRETS=true` (name/namespace/type/immutability/labels/annotations) plus key names only (`data_keys`, `binary_data_keys` where applicable), never raw values.
   - **Network**: Services (type, selector, ports, exposure metadata) and Ingresses (class, hosts/paths/backends, TLS summary, load balancer status hints).
   - **Security**: NetworkPolicy summaries, security-relevant ClusterRoleBinding summaries, and namespace Pod Security Admission label posture.
+  - **Operational Maturity**: Descheduler and VPA detection, plus all CronJob summaries for operational-tool visibility.
   - **Dependencies (optional)**: bounded pod/service dependency edges derived from Tetragon gRPC (`source=tetragon_grpc`), including unresolved `unknown` edges when endpoint mapping is unavailable.
   - **Storage**: StorageClasses (name/provisioner/safe parameter subset), PersistentVolumes, PersistentVolumeClaims, VolumeSnapshotClasses, and VolumeSnapshots.
   - **Events**: Kubernetes `Warning` and `Normal` events with bounded payload (max 500 events per snapshot, event message truncated to 500 chars).
@@ -270,6 +271,8 @@ On successful inventory ingest, when the Hub responds with `{"already_existed":t
 `InventorySnapshot.configuration.agent_runtime_env` and `InventorySnapshot.configuration.agent_configured_env` are special-case allowlisted views for the agent's own non-secret configuration only. They are used to compare the running agent's applied settings against values present in `sentinella-hub-k8s-agent-config`. They do not expose arbitrary ConfigMap values.
 
 `InventorySnapshot.security` includes summarized `NetworkPolicy` coverage, non-`system:*` `ClusterRoleBinding` summaries, and Pod Security Admission posture derived from namespace labels. The agent does not export full RBAC rule bodies, excludes well-known `system:*` ClusterRole bindings from the summary, and still reports namespaces with missing PSA labels.
+
+`InventorySnapshot.operational_maturity` includes descheduler detection (via well-known deployment names), VPA object count and update modes, and all CronJob summaries. All are fail-soft; snapshot still succeeds when those APIs are unavailable.
 
 ### GET `/v1/clusters/{cluster_id}/commands/poll?wait=30s`
 
