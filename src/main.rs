@@ -162,7 +162,13 @@ async fn build_and_send(cfg: &Config, kube: &KubeClient, hub: &HubClient) -> Res
         mut configuration,
         storage,
         events,
-    ) = collector::collect(kube, cfg.collect_secrets, cfg.collect_dependencies_tetragon).await?;
+    ) = collector::collect(
+        kube,
+        cfg.collect_secrets,
+        cfg.collect_dependencies_tetragon,
+        cfg.tech_detect_process,
+    )
+    .await?;
     configuration.agent_runtime_env = config::agent_runtime_env(cfg);
     let snap = InventorySnapshot {
         schema_version: 1,
@@ -363,6 +369,7 @@ mod tests {
             http_debug_bodies: false,
             full_debug: false,
             agent_log: "info".into(),
+            tech_detect_process: false,
             pod_name: "pod-1".into(),
             pod_namespace: "sentinella".into(),
             node_name: "node-1".into(),

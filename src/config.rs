@@ -21,6 +21,7 @@ pub const AGENT_CONFIG_ENV_ALLOWLIST: &[&str] = &[
     "LEASE_TTL_SECS",
     "POLL_WAIT_SECS",
     "TETRAGON_GRPC_ADDRESS",
+    "TECH_DETECT_PROCESS",
 ];
 
 #[derive(Clone, Debug)]
@@ -70,6 +71,9 @@ pub struct Config {
     /// Base log filter for tracing subscriber initialization.
     pub agent_log: String,
 
+    /// Enables process-level technology detection from container command/args.
+    pub tech_detect_process: bool,
+
     /// Pod name (downward API).
     pub pod_name: String,
 
@@ -118,6 +122,7 @@ impl Config {
         let collect_dependencies_tetragon = env_flag("COLLECT_DEPENDENCIES_TETRAGON");
         let tetragon_grpc_address = env::var("TETRAGON_GRPC_ADDRESS")
             .unwrap_or_else(|_| crate::tetragon::DEFAULT_GRPC_ADDRESS.to_string());
+        let tech_detect_process = env_flag("TECH_DETECT_PROCESS");
 
         let pod_name = env::var("POD_NAME").unwrap_or_else(|_| "unknown".to_string());
         let pod_namespace = env::var("POD_NAMESPACE").unwrap_or_else(|_| "default".to_string());
@@ -142,6 +147,7 @@ impl Config {
             http_debug_bodies,
             full_debug,
             agent_log,
+            tech_detect_process,
             pod_name,
             pod_namespace,
             node_name,
@@ -195,6 +201,7 @@ fn runtime_env_value(cfg: &Config, key: &str) -> Option<String> {
         "LEASE_TTL_SECS" => Some(cfg.lease_ttl.as_secs().to_string()),
         "POLL_WAIT_SECS" => Some(cfg.poll_wait.as_secs().to_string()),
         "TETRAGON_GRPC_ADDRESS" => Some(cfg.tetragon_grpc_address.clone()),
+        "TECH_DETECT_PROCESS" => Some(bool_string(cfg.tech_detect_process)),
         _ => None,
     }
 }
@@ -207,7 +214,8 @@ fn configured_env_value(key: &str, value: &str) -> Option<String> {
         | "AGENT_HTTP_DEBUG_BODIES"
         | "COLLECT_DEPENDENCIES_TETRAGON"
         | "COLLECT_SECRETS"
-        | "FULL_DEBUG" => Some(bool_string(trimmed == "true" || trimmed == "1")),
+        | "FULL_DEBUG"
+        | "TECH_DETECT_PROCESS" => Some(bool_string(trimmed == "true" || trimmed == "1")),
         "AGENT_LOG" => Some(if trimmed.is_empty() {
             "info".to_string()
         } else {
@@ -292,6 +300,7 @@ mod tests {
             "COLLECT_SECRETS",
             "COLLECT_DEPENDENCIES_TETRAGON",
             "TETRAGON_GRPC_ADDRESS",
+            "TECH_DETECT_PROCESS",
             "POD_NAME",
             "POD_NAMESPACE",
             "NODE_NAME",
@@ -525,6 +534,7 @@ mod tests {
             http_debug_bodies: false,
             full_debug: false,
             agent_log: "debug".into(),
+            tech_detect_process: false,
             pod_name: "pod-1".into(),
             pod_namespace: "sentinella".into(),
             node_name: "node-1".into(),

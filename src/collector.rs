@@ -39,6 +39,7 @@ pub async fn collect(
     client: &Client,
     collect_secrets: bool,
     collect_dependencies_tetragon: bool,
+    tech_detect_process: bool,
 ) -> Result<(
     Option<String>,
     ClusterInfo,
@@ -183,7 +184,7 @@ pub async fn collect(
     let pod_usage = build_pod_usage_index(&pod_metrics);
     let pod_infos = pods
         .into_iter()
-        .map(|pod| map_pod(pod, &pod_usage))
+        .map(|pod| map_pod(pod, &pod_usage, tech_detect_process))
         .collect();
     let network = NetworkInventory {
         services: services.into_iter().map(map_service).collect(),
@@ -996,7 +997,27 @@ fn map_daemonset(d: DaemonSet) -> WorkloadRef {
     }
 }
 
-fn map_pod(p: Pod, pod_usage: &BTreeMap<(String, String), PodUsageTotals>) -> PodInfo {
+fn container_technology(
+    container: &k8s_openapi::api::core::v1::Container,
+    tech_detect_process: bool,
+) -> Technology {
+    let image = container.image.as_deref().unwrap_or("");
+    if !tech_detect_process {
+        return tech::detect(image);
+    }
+
+    let image_tech = tech::detect(image);
+    let command = container.command.clone().unwrap_or_default();
+    let args = container.args.clone().unwrap_or_default();
+
+    tech::detect_from_process(&command, &args).unwrap_or(image_tech)
+}
+
+fn map_pod(
+    p: Pod,
+    pod_usage: &BTreeMap<(String, String), PodUsageTotals>,
+    tech_detect_process: bool,
+) -> PodInfo {
     let owner = p
         .metadata
         .owner_references
@@ -1016,7 +1037,7 @@ fn map_pod(p: Pod, pod_usage: &BTreeMap<(String, String), PodUsageTotals>) -> Po
                     name: c.name.clone(),
                     image: c.image.clone().unwrap_or_default(),
                     image_pull_policy: c.image_pull_policy.clone(),
-                    technology: tech::detect(c.image.as_deref().unwrap_or("")),
+                    technology: container_technology(c, tech_detect_process),
                     resources: map_resources(c.resources.as_ref()),
                 })
                 .collect()
@@ -2134,7 +2155,7 @@ mod tests {
             },
         )]);
 
-        let mapped = map_pod(pod, &usage);
+        let mapped = map_pod(pod, &usage, false);
         assert_eq!(mapped.usage_cpu.as_deref(), Some("125m"));
         assert_eq!(mapped.usage_memory.as_deref(), Some("256Mi"));
     }

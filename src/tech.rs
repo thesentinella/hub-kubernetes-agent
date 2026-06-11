@@ -525,6 +525,228 @@ const RULES: &[Rule] = &[
     },
 ];
 
+struct ProcessRule {
+    executable: &'static str,
+    vendor: &'static str,
+    product: &'static str,
+    language: &'static str,
+}
+
+const PROCESS_RULES: &[ProcessRule] = &[
+    ProcessRule {
+        executable: "java",
+        vendor: "eclipse",
+        product: "java",
+        language: "Java",
+    },
+    ProcessRule {
+        executable: "node",
+        vendor: "openjs",
+        product: "nodejs",
+        language: "JavaScript",
+    },
+    ProcessRule {
+        executable: "python",
+        vendor: "python-software-foundation",
+        product: "python",
+        language: "Python",
+    },
+    ProcessRule {
+        executable: "python3",
+        vendor: "python-software-foundation",
+        product: "python",
+        language: "Python",
+    },
+    ProcessRule {
+        executable: "ruby",
+        vendor: "",
+        product: "ruby",
+        language: "Ruby",
+    },
+    ProcessRule {
+        executable: "php",
+        vendor: "",
+        product: "php",
+        language: "PHP",
+    },
+    ProcessRule {
+        executable: "php-fpm",
+        vendor: "",
+        product: "php-fpm",
+        language: "PHP",
+    },
+    ProcessRule {
+        executable: "nginx",
+        vendor: "nginx",
+        product: "nginx",
+        language: "C",
+    },
+    ProcessRule {
+        executable: "httpd",
+        vendor: "apache",
+        product: "httpd",
+        language: "C",
+    },
+    ProcessRule {
+        executable: "apache2",
+        vendor: "apache",
+        product: "httpd",
+        language: "C",
+    },
+    ProcessRule {
+        executable: "haproxy",
+        vendor: "haproxy",
+        product: "haproxy",
+        language: "C",
+    },
+    ProcessRule {
+        executable: "envoy",
+        vendor: "envoy-proxy",
+        product: "envoy",
+        language: "C++",
+    },
+    ProcessRule {
+        executable: "traefik",
+        vendor: "traefik",
+        product: "traefik",
+        language: "Go",
+    },
+    ProcessRule {
+        executable: "caddy",
+        vendor: "caddy",
+        product: "caddy",
+        language: "Go",
+    },
+    ProcessRule {
+        executable: "redis-server",
+        vendor: "redis-labs",
+        product: "redis",
+        language: "C",
+    },
+    ProcessRule {
+        executable: "postgres",
+        vendor: "postgresql",
+        product: "postgres",
+        language: "C",
+    },
+    ProcessRule {
+        executable: "postmaster",
+        vendor: "postgresql",
+        product: "postgres",
+        language: "C",
+    },
+    ProcessRule {
+        executable: "mysqld",
+        vendor: "oracle",
+        product: "mysql",
+        language: "C++",
+    },
+    ProcessRule {
+        executable: "mysqld_safe",
+        vendor: "oracle",
+        product: "mysql",
+        language: "C++",
+    },
+    ProcessRule {
+        executable: "mariadbd",
+        vendor: "mariadb",
+        product: "mariadb",
+        language: "C++",
+    },
+    ProcessRule {
+        executable: "mongod",
+        vendor: "mongodb",
+        product: "mongodb",
+        language: "C++",
+    },
+    ProcessRule {
+        executable: "rabbitmq-server",
+        vendor: "vmware",
+        product: "rabbitmq",
+        language: "Erlang",
+    },
+];
+
+pub fn detect_from_process(command: &[String], args: &[String]) -> Option<Technology> {
+    let executables: Vec<&str> = command
+        .iter()
+        .chain(args.iter())
+        .filter_map(|entry| entry.rsplit('/').next().filter(|name| !name.is_empty()))
+        .collect();
+
+    for exe in &executables {
+        for rule in PROCESS_RULES {
+            if *exe == rule.executable {
+                let version = extract_process_version(args);
+                return Some(Technology {
+                    vendor: if rule.vendor.is_empty() {
+                        None
+                    } else {
+                        Some(rule.vendor.to_string())
+                    },
+                    product: Some(rule.product.to_string()),
+                    version: version.map(normalize_version),
+                    language: if rule.language.is_empty() {
+                        None
+                    } else {
+                        Some(rule.language.to_string())
+                    },
+                    source: "process",
+                });
+            }
+        }
+    }
+
+    None
+}
+
+fn extract_process_version(args: &[String]) -> Option<&str> {
+    for arg in args {
+        if let Some(version_part) = arg.strip_prefix("--version=") {
+            let v = version_part.trim();
+            if v.is_empty() {
+                continue;
+            }
+            if is_version_like(v) {
+                return Some(v);
+            }
+        }
+        if let Some(version_part) = arg.strip_prefix("-version=") {
+            let v = version_part.trim();
+            if v.is_empty() {
+                continue;
+            }
+            if is_version_like(v) {
+                return Some(v);
+            }
+        }
+    }
+
+    for pair in args.windows(2) {
+        if pair[0] == "--version" || pair[0] == "-version" {
+            let v = pair[1].trim();
+            if v.is_empty() {
+                continue;
+            }
+            if is_version_like(v) {
+                return Some(v);
+            }
+        }
+    }
+
+    None
+}
+
+fn is_version_like(value: &str) -> bool {
+    let v = value.trim();
+    if v.is_empty() {
+        return false;
+    }
+    v.chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '.' || ch == '-' || ch == '_')
+        && v.starts_with(|ch: char| ch.is_ascii_digit())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -678,5 +900,59 @@ mod tests {
 
         let node_distroless = detect("node:v22.1-distroless");
         assert_eq!(node_distroless.version.as_deref(), Some("22.1"));
+    }
+
+    #[test]
+    fn detect_from_process_java() {
+        let t = detect_from_process(
+            &["java".to_string()],
+            &["-jar".to_string(), "app.jar".to_string()],
+        )
+        .unwrap();
+        assert_eq!(t.language.as_deref(), Some("Java"));
+        assert_eq!(t.product.as_deref(), Some("java"));
+        assert_eq!(t.source, "process");
+    }
+
+    #[test]
+    fn detect_from_process_python_via_command() {
+        let t = detect_from_process(
+            &["/usr/bin/python3".to_string()],
+            &["-m".to_string(), "http.server".to_string()],
+        )
+        .unwrap();
+        assert_eq!(t.language.as_deref(), Some("Python"));
+        assert_eq!(t.product.as_deref(), Some("python"));
+        assert_eq!(t.source, "process");
+    }
+
+    #[test]
+    fn detect_from_process_node() {
+        let t = detect_from_process(&["node".to_string()], &["index.js".to_string()]).unwrap();
+        assert_eq!(t.language.as_deref(), Some("JavaScript"));
+        assert_eq!(t.product.as_deref(), Some("nodejs"));
+    }
+
+    #[test]
+    fn detect_from_process_nginx() {
+        let t = detect_from_process(
+            &["nginx".to_string()],
+            &["-g".to_string(), "daemon off;".to_string()],
+        )
+        .unwrap();
+        assert_eq!(t.product.as_deref(), Some("nginx"));
+        assert_eq!(t.source, "process");
+    }
+
+    #[test]
+    fn detect_from_process_returns_none_when_command_empty() {
+        let t = detect_from_process(&[], &[]);
+        assert!(t.is_none());
+    }
+
+    #[test]
+    fn detect_from_process_returns_none_for_unknown_executable() {
+        let t = detect_from_process(&["/usr/local/bin/my-custom-app".to_string()], &[]);
+        assert!(t.is_none());
     }
 }
