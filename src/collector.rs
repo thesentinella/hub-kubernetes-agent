@@ -11,7 +11,8 @@ use k8s_openapi::api::core::v1::{
     ConfigMap, Event, Namespace, Node, PersistentVolume, PersistentVolumeClaim, Pod, Secret,
     Service,
 };
-use k8s_openapi::api::networking::v1::Ingress;
+use k8s_openapi::api::networking::v1::{Ingress, NetworkPolicy};
+use k8s_openapi::api::rbac::v1::ClusterRoleBinding;
 use k8s_openapi::api::storage::v1::StorageClass;
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kube::api::{ApiResource, DynamicObject, ListParams};
@@ -23,6 +24,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use tracing::warn;
 
 const AGENT_CONFIGMAP_NAME: &str = "sentinella-hub-k8s-agent-config";
+const PSA_ENFORCE_LABEL: &str = "pod-security.kubernetes.io/enforce";
+const PSA_AUDIT_LABEL: &str = "pod-security.kubernetes.io/audit";
+const PSA_WARN_LABEL: &str = "pod-security.kubernetes.io/warn";
 
 #[derive(Default)]
 struct PodUsageTotals {
@@ -41,6 +45,7 @@ pub async fn collect(
     Workloads,
     Vec<PodInfo>,
     NetworkInventory,
+    SecurityInventory,
     DependencyInventory,
     ConfigurationInventory,
     StorageInventory,
@@ -58,6 +63,8 @@ pub async fn collect(
     let pods_fut = list_all::<Pod>(client, &lp);
     let services_fut = list_all::<Service>(client, &lp);
     let ingresses_fut = list_all::<Ingress>(client, &lp);
+    let network_policies_fut = list_all::<NetworkPolicy>(client, &lp);
+    let cluster_role_bindings_fut = list_all::<ClusterRoleBinding>(client, &lp);
     let configmaps_fut = list_all::<ConfigMap>(client, &lp);
     let secrets_fut = async {
         if collect_secrets {
@@ -90,6 +97,8 @@ pub async fn collect(
         pods,
         services,
         ingresses,
+        network_policies,
+        cluster_role_bindings,
         configmaps,
         secrets,
         storage_classes,
@@ -110,6 +119,8 @@ pub async fn collect(
         pods_fut,
         services_fut,
         ingresses_fut,
+        network_policies_fut,
+        cluster_role_bindings_fut,
         configmaps_fut,
         secrets_fut,
         storage_classes_fut,
@@ -131,6 +142,8 @@ pub async fn collect(
     let pods = soft_unwrap("pods", pods);
     let mut services = soft_unwrap("services", services);
     let mut ingresses = soft_unwrap("ingresses", ingresses);
+    let mut network_policies = soft_unwrap("networkpolicies", network_policies);
+    let cluster_role_bindings = soft_unwrap("clusterrolebindings", cluster_role_bindings);
     let mut configmaps = soft_unwrap("configmaps", configmaps);
     let mut secrets = soft_unwrap("secrets", secrets);
     let storage_classes = soft_unwrap("storageclasses", storage_classes);
@@ -142,7 +155,10 @@ pub async fn collect(
     let mut events = soft_unwrap("events", events);
 
     let cluster = build_cluster_info(version.ok(), &nodes);
-    let ns_infos = namespaces.into_iter().map(map_namespace).collect();
+    let ns_infos = namespaces
+        .into_iter()
+        .map(map_namespace)
+        .collect::<Vec<_>>();
     let workloads = Workloads {
         deployments: deployments.into_iter().map(map_deployment).collect(),
         statefulsets: statefulsets.into_iter().map(map_statefulset).collect(),
@@ -150,6 +166,7 @@ pub async fn collect(
     };
     sort_services_for_snapshot(&mut services);
     sort_ingresses_for_snapshot(&mut ingresses);
+    sort_network_policies_for_snapshot(&mut network_policies);
     let dependencies =
         collect_dependency_inventory(collect_dependencies_tetragon, &pods, &services).await;
     let pod_usage = build_pod_usage_index(&pod_metrics);
@@ -160,6 +177,19 @@ pub async fn collect(
     let network = NetworkInventory {
         services: services.into_iter().map(map_service).collect(),
         ingresses: ingresses.into_iter().map(map_ingress).collect(),
+    };
+    let mut cluster_role_binding_infos = cluster_role_bindings
+        .into_iter()
+        .filter_map(map_cluster_role_binding)
+        .collect::<Vec<_>>();
+    cluster_role_binding_infos.sort_by(|a, b| a.name.cmp(&b.name));
+    let security = SecurityInventory {
+        network_policies: network_policies
+            .into_iter()
+            .map(map_network_policy)
+            .collect(),
+        cluster_role_bindings: cluster_role_binding_infos,
+        pod_security_admission: build_pod_security_admission(&ns_infos),
     };
     sort_configmaps_for_snapshot(&mut configmaps);
     sort_secrets_for_snapshot(&mut secrets);
@@ -194,6 +224,7 @@ pub async fn collect(
         workloads,
         pod_infos,
         network,
+        security,
         dependencies,
         configuration,
         storage,
@@ -1176,6 +1207,137 @@ fn map_service(svc: Service) -> ServiceInfo {
     }
 }
 
+fn map_network_policy(policy: NetworkPolicy) -> NetworkPolicyInfo {
+    let spec = policy.spec;
+    let namespace = policy.metadata.namespace.unwrap_or_default();
+    let name = policy.metadata.name.unwrap_or_default();
+    let pod_selector = spec
+        .as_ref()
+        .map(|spec| {
+            map_metadata_pairs(
+                spec.pod_selector
+                    .as_ref()
+                    .and_then(|selector| selector.match_labels.clone())
+                    .unwrap_or_default(),
+            )
+        })
+        .unwrap_or_default();
+    let policy_types = spec.as_ref().map(network_policy_types).unwrap_or_default();
+    let ingress_rules_count = spec
+        .as_ref()
+        .and_then(|spec| spec.ingress.as_ref())
+        .map(|rules| rules.len())
+        .unwrap_or(0);
+    let egress_rules_count = spec
+        .as_ref()
+        .and_then(|spec| spec.egress.as_ref())
+        .map(|rules| rules.len())
+        .unwrap_or(0);
+
+    NetworkPolicyInfo {
+        namespace,
+        name,
+        policy_types,
+        pod_selector,
+        ingress_rules_count,
+        egress_rules_count,
+    }
+}
+
+fn network_policy_types(spec: &k8s_openapi::api::networking::v1::NetworkPolicySpec) -> Vec<String> {
+    let mut policy_types = spec.policy_types.clone().unwrap_or_default();
+    if policy_types.is_empty() {
+        if spec.ingress.as_ref().is_some_and(|rules| !rules.is_empty()) {
+            policy_types.push("Ingress".to_string());
+        }
+        if spec.egress.as_ref().is_some_and(|rules| !rules.is_empty()) {
+            policy_types.push("Egress".to_string());
+        }
+    }
+    policy_types.sort();
+    policy_types.dedup();
+    policy_types
+}
+
+fn map_cluster_role_binding(binding: ClusterRoleBinding) -> Option<ClusterRoleBindingInfo> {
+    let role_ref_name = binding.role_ref.name;
+    let role_ref_kind = binding.role_ref.kind;
+    if !should_include_cluster_role_binding(&role_ref_kind, &role_ref_name) {
+        return None;
+    }
+
+    let mut subjects = binding
+        .subjects
+        .unwrap_or_default()
+        .into_iter()
+        .map(|subject| SecuritySubjectInfo {
+            kind: subject.kind,
+            name: subject.name,
+            namespace: subject.namespace,
+        })
+        .collect::<Vec<_>>();
+    subjects.sort_by(|a, b| {
+        a.kind
+            .cmp(&b.kind)
+            .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.namespace.cmp(&b.namespace))
+    });
+
+    Some(ClusterRoleBindingInfo {
+        name: binding.metadata.name.unwrap_or_default(),
+        role_ref_name: role_ref_name.clone(),
+        role_ref_kind,
+        risk_level: if is_high_risk_role(&role_ref_name) {
+            "high".to_string()
+        } else {
+            "review".to_string()
+        },
+        subjects,
+    })
+}
+
+fn should_include_cluster_role_binding(role_ref_kind: &str, role_ref_name: &str) -> bool {
+    is_high_risk_role(role_ref_name)
+        || (role_ref_kind == "ClusterRole" && !role_ref_name.starts_with("system:"))
+}
+
+fn is_high_risk_role(role_name: &str) -> bool {
+    matches!(role_name, "cluster-admin" | "admin" | "edit")
+}
+
+fn build_pod_security_admission(namespaces: &[NamespaceInfo]) -> PodSecurityAdmissionInfo {
+    let mut namespaces = namespaces
+        .iter()
+        .map(|namespace| {
+            let labels = namespace
+                .labels
+                .iter()
+                .map(|label| (label.key.as_str(), label.value.clone()))
+                .collect::<BTreeMap<_, _>>();
+            PodSecurityNamespaceInfo {
+                namespace: namespace.name.clone(),
+                enforce: labels.get(PSA_ENFORCE_LABEL).cloned(),
+                audit: labels.get(PSA_AUDIT_LABEL).cloned(),
+                warn: labels.get(PSA_WARN_LABEL).cloned(),
+            }
+        })
+        .collect::<Vec<_>>();
+    namespaces.sort_by(|a, b| a.namespace.cmp(&b.namespace));
+    PodSecurityAdmissionInfo { namespaces }
+}
+
+fn sort_network_policies_for_snapshot(network_policies: &mut [NetworkPolicy]) {
+    network_policies.sort_by(|a, b| {
+        let a_namespace = a.metadata.namespace.as_deref().unwrap_or_default();
+        let b_namespace = b.metadata.namespace.as_deref().unwrap_or_default();
+        let a_name = a.metadata.name.as_deref().unwrap_or_default();
+        let b_name = b.metadata.name.as_deref().unwrap_or_default();
+        a_namespace
+            .cmp(b_namespace)
+            .then_with(|| a_name.cmp(b_name))
+    });
+}
+
 fn map_ingress(ingress: Ingress) -> IngressInfo {
     let namespace = ingress.metadata.namespace.unwrap_or_default();
     let name = ingress.metadata.name.unwrap_or_default();
@@ -1854,6 +2016,130 @@ mod tests {
         let mapped = map_pod(pod, &usage);
         assert_eq!(mapped.usage_cpu.as_deref(), Some("125m"));
         assert_eq!(mapped.usage_memory.as_deref(), Some("256Mi"));
+    }
+
+    #[test]
+    fn map_network_policy_captures_selector_types_and_counts() {
+        let policy: NetworkPolicy = serde_json::from_value(json!({
+            "apiVersion": "networking.k8s.io/v1",
+            "kind": "NetworkPolicy",
+            "metadata": {
+                "namespace": "prod",
+                "name": "default-deny"
+            },
+            "spec": {
+                "podSelector": {
+                    "matchLabels": {
+                        "app": "api"
+                    }
+                },
+                "policyTypes": ["Ingress", "Egress"],
+                "ingress": [{}],
+                "egress": [{}, {}]
+            }
+        }))
+        .unwrap();
+
+        let mapped = map_network_policy(policy);
+        assert_eq!(mapped.namespace, "prod");
+        assert_eq!(mapped.name, "default-deny");
+        assert_eq!(mapped.policy_types, vec!["Egress", "Ingress"]);
+        assert_eq!(mapped.ingress_rules_count, 1);
+        assert_eq!(mapped.egress_rules_count, 2);
+        assert_eq!(
+            mapped.pod_selector,
+            vec![KV {
+                key: "app".into(),
+                value: "api".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn map_cluster_role_binding_filters_and_flags_risk() {
+        let high: ClusterRoleBinding = serde_json::from_value(json!({
+            "apiVersion": "rbac.authorization.k8s.io/v1",
+            "kind": "ClusterRoleBinding",
+            "metadata": {"name": "admins"},
+            "roleRef": {
+                "apiGroup": "rbac.authorization.k8s.io",
+                "kind": "ClusterRole",
+                "name": "cluster-admin"
+            },
+            "subjects": [
+                {"kind": "User", "name": "alice"},
+                {"kind": "ServiceAccount", "name": "bot", "namespace": "ops"}
+            ]
+        }))
+        .unwrap();
+        let review: ClusterRoleBinding = serde_json::from_value(json!({
+            "apiVersion": "rbac.authorization.k8s.io/v1",
+            "kind": "ClusterRoleBinding",
+            "metadata": {"name": "platform"},
+            "roleRef": {
+                "apiGroup": "rbac.authorization.k8s.io",
+                "kind": "ClusterRole",
+                "name": "platform-admin"
+            },
+            "subjects": []
+        }))
+        .unwrap();
+
+        let mapped_high = map_cluster_role_binding(high).unwrap();
+        assert_eq!(mapped_high.risk_level, "high");
+        assert_eq!(mapped_high.role_ref_name, "cluster-admin");
+        assert_eq!(mapped_high.subjects.len(), 2);
+
+        let mapped_review = map_cluster_role_binding(review).unwrap();
+        assert_eq!(mapped_review.risk_level, "review");
+
+        let ignored: ClusterRoleBinding = serde_json::from_value(json!({
+            "apiVersion": "rbac.authorization.k8s.io/v1",
+            "kind": "ClusterRoleBinding",
+            "metadata": {"name": "ignored"},
+            "roleRef": {
+                "apiGroup": "rbac.authorization.k8s.io",
+                "kind": "ClusterRole",
+                "name": "system:discovery"
+            },
+            "subjects": []
+        }))
+        .unwrap();
+        assert!(map_cluster_role_binding(ignored).is_none());
+    }
+
+    #[test]
+    fn build_pod_security_admission_includes_missing_labels() {
+        let namespaces = vec![
+            NamespaceInfo {
+                name: "prod".into(),
+                phase: Some("Active".into()),
+                labels: vec![
+                    KV {
+                        key: PSA_ENFORCE_LABEL.into(),
+                        value: "restricted".into(),
+                    },
+                    KV {
+                        key: PSA_WARN_LABEL.into(),
+                        value: "baseline".into(),
+                    },
+                ],
+            },
+            NamespaceInfo {
+                name: "dev".into(),
+                phase: Some("Active".into()),
+                labels: vec![],
+            },
+        ];
+
+        let psa = build_pod_security_admission(&namespaces);
+        assert_eq!(psa.namespaces.len(), 2);
+        assert_eq!(psa.namespaces[0].namespace, "dev");
+        assert_eq!(psa.namespaces[0].enforce, None);
+        assert_eq!(psa.namespaces[1].namespace, "prod");
+        assert_eq!(psa.namespaces[1].enforce.as_deref(), Some("restricted"));
+        assert_eq!(psa.namespaces[1].audit, None);
+        assert_eq!(psa.namespaces[1].warn.as_deref(), Some("baseline"));
     }
 
     #[test]
