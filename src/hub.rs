@@ -1,6 +1,7 @@
 //! HTTP client to the Sentinella Hub.
 
 use crate::config::Config;
+use crate::health;
 use crate::model::*;
 use anyhow::Result;
 use reqwest::{Client, StatusCode};
@@ -128,6 +129,7 @@ impl HubClient {
                                     );
                                 }
                             }
+                            health::SNAPSHOT_SEND_SUCCESS.inc();
                             return Ok(());
                         }
 
@@ -147,6 +149,7 @@ impl HubClient {
                             && s != StatusCode::REQUEST_TIMEOUT
                             && s != StatusCode::TOO_MANY_REQUESTS
                         {
+                            health::SNAPSHOT_SEND_FAILURE.inc();
                             return Err(anyhow::anyhow!(
                                 "hub rejected snapshot: {} (content_type={}, body_preview={})",
                                 s,
@@ -166,6 +169,7 @@ impl HubClient {
                 }
             }
         }
+        health::SNAPSHOT_SEND_FAILURE.inc();
         Err(last_err.unwrap_or_else(|| anyhow::anyhow!("snapshot retries exhausted")))
     }
 
@@ -252,8 +256,14 @@ impl HubClient {
 
             let resp = match req.send().await {
                 Ok(r) => r,
-                Err(e) if e.is_timeout() => return Ok(CommandBatch { commands: vec![] }),
-                Err(e) => return Err(e.into()),
+                Err(e) if e.is_timeout() => {
+                    health::COMMAND_POLL_EMPTY.inc();
+                    return Ok(CommandBatch { commands: vec![] });
+                }
+                Err(e) => {
+                    health::COMMAND_POLL_FAILURE.inc();
+                    return Err(e.into());
+                }
             };
 
             let status = resp.status();
@@ -271,6 +281,7 @@ impl HubClient {
                         "poll returned no content"
                     );
                 }
+                health::COMMAND_POLL_EMPTY.inc();
                 return Ok(CommandBatch { commands: vec![] });
             }
 
@@ -301,6 +312,7 @@ impl HubClient {
             }
 
             if !status.is_success() {
+                health::COMMAND_POLL_FAILURE.inc();
                 return Err(anyhow::anyhow!(
                     "poll status {} (content_type={}, body_preview={})",
                     status,
@@ -314,10 +326,20 @@ impl HubClient {
             }
 
             if body.trim().is_empty() {
+                health::COMMAND_POLL_EMPTY.inc();
                 return Ok(CommandBatch { commands: vec![] });
             }
 
-            return serde_json::from_str(&body).map_err(|e| {
+            return serde_json::from_str(&body)
+                .inspect(|batch: &CommandBatch| {
+                    if batch.commands.is_empty() {
+                        health::COMMAND_POLL_EMPTY.inc();
+                    } else {
+                        health::COMMAND_POLL_SUCCESS.inc();
+                    }
+                })
+                .map_err(|e| {
+                health::COMMAND_POLL_FAILURE.inc();
                 anyhow::anyhow!(
                     "error decoding response body: {} (status={}, content_type={}, body_preview={})",
                     e,
@@ -325,9 +347,10 @@ impl HubClient {
                     content_type,
                     error_body_for_log(Some(body.as_str()), self.cfg.full_debug, self.cfg.http_debug_bodies)
                 )
-            });
+                });
         }
 
+        health::COMMAND_POLL_FAILURE.inc();
         Err(anyhow::anyhow!("poll status 404 Not Found"))
     }
 
@@ -360,7 +383,13 @@ impl HubClient {
         for (url_index, url) in urls.iter().enumerate() {
             let start = std::time::Instant::now();
             let req = self.auth(self.http.post(url).json(result));
-            let resp = req.send().await?;
+            let resp = match req.send().await {
+                Ok(resp) => resp,
+                Err(error) => {
+                    health::COMMAND_ACK_FAILURE.inc();
+                    return Err(error.into());
+                }
+            };
             let status = resp.status();
             let content_type = response_content_type(&resp);
             let content_length = resp.content_length();
@@ -396,6 +425,7 @@ impl HubClient {
             }
 
             if !status.is_success() {
+                health::COMMAND_ACK_FAILURE.inc();
                 warn!(
                     "ack returned {} (content_type={}, body_preview={})",
                     status,
@@ -406,6 +436,8 @@ impl HubClient {
                         self.cfg.http_debug_bodies
                     )
                 );
+            } else {
+                health::COMMAND_ACK_SUCCESS.inc();
             }
             break;
         }
