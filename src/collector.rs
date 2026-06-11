@@ -2,6 +2,7 @@
 
 use crate::model::*;
 use crate::tech;
+use crate::tetragon;
 use anyhow::Result;
 use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, StatefulSet};
 use k8s_openapi::api::core::v1::{
@@ -14,17 +15,15 @@ use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kube::api::{ApiResource, DynamicObject, ListParams};
 use kube::core::GroupVersionKind;
 use kube::{Api, Client};
+use serde::Deserialize;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::File;
-use std::io::{BufRead, BufReader};
 use tracing::warn;
 
 pub async fn collect(
     client: &Client,
     collect_secrets: bool,
     collect_dependencies_tetragon: bool,
-    tetragon_log_path: &str,
 ) -> Result<(
     Option<String>,
     ClusterInfo,
@@ -137,12 +136,8 @@ pub async fn collect(
     };
     sort_services_for_snapshot(&mut services);
     sort_ingresses_for_snapshot(&mut ingresses);
-    let dependencies = collect_dependency_inventory(
-        collect_dependencies_tetragon,
-        tetragon_log_path,
-        &pods,
-        &services,
-    );
+    let dependencies =
+        collect_dependency_inventory(collect_dependencies_tetragon, &pods, &services).await;
     let pod_infos = pods.into_iter().map(map_pod).collect();
     let network = NetworkInventory {
         services: services.into_iter().map(map_service).collect(),
@@ -196,35 +191,20 @@ async fn kube_system_uid(client: &Client) -> Option<String> {
     }
 }
 
-fn collect_dependency_inventory(
+async fn collect_dependency_inventory(
     enabled: bool,
-    tetragon_log_path: &str,
     pods: &[Pod],
     services: &[Service],
 ) -> DependencyInventory {
     if !enabled {
         return DependencyInventory {
-            source: "tetragon_logs",
+            source: "tetragon_grpc",
             window_seconds: DEP_WINDOW_SECONDS,
             ..DependencyInventory::default()
         };
     }
 
-    let file = match File::open(tetragon_log_path) {
-        Ok(file) => file,
-        Err(e) => {
-            warn!(
-                path = %tetragon_log_path,
-                error = %e,
-                "tetragon log source unavailable; returning empty dependency inventory"
-            );
-            return DependencyInventory {
-                source: "tetragon_logs",
-                window_seconds: DEP_WINDOW_SECONDS,
-                ..DependencyInventory::default()
-            };
-        }
-    };
+    let body = tetragon::snapshot_ndjson();
 
     let pod_index = build_pod_ip_index(pods);
     let service_index = build_service_ip_index(services);
@@ -233,21 +213,16 @@ fn collect_dependency_inventory(
     let mut dropped_edges = 0u64;
     let mut skipped_for_fanout = 0u64;
 
-    let reader = BufReader::new(file);
-    for line in reader.lines().take(MAX_TETRAGON_LINES) {
-        let line = match line {
-            Ok(line) if !line.trim().is_empty() => line,
-            Ok(_) => continue,
-            Err(e) => {
-                warn!(error = %e, "failed to read tetragon event line");
-                continue;
-            }
-        };
+    for line in body.lines().take(MAX_TETRAGON_LINES) {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
 
-        let value: Value = match serde_json::from_str(&line) {
+        let value: Value = match serde_json::from_str(line) {
             Ok(value) => value,
             Err(e) => {
-                warn!(error = %e, "failed to parse tetragon event json line");
+                warn!(error = %e, "failed to parse dependency event json line");
                 continue;
             }
         };
@@ -257,8 +232,18 @@ fn collect_dependency_inventory(
             None => continue,
         };
 
-        let from = resolve_endpoint(&record.src_ip, &pod_index, &service_index);
-        let to = resolve_endpoint(&record.dst_ip, &pod_index, &service_index);
+        let from = resolve_endpoint(
+            &record.src_ip,
+            record.src_endpoint.as_ref(),
+            &pod_index,
+            &service_index,
+        );
+        let to = resolve_endpoint(
+            &record.dst_ip,
+            record.dst_endpoint.as_ref(),
+            &pod_index,
+            &service_index,
+        );
         let key = DependencyEdgeKey {
             from: normalize_endpoint_key(&from),
             to: normalize_endpoint_key(&to),
@@ -319,23 +304,35 @@ fn collect_dependency_inventory(
     let truncated = dropped_total > 0;
     DependencyInventory {
         edges,
-        source: "tetragon_logs",
+        source: "tetragon_grpc",
         window_seconds: DEP_WINDOW_SECONDS,
         truncated,
         dropped_edges: dropped_total,
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Deserialize)]
 struct TetragonDependencyRecord {
     src_ip: String,
     dst_ip: String,
+    #[serde(default)]
+    src_endpoint: Option<DependencyEndpointHint>,
+    #[serde(default)]
+    dst_endpoint: Option<DependencyEndpointHint>,
     protocol: String,
     destination_port: u16,
     bytes: u64,
     packets: u64,
     connections: u64,
     timestamp_unix_ms: u128,
+}
+
+#[derive(Debug, Deserialize)]
+struct DependencyEndpointHint {
+    namespace: Option<String>,
+    pod_name: Option<String>,
+    workload_kind: Option<String>,
+    workload_name: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -430,6 +427,8 @@ fn parse_tetragon_flow_record(value: &Value) -> Option<TetragonDependencyRecord>
     Some(TetragonDependencyRecord {
         src_ip,
         dst_ip,
+        src_endpoint: None,
+        dst_endpoint: None,
         protocol,
         destination_port,
         bytes,
@@ -483,6 +482,8 @@ fn parse_tetragon_kprobe_record(value: &Value) -> Option<TetragonDependencyRecor
     Some(TetragonDependencyRecord {
         src_ip,
         dst_ip,
+        src_endpoint: None,
+        dst_endpoint: None,
         protocol,
         destination_port,
         bytes,
@@ -548,6 +549,7 @@ fn build_service_ip_index(services: &[Service]) -> BTreeMap<String, ServiceIpInf
 
 fn resolve_endpoint(
     ip: &str,
+    hint: Option<&DependencyEndpointHint>,
     pods: &BTreeMap<String, PodIpInfo>,
     services: &BTreeMap<String, ServiceIpInfo>,
 ) -> DependencyEndpoint {
@@ -571,6 +573,23 @@ fn resolve_endpoint(
             workload_name: None,
             ip: Some(service.ip.clone()),
         };
+    }
+
+    if let Some(hint) = hint {
+        let has_identity = hint.namespace.is_some()
+            || hint.pod_name.is_some()
+            || hint.workload_kind.is_some()
+            || hint.workload_name.is_some();
+        if has_identity {
+            return DependencyEndpoint {
+                kind: "pod".to_string(),
+                namespace: hint.namespace.clone(),
+                name: hint.pod_name.clone(),
+                workload_kind: hint.workload_kind.clone(),
+                workload_name: hint.workload_name.clone(),
+                ip: Some(ip.to_string()),
+            };
+        }
     }
 
     DependencyEndpoint {
@@ -1488,17 +1507,39 @@ mod tests {
             },
         );
 
-        let pod_endpoint = resolve_endpoint("10.42.0.10", &pods, &services);
+        let pod_endpoint = resolve_endpoint("10.42.0.10", None, &pods, &services);
         assert_eq!(pod_endpoint.kind, "pod");
         assert_eq!(pod_endpoint.name.as_deref(), Some("api-1"));
 
-        let svc_endpoint = resolve_endpoint("10.43.0.20", &pods, &services);
+        let svc_endpoint = resolve_endpoint("10.43.0.20", None, &pods, &services);
         assert_eq!(svc_endpoint.kind, "service");
         assert_eq!(svc_endpoint.name.as_deref(), Some("db"));
 
-        let unknown = resolve_endpoint("10.99.0.1", &pods, &services);
+        let unknown = resolve_endpoint("10.99.0.1", None, &pods, &services);
         assert_eq!(unknown.kind, "unknown");
         assert_eq!(unknown.ip.as_deref(), Some("10.99.0.1"));
+    }
+
+    #[test]
+    fn resolve_endpoint_uses_source_hint_before_unknown_fallback() {
+        let endpoint = resolve_endpoint(
+            "10.99.0.1",
+            Some(&DependencyEndpointHint {
+                namespace: Some("prod".into()),
+                pod_name: Some("api-1".into()),
+                workload_kind: Some("Deployment".into()),
+                workload_name: Some("api".into()),
+            }),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        );
+
+        assert_eq!(endpoint.kind, "pod");
+        assert_eq!(endpoint.namespace.as_deref(), Some("prod"));
+        assert_eq!(endpoint.name.as_deref(), Some("api-1"));
+        assert_eq!(endpoint.workload_kind.as_deref(), Some("Deployment"));
+        assert_eq!(endpoint.workload_name.as_deref(), Some("api"));
+        assert_eq!(endpoint.ip.as_deref(), Some("10.99.0.1"));
     }
 
     #[test]

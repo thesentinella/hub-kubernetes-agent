@@ -3,7 +3,7 @@ set -euo pipefail
 
 NAMESPACE="sentinella"
 MANIFEST_URL="https://raw.githubusercontent.com/thesentinella/hub-kubernetes-agent/main/agent.yaml"
-MANIFEST_SHA256="afdac9097397c06cd5d8452da94e31119375285fdcebedc48780505071d15c36"
+MANIFEST_SHA256="a39414e85a6470f9c31e0f43cea1c0db91bc44e3c56841491fbf61e042f57736"
 HUB_URL="https://api.hub.sentinel.la"
 INSTALL_PLATFORM="${INSTALL_PLATFORM:-}"
 PLATFORM_OVERRIDE=""
@@ -22,61 +22,10 @@ Usage: install.sh [--platform kubernetes|openshift]
 Environment:
   INSTALL_PLATFORM   Override platform detection (kubernetes|openshift)
   VERIFY_MANIFEST_CHECKSUM  Set to true/1 to verify downloaded agent.yaml
-  COLLECT_DEPENDENCIES_TETRAGON  Set to true/1 to keep Tetragon hostPath on OpenShift
+  COLLECT_DEPENDENCIES_TETRAGON  Set to true/1 when the Tetragon gRPC service is installed
   CLUSTER_ID         Required cluster identifier
   HUB_API_KEY        Required Hub API key
 EOF
-}
-
-strip_tetragon_hostpath() {
-  awk '
-    function indent(line) {
-      match(line, /[^ ]/)
-      return RSTART ? RSTART - 1 : length(line)
-    }
-
-    function emit(line,   retry) {
-      retry = 1
-      while (retry) {
-        retry = 0
-
-        if (skip_rest) {
-          return
-        }
-
-        if (in_mounts) {
-          if (indent(line) > mounts_indent) {
-            return
-          }
-
-          in_mounts = 0
-          retry = 1
-          continue
-        }
-
-        if (line ~ /^[[:space:]]*volumeMounts:[[:space:]]*$/) {
-          in_mounts = 1
-          mounts_indent = indent(line)
-          return
-        }
-
-        if (line ~ /^[[:space:]]*volumes:[[:space:]]*$/) {
-          skip_rest = 1
-          return
-        }
-      }
-
-      print line
-    }
-
-    BEGIN {
-      in_mounts = 0
-      skip_rest = 0
-    }
-
-    { emit($0) }
-  ' "$RENDERED_MANIFEST" > "$TMPDIR/agent.openshift.yaml"
-  mv "$TMPDIR/agent.openshift.yaml" "$RENDERED_MANIFEST"
 }
 
 detect_openshift() {
@@ -293,17 +242,6 @@ if [ "$PLATFORM" = "openshift" ]; then
   sed '/runAsUser: 65532/d;/runAsGroup: 65532/d' "$RENDERED_MANIFEST" > "$TMPDIR/agent.openshift.yaml"
   mv "$TMPDIR/agent.openshift.yaml" "$RENDERED_MANIFEST"
 
-  case "$COLLECT_DEPENDENCIES_TETRAGON" in
-    true|1)
-      ;;
-    false|0|"")
-      strip_tetragon_hostpath
-      ;;
-    *)
-      echo "Error: COLLECT_DEPENDENCIES_TETRAGON must be true, 1, false, 0, or empty." >&2
-      exit 1
-      ;;
-  esac
 fi
 
 : > "$NAMESPACE_MANIFEST"
@@ -325,7 +263,7 @@ kubectl apply -f "$NAMESPACE_MANIFEST"
 echo "Validating manifest..."
 if ! kubectl apply --dry-run=server -f "$WORKLOAD_MANIFEST" >/dev/null; then
   if [ "$PLATFORM" = "openshift" ]; then
-    echo "Error: OpenShift rejected the agent manifest. The cluster may not allow hostPath mounts for Tetragon or the current SCC is too restrictive." >&2
+    echo "Error: OpenShift rejected the agent manifest. Check SCC constraints or other workload security restrictions." >&2
   else
     echo "Error: the cluster rejected the agent manifest." >&2
   fi

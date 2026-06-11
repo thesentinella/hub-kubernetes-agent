@@ -113,8 +113,8 @@ data:
   LEASE_TTL_SECS: "30"
   ACTIONS_ENABLED: "false"           # read-only by default
   COLLECT_SECRETS: "false"           # requires separate secrets-reader RBAC when true
-  COLLECT_DEPENDENCIES_TETRAGON: "false"  # opt-in; requires Tetragon manifest applied (see README Deploy section)
-  TETRAGON_LOG_PATH: "/var/run/tetragon/tetragon-events.jsonl"
+  COLLECT_DEPENDENCIES_TETRAGON: "false"  # opt-in; requires Tetragon with gRPC enabled
+  TETRAGON_GRPC_ADDRESS: "tetragon-grpc.tetragon.svc.cluster.local:54321"
   FULL_DEBUG: "false"                 # last resort only; emits full payloads and bodies
   AGENT_HTTP_DEBUG: "false"
   AGENT_HTTP_DEBUG_BODIES: "false"
@@ -191,10 +191,6 @@ spec:
             - name: metrics
               containerPort: 9090
               protocol: TCP
-          volumeMounts:
-            - name: tetragon-events
-              mountPath: /var/run/tetragon
-              readOnly: true
           livenessProbe:
             httpGet:
               path: /livez
@@ -218,8 +214,3 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
-      volumes:
-        - name: tetragon-events
-          hostPath:
-            path: /var/run/tetragon
-            type: DirectoryOrCreate
