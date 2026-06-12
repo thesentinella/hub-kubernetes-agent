@@ -352,49 +352,55 @@ podman push ghcr.io/sentinella/sentinella-hub-k8s-agent:0.1.0
 
 ## Deploy
 
-1. Create the auth Secret (once per namespace/cluster):
+1. Quick install (one-liner):
    ```bash
-   printf '%s' '<API_KEY>' | kubectl create secret generic sentinella-hub-k8s-agent-auth \
-     --namespace sentinella \
-     --from-file=api-key=/dev/stdin \
-     --dry-run=client -o yaml | kubectl apply -f -
+   curl -sfL https://raw.githubusercontent.com/thesentinella/hub-kubernetes-agent/main/install.sh \
+     | CLUSTER_ID="my-cluster" HUB_API_KEY="shub_..." bash
    ```
-2. (Required when `COLLECT_DEPENDENCIES_TETRAGON=true`) Install Tetragon with internal gRPC exposed on TCP:
-    ```bash
-    helm repo add cilium https://helm.cilium.io >/dev/null 2>&1 || true; helm repo update; kubectl create namespace tetragon --dry-run=client -o yaml | kubectl apply -f -; helm upgrade --install tetragon cilium/tetragon -n tetragon --reset-values --set tetragonOperator.enabled=false --set crds.installMethod=helm --set tetragon.grpc.enabled=true --set-string tetragon.grpc.address="0.0.0.0:54321"; printf '%s\n' 'apiVersion: v1' 'kind: Service' 'metadata:' '  name: tetragon-grpc' '  namespace: tetragon' 'spec:' '  type: ClusterIP' '  internalTrafficPolicy: Local' '  selector:' '    app.kubernetes.io/name: tetragon' '    app.kubernetes.io/instance: tetragon' '  ports:' '    - name: grpc' '      protocol: TCP' '      port: 54321' '      targetPort: 54321' | kubectl apply -f -
-    ```
-   This creates the internal service `tetragon-grpc.tetragon.svc.cluster.local:54321` with `internalTrafficPolicy: Local` so each agent pod talks to a Tetragon pod on the same node.
-3. Install the agent:
-   - Convenience path: `curl | bash` executes the installer directly. If you need to audit the script first, download `install.sh` and run it locally instead.
-   - Optional integrity check: set `VERIFY_MANIFEST_CHECKSUM=true` (or `1`) to verify the downloaded `agent.yaml` before apply.
-   - Auto-detect the platform:
-     ```bash
-     curl -sfL https://raw.githubusercontent.com/thesentinella/hub-kubernetes-agent/main/install.sh \
-       | CLUSTER_ID="my-cluster" HUB_API_KEY="shub_..." bash
-     ```
+
+   The installer creates the auth Secret from `HUB_API_KEY`, applies `agent.yaml`, and auto-detects the platform.
    - Force a platform when needed:
      ```bash
      curl -sfL https://raw.githubusercontent.com/thesentinella/hub-kubernetes-agent/main/install.sh \
        | CLUSTER_ID="my-cluster" HUB_API_KEY="shub_..." bash -s -- --platform openshift
      ```
    - Or set `INSTALL_PLATFORM=kubernetes|openshift`.
-    - OpenShift installs work without Tetragon by default; set `COLLECT_DEPENDENCIES_TETRAGON=true` only when the Tetragon gRPC service is installed.
+   - Optional integrity check: set `VERIFY_MANIFEST_CHECKSUM=true` (or `1`) to verify the downloaded `agent.yaml` before apply.
 
-4. If you install manually, edit `agent.yaml`:
-      - `CLUSTER_ID` unique per cluster.
-      - `image:` for the `agent` container pointing to your Rust agent image.
-      - For dependency collection: set `COLLECT_DEPENDENCIES_TETRAGON=true`. The default `TETRAGON_GRPC_ADDRESS` in that mode is `tetragon-grpc.tetragon.svc.cluster.local:54321`.
-      - Toleration block — current value runs on every node including control plane; trim if you want a smaller footprint.
-5. Verify:
-    ```bash
-    kubectl -n sentinella get ds,po
-    kubectl -n sentinella get lease
-    kubectl -n sentinella logs ds/sentinella-hub-k8s-agent --tail=50
-    kubectl -n sentinella port-forward ds/sentinella-hub-k8s-agent 9090:9090
-    curl localhost:9090/metrics
-    ```
+2. (Optional) Install Tetragon — required only when `COLLECT_DEPENDENCIES_TETRAGON=true`:
+   ```bash
+   helm repo add cilium https://helm.cilium.io >/dev/null 2>&1 || true; helm repo update; kubectl create namespace tetragon --dry-run=client -o yaml | kubectl apply -f -; helm upgrade --install tetragon cilium/tetragon -n tetragon --reset-values --set tetragonOperator.enabled=false --set crds.installMethod=helm --set tetragon.grpc.enabled=true --set-string tetragon.grpc.address="0.0.0.0:54321"; printf '%s\n' 'apiVersion: v1' 'kind: Service' 'metadata:' '  name: tetragon-grpc' '  namespace: tetragon' 'spec:' '  type: ClusterIP' '  internalTrafficPolicy: Local' '  selector:' '    app.kubernetes.io/name: tetragon' '    app.kubernetes.io/instance: tetragon' '  ports:' '    - name: grpc' '      protocol: TCP' '      port: 54321' '      targetPort: 54321' | kubectl apply -f -
+   ```
+   This creates the internal service `tetragon-grpc.tetragon.svc.cluster.local:54321` with `internalTrafficPolicy: Local` so each agent pod talks to a Tetragon pod on the same node.
 
-OpenShift installs use the same agent image and code path. With dependency collection disabled, the agent behaves like a normal inventory collector. With dependency collection enabled, readiness blocks until Tetragon is connected. The manifest checksum check is opt-in and off by default. `FULL_DEBUG` is a last resort only.
+3. Manual install alternative:
+   - Create the auth Secret (once per namespace/cluster):
+     ```bash
+     printf '%s' '<API_KEY>' | kubectl create secret generic sentinella-hub-k8s-agent-auth \
+       --namespace sentinella \
+       --from-file=api-key=/dev/stdin \
+       --dry-run=client -o yaml | kubectl apply -f -
+     ```
+   - Edit `agent.yaml`:
+     - `CLUSTER_ID` unique per cluster.
+     - `image:` for the `agent` container pointing to your Rust agent image.
+     - For dependency collection: set `COLLECT_DEPENDENCIES_TETRAGON=true`. The default `TETRAGON_GRPC_ADDRESS` in that mode is `tetragon-grpc.tetragon.svc.cluster.local:54321`.
+     - Toleration block — current value runs on every node including control plane; trim if you want a smaller footprint.
+   - Apply:
+     ```bash
+     kubectl apply -f agent.yaml
+     ```
+
+4. Verify:
+   ```bash
+   kubectl -n sentinella get ds,po
+   kubectl -n sentinella get lease
+   kubectl -n sentinella logs ds/sentinella-hub-k8s-agent --tail=50
+   kubectl -n sentinella port-forward ds/sentinella-hub-k8s-agent 9090:9090
+   curl localhost:9090/metrics
+   ```
+
+OpenShift installs use the same agent image and code path. The installer auto-detects OpenShift and applies the right toleration/SCC annotations. With dependency collection disabled, the agent behaves like a normal inventory collector. With dependency collection enabled, readiness blocks until Tetragon is connected. The manifest checksum check is opt-in and off by default. `FULL_DEBUG` is a last resort only.
 
 The `Lease` object will appear once the first pod is up; its `holderIdentity` is the leader node's name.
 
