@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.28.1](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.28.0...v0.28.1) (2026-06-15)
+
+
+### Bug Fixes
+
+* report pod-metrics availability state in snapshot ([#109](https://github.com/thesentinella/hub-kubernetes-agent/issues/109)) ([fa9a574](https://github.com/thesentinella/hub-kubernetes-agent/commit/fa9a5748bba878f8657cc22a184f93fbf4d6a4ac))
+
 ## [0.28.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.27.0...v0.28.0) (2026-06-11)
 
 
