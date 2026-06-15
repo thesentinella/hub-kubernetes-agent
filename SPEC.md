@@ -156,6 +156,7 @@ Path parameter note:
 - `configuration`: `ConfigurationInventory`.
 - `storage`: `StorageInventory`.
 - `events`: array of `EventInfo`.
+- `metrics`: `MetricsStatus`. Always present.
 
 `AgentInfo` fields:
 
@@ -357,6 +358,26 @@ Compatibility note:
 - `language`: optional string.
 - `source`: provenance string. `image` when detected from the container image name. `process` when detected via `TECH_DETECT_PROCESS` from container `command`/`args`.
 
+`MetricsStatus` fields:
+
+- `state`: string. One of `ok`, `missing`, `forbidden`, `unavailable`, `error`.
+- `reason`: optional string. Short, actionable one-liner. Omitted when `state = "ok"`.
+- `source`: string. The metrics API path the agent attempted. `metrics.k8s.io/v1` or `metrics.k8s.io/v1beta1`.
+- `pod_metrics_count`: integer. Number of `PodMetrics` items returned in the most recent attempt. Zero for non-`ok` states.
+- `last_attempt_at_ms`: integer. Unix epoch milliseconds of the most recent probe.
+
+Classification rules (see `src/collector.rs::classify_metrics_error`):
+
+- 200 OK (with or without items) → `ok` (reason omitted).
+- 403 Forbidden → `forbidden` + `ServiceAccount missing metrics.k8s.io RBAC`.
+- 404 Not Found (v1 or v1beta1) → `missing` + `metrics-server not installed`.
+- 503 Service Unavailable → `unavailable` + `metrics-server registered but not ready`.
+- 504 Gateway Timeout → `unavailable` + `metrics-server timeout`.
+- other kube API error → `error` + `kube API error`.
+- non-kube error (reqwest, IO) → `error` + one of `transient: timeout`, `transient: connection refused`, `transient: dns`, `transient: tls`, `transient: io`.
+
+The agent logs the first hit on a state and any state change immediately; the same state is suppressed for 5 minutes and re-emitted as a reminder.
+
 `StorageInventory` fields:
 
 - `storage_classes`: array of `StorageClassInfo`.
@@ -419,6 +440,7 @@ Compatibility note:
 ## Inventory Collection Behavior
 
 - The collector lists nodes, namespaces, deployments, statefulsets, daemonsets, pods, services, ingresses, storage resources, events, snapshot resources, and apiserver version concurrently.
+- Pod-metrics collection tries `metrics.k8s.io/v1` first and falls back to `v1beta1` only on a clean v1 404. The result of the probe (items + classification) is reported in the top-level `metrics` field.
 - Individual Kubernetes list failures are fail-soft: the failed resource list becomes empty and a warning is logged.
 - Event payload is bounded: keep up to 500 events per snapshot; each event message is truncated to 500 chars.
 - Event ordering for snapshots is deterministic: `Warning` first, then newest-first timestamp, then namespace/name tie-breaker.

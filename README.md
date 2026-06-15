@@ -307,6 +307,20 @@ Target API route family is `/api/v1/...` on `https://api.hub.sentinel.la`.
 - `error decoding response body: expected value at line 1 column 1` usually means the poll endpoint returned non-JSON or empty body where JSON was expected.
 - For temporary wire diagnostics, set `AGENT_LOG=debug` and `AGENT_HTTP_DEBUG=true`. Set `AGENT_HTTP_DEBUG_BODIES=true` only when needed; logs include bounded (`200` chars) response body previews and POST request body previews. `FULL_DEBUG=true` is a last resort only and prints full payloads and bodies.
 
+### Troubleshooting missing pod usage
+
+Every snapshot carries a top-level `metrics` field that reports the pod-metrics availability state:
+
+| `metrics.state` | Reason / action |
+|---|---|
+| `ok` | metrics-server is installed and reachable. `usage_cpu` / `usage_memory` are populated. |
+| `missing` | `metrics-server not installed`. Install metrics-server (or a compatible substitute) in the cluster. |
+| `forbidden` | `ServiceAccount missing metrics.k8s.io RBAC`. Grant the agent ServiceAccount `get/list/watch` on `pods` and on the `metrics.k8s.io` API group. |
+| `unavailable` | `metrics-server registered but not ready` (or `metrics-server timeout`). Check the metrics-server pods. |
+| `error` | Transient failure. The agent retries every cycle. Inspect the agent logs for the full kube error. |
+
+The agent tries `metrics.k8s.io/v1` first and falls back to `v1beta1` only on a clean v1 404. The `source` field reports which path succeeded. The agent logs the first hit and state transitions immediately; the same state is suppressed for 5 minutes before being re-emitted as a reminder.
+
 ## Configuration (env vars from ConfigMap/Secret)
 
 Recommended `HUB_URL` is `https://api.hub.sentinel.la`.

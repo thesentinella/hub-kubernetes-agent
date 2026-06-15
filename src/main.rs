@@ -29,6 +29,7 @@ use tracing::{debug, error, info, warn};
 const AGENT_NAME: &str = "Sentinella Hub Kubernetes Agent";
 const WARN_SUPPRESSION_WINDOW: Duration = Duration::from_secs(60);
 const ACTIVE_CLUSTER_WARN_THRESHOLD_SECS: i64 = 300;
+const METRICS_WARN_SUPPRESSION_WINDOW: Duration = Duration::from_secs(300);
 
 static WARN_SUPPRESSION: Lazy<Mutex<HashMap<String, SuppressionState>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
@@ -162,6 +163,7 @@ async fn build_and_send(cfg: &Config, kube: &KubeClient, hub: &HubClient) -> Res
         mut configuration,
         storage,
         events,
+        metrics,
     ) = collector::collect(
         kube,
         cfg.collect_secrets,
@@ -169,6 +171,7 @@ async fn build_and_send(cfg: &Config, kube: &KubeClient, hub: &HubClient) -> Res
         cfg.tech_detect_process,
     )
     .await?;
+    warn_metrics_status_change(&metrics);
     configuration.agent_runtime_env = config::agent_runtime_env(cfg);
     let snap = InventorySnapshot {
         schema_version: 1,
@@ -195,6 +198,7 @@ async fn build_and_send(cfg: &Config, kube: &KubeClient, hub: &HubClient) -> Res
         configuration,
         storage,
         events,
+        metrics,
     };
     hub.send_snapshot(&snap).await
 }
@@ -284,6 +288,61 @@ async fn command_loop(hub: Arc<HubClient>, executor: Arc<Executor>) {
 
 fn should_restart_after_ack(result: &CommandResult) -> bool {
     result.status == "ok" && result.restart_requested.unwrap_or(false)
+}
+
+/// Log the pod-metrics status with state-change re-warn. The first hit on a
+/// state is logged immediately; the same state is suppressed for
+/// `METRICS_WARN_SUPPRESSION_WINDOW` and re-emitted as a reminder; a state
+/// change resets the timer and is logged immediately.
+fn warn_metrics_status_change(status: &crate::model::MetricsStatus) {
+    if status.state == "ok" {
+        return;
+    }
+    let key = "metrics_status";
+    let message = match status.reason.as_deref() {
+        Some(reason) => format!(
+            "pod-metrics unavailable: state={} reason={} source={} pod_metrics_count={}",
+            status.state, reason, status.source, status.pod_metrics_count
+        ),
+        None => format!(
+            "pod-metrics unavailable: state={} source={} pod_metrics_count={}",
+            status.state, status.source, status.pod_metrics_count
+        ),
+    };
+
+    let now = Instant::now();
+    let mut map = WARN_SUPPRESSION
+        .lock()
+        .expect("warn suppression mutex poisoned");
+
+    match map.get_mut(key) {
+        None => {
+            warn!("{}", message);
+            map.insert(
+                key.to_string(),
+                SuppressionState {
+                    last_emitted_at: now,
+                    suppressed_count: 0,
+                },
+            );
+        }
+        Some(state) => {
+            if now.duration_since(state.last_emitted_at) >= METRICS_WARN_SUPPRESSION_WINDOW {
+                if state.suppressed_count > 0 {
+                    warn!(
+                        suppressed_count = state.suppressed_count,
+                        window_secs = METRICS_WARN_SUPPRESSION_WINDOW.as_secs(),
+                        "pod-metrics still unavailable"
+                    );
+                }
+                warn!("{}", message);
+                state.last_emitted_at = now;
+                state.suppressed_count = 0;
+            } else {
+                state.suppressed_count += 1;
+            }
+        }
+    }
 }
 
 fn warn_with_suppression(key: &str, message: &str) {
