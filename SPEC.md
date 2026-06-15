@@ -355,7 +355,30 @@ Compatibility note:
 - `product`: optional string.
 - `version`: optional string.
 - `language`: optional string.
-- `source`: provenance string. `image` when detected from the container image name. `process` when detected via `TECH_DETECT_PROCESS` from container `command`/`args`.
+- `source`: provenance string. One of `image` (detected from the container image name), `process` (detected via `TECH_DETECT_PROCESS` from container `command`/`args`), `labels` (detected from pod or workload labels/annotations), or `config` (reserved for future Hub-pushed overrides).
+- `subtype`: optional string. Used to tag the application stack when the runtime product is generic. Example: `product=nginx, subtype=angular` for an Angular app served by nginx. Null when not applicable.
+
+`Plugins` fields:
+
+- `workload_monitoring`: optional `WorkloadMonitoringPlugin`.
+
+`WorkloadMonitoringPlugin` fields:
+
+- `enabled`: boolean; always `true` when the block is present.
+- `namespaces`: array of strings; the allowlist configured on the agent.
+- `technology_targets`: array of strings; the detection targets configured on the agent.
+- `schema_version`: integer, currently `1`.
+- `generated_at_ms`: Unix epoch milliseconds.
+- `signals`: `WorkloadMonitoringSignals`.
+
+`WorkloadMonitoringSignals` fields:
+
+- `workloads`: array of `WorkloadRef` (deployments, statefulsets, daemonsets merged) filtered to the allowlist.
+- `pods`: array of `PodInfo` filtered to the allowlist.
+- `services`: array of `ServiceInfo` filtered to the allowlist.
+- `ingresses`: array of `IngressInfo` filtered to the allowlist.
+- `events`: array of `EventInfo` filtered to the allowlist.
+- `dependencies`: optional `DependencyInventory`. Present only when `COLLECT_DEPENDENCIES_TETRAGON=true`; edges are filtered to those touching the allowlist on at least one side.
 
 `StorageInventory` fields:
 

@@ -28,6 +28,7 @@ pub fn detect(image: &str) -> Technology {
             version: tag.map(normalize_version),
             language: None,
             source: "image",
+            subtype: None,
         };
     }
 
@@ -47,6 +48,7 @@ pub fn detect(image: &str) -> Technology {
                     Some(rule.language.to_string())
                 },
                 source: "image",
+                subtype: None,
             };
         }
     }
@@ -58,7 +60,84 @@ pub fn detect(image: &str) -> Technology {
         version: tag.map(normalize_version),
         language: None,
         source: "image",
+        subtype: None,
     }
+}
+
+/// Detect Angular, Spring Boot, and Oracle from image path patterns that do
+/// not match the simple name/prefix rule table. Returns `Some(Technology)`
+/// when the image repo path itself encodes the application stack.
+pub fn detect_application_stack_from_image(image: &str) -> Option<Technology> {
+    let lower_full = image.to_lowercase();
+    let (repo_no_tag, _tag) = split_tag(image);
+    let repo_lower = strip_registry(repo_no_tag).to_lowercase();
+    let name = repo_lower.rsplit('/').next().unwrap_or(repo_lower.as_str());
+
+    // Oracle Database on container-registry.oracle.com. Check the original
+    // image string so the registry host is preserved (strip_registry removes
+    // the leading host segment).
+    if lower_full.starts_with("container-registry.oracle.com/database/") {
+        return Some(Technology {
+            vendor: Some("oracle".to_string()),
+            product: Some("oracle-database".to_string()),
+            version: None,
+            language: None,
+            source: "image",
+            subtype: Some("oracle_database".to_string()),
+        });
+    }
+
+    // gvenzl/oracle-xe / oracle-free (registry stripped)
+    if repo_lower.starts_with("gvenzl/oracle-") {
+        return Some(Technology {
+            vendor: Some("gvenzl".to_string()),
+            product: Some("oracle-database".to_string()),
+            version: None,
+            language: None,
+            source: "image",
+            subtype: Some("oracle_database".to_string()),
+        });
+    }
+
+    // Oracle (image name "oracle/database")
+    if repo_lower == "oracle/database" || repo_lower.ends_with("/oracle/database") {
+        return Some(Technology {
+            vendor: Some("oracle".to_string()),
+            product: Some("oracle-database".to_string()),
+            version: None,
+            language: None,
+            source: "image",
+            subtype: Some("oracle_database".to_string()),
+        });
+    }
+
+    // Spring Boot fat-jar image convention
+    if repo_lower.contains("springboot") || repo_lower.contains("spring-boot") {
+        return Some(Technology {
+            vendor: None,
+            product: Some("spring-boot".to_string()),
+            version: None,
+            language: Some("Java".to_string()),
+            source: "image",
+            subtype: Some("spring_boot".to_string()),
+        });
+    }
+
+    // Angular runtime images: anything starting with `angular-` or `*-ng-`
+    // in the image name. Tag the workload as Angular; the runtime product
+    // (typically nginx) is detected separately by the normal image rules.
+    if name.starts_with("angular-") || name.contains("-ng-") || name.starts_with("ng-") {
+        return Some(Technology {
+            vendor: None,
+            product: Some("angular".to_string()),
+            version: None,
+            language: None,
+            source: "image",
+            subtype: Some("angular".to_string()),
+        });
+    }
+
+    None
 }
 
 fn strip_registry(image: &str) -> &str {
@@ -665,7 +744,70 @@ const PROCESS_RULES: &[ProcessRule] = &[
         product: "rabbitmq",
         language: "Erlang",
     },
+    // Spring Boot: java -jar *spring*.jar or -Dspring.profiles.active=... is
+    // detected via the existing "java" rule. We tag it as spring_boot via
+    // the `subtype` field by inspecting the arg list in detect_from_process.
+    ProcessRule {
+        executable: "oracle",
+        vendor: "oracle",
+        product: "oracle-database",
+        language: "C",
+    },
+    ProcessRule {
+        executable: "dbca",
+        vendor: "oracle",
+        product: "oracle-database",
+        language: "C",
+    },
+    ProcessRule {
+        executable: "sqlplus",
+        vendor: "oracle",
+        product: "oracle-database",
+        language: "C",
+    },
 ];
+
+// Spring Boot jar-name marker. Lowercase substring match against any arg.
+const SPRING_BOOT_JAR_MARKERS: &[&str] = &["spring", "springboot"];
+const SPRING_BOOT_FLAG_MARKERS: &[&str] = &["-dspring.profiles.active", "spring.profiles.active"];
+
+/// Inspect the resolved `Technology` and refine it with a Spring Boot subtype
+/// when the process is `java`/`java -jar` and the args reference a Spring
+/// artifact or a `-Dspring.*` flag. Pure function, no side effects.
+pub fn refine_spring_boot(tech: Technology, command: &[String], args: &[String]) -> Technology {
+    let is_java = tech
+        .product
+        .as_deref()
+        .map(|p| p == "java")
+        .unwrap_or(false)
+        || command.iter().any(|entry| {
+            entry
+                .rsplit('/')
+                .next()
+                .map(|n| n == "java")
+                .unwrap_or(false)
+        });
+    if !is_java {
+        return tech;
+    }
+    let haystack: Vec<&str> = command
+        .iter()
+        .chain(args.iter())
+        .map(|s| s.as_str())
+        .collect();
+    let has_marker = haystack.iter().any(|arg| {
+        let lower = arg.to_lowercase();
+        SPRING_BOOT_JAR_MARKERS.iter().any(|m| lower.contains(m))
+            || SPRING_BOOT_FLAG_MARKERS.iter().any(|m| lower.contains(m))
+    });
+    if has_marker {
+        let mut refined = tech;
+        refined.subtype = Some("spring_boot".to_string());
+        refined
+    } else {
+        tech
+    }
+}
 
 pub fn detect_from_process(command: &[String], args: &[String]) -> Option<Technology> {
     let executables: Vec<&str> = command
@@ -692,6 +834,7 @@ pub fn detect_from_process(command: &[String], args: &[String]) -> Option<Techno
                         Some(rule.language.to_string())
                     },
                     source: "process",
+                    subtype: None,
                 });
             }
         }
@@ -745,6 +888,83 @@ fn is_version_like(value: &str) -> bool {
     v.chars()
         .all(|ch| ch.is_ascii_alphanumeric() || ch == '.' || ch == '-' || ch == '_')
         && v.starts_with(|ch: char| ch.is_ascii_digit())
+}
+
+/// Detect the application stack from Kubernetes pod or workload labels and
+/// annotations. Returns `Some(Technology)` when one of the known markers is
+/// present, with `source = "labels"`. Subtype follows the same convention as
+/// image-based detection: `angular`, `spring_boot`, `oracle_database`.
+///
+/// Recognized markers:
+/// - `app.kubernetes.io/component` in `{angular, spring-boot, oracle}`
+/// - annotation `angular.io/version`
+/// - annotation `app.spring.io/version`
+#[allow(dead_code)]
+pub fn detect_from_labels(
+    labels: &[(&str, &str)],
+    annotations: &[(&str, &str)],
+) -> Option<Technology> {
+    for (key, value) in labels {
+        if *key != "app.kubernetes.io/component" {
+            continue;
+        }
+        let v = value.to_lowercase();
+        if v == "angular" {
+            return Some(Technology {
+                vendor: None,
+                product: Some("angular".to_string()),
+                version: None,
+                language: None,
+                source: "labels",
+                subtype: Some("angular".to_string()),
+            });
+        }
+        if v == "spring-boot" || v == "spring_boot" || v == "springboot" {
+            return Some(Technology {
+                vendor: None,
+                product: Some("spring-boot".to_string()),
+                version: None,
+                language: Some("Java".to_string()),
+                source: "labels",
+                subtype: Some("spring_boot".to_string()),
+            });
+        }
+        if v == "oracle" || v == "oracle-database" || v == "oracle_database" {
+            return Some(Technology {
+                vendor: Some("oracle".to_string()),
+                product: Some("oracle-database".to_string()),
+                version: None,
+                language: None,
+                source: "labels",
+                subtype: Some("oracle_database".to_string()),
+            });
+        }
+    }
+
+    for (key, value) in annotations {
+        if *key == "angular.io/version" {
+            return Some(Technology {
+                vendor: None,
+                product: Some("angular".to_string()),
+                version: Some(value.trim().to_string()),
+                language: None,
+                source: "labels",
+                subtype: Some("angular".to_string()),
+            });
+        }
+        if *key == "app.spring.io/version" {
+            return Some(Technology {
+                vendor: None,
+                product: Some("spring-boot".to_string()),
+                version: Some(value.trim().to_string()),
+                language: Some("Java".to_string()),
+                source: "labels",
+                subtype: Some("spring_boot".to_string()),
+            });
+        }
+    }
+
+    None
 }
 
 #[cfg(test)]
@@ -953,6 +1173,148 @@ mod tests {
     #[test]
     fn detect_from_process_returns_none_for_unknown_executable() {
         let t = detect_from_process(&["/usr/local/bin/my-custom-app".to_string()], &[]);
+        assert!(t.is_none());
+    }
+
+    // ---- Application-stack image detection ----
+
+    #[test]
+    fn detects_oracle_from_container_registry_path() {
+        let t = detect_application_stack_from_image(
+            "container-registry.oracle.com/database/enterprise:21.3.0.0",
+        )
+        .unwrap();
+        assert_eq!(t.product.as_deref(), Some("oracle-database"));
+        assert_eq!(t.subtype.as_deref(), Some("oracle_database"));
+        assert_eq!(t.source, "image");
+    }
+
+    #[test]
+    fn detects_oracle_from_gvenzl_image() {
+        let t = detect_application_stack_from_image("gvenzl/oracle-xe:21-slim").unwrap();
+        assert_eq!(t.subtype.as_deref(), Some("oracle_database"));
+    }
+
+    #[test]
+    fn detects_spring_boot_image() {
+        let t =
+            detect_application_stack_from_image("myregistry/customer-springboot:1.0.0").unwrap();
+        assert_eq!(t.subtype.as_deref(), Some("spring_boot"));
+        assert_eq!(t.language.as_deref(), Some("Java"));
+    }
+
+    #[test]
+    fn detects_angular_image() {
+        let t = detect_application_stack_from_image("myregistry/angular-dashboard:1.2.3").unwrap();
+        assert_eq!(t.subtype.as_deref(), Some("angular"));
+    }
+
+    #[test]
+    fn detects_angular_via_dash_ng_marker() {
+        let t = detect_application_stack_from_image("acme/portal-ng-prod:2.0").unwrap();
+        assert_eq!(t.subtype.as_deref(), Some("angular"));
+    }
+
+    #[test]
+    fn application_stack_returns_none_for_unrelated_image() {
+        let t = detect_application_stack_from_image("nginx:1.25");
+        assert!(t.is_none());
+    }
+
+    // ---- Spring Boot process refinement ----
+
+    #[test]
+    fn refine_spring_boot_tags_subtype_on_spring_jar() {
+        let base = detect_from_process(
+            &["java".to_string()],
+            &[
+                "-jar".to_string(),
+                "customer-portal-spring-1.0.jar".to_string(),
+            ],
+        )
+        .unwrap();
+        let refined = refine_spring_boot(
+            base.clone(),
+            &["java".to_string()],
+            &[
+                "-jar".to_string(),
+                "customer-portal-spring-1.0.jar".to_string(),
+            ],
+        );
+        assert_eq!(refined.subtype.as_deref(), Some("spring_boot"));
+        assert_eq!(refined.product.as_deref(), base.product.as_deref());
+    }
+
+    #[test]
+    fn refine_spring_boot_tags_subtype_on_spring_profile_flag() {
+        let base = detect_from_process(
+            &["java".to_string()],
+            &["-Dspring.profiles.active=prod".to_string()],
+        )
+        .unwrap();
+        let refined = refine_spring_boot(
+            base,
+            &["java".to_string()],
+            &["-Dspring.profiles.active=prod".to_string()],
+        );
+        assert_eq!(refined.subtype.as_deref(), Some("spring_boot"));
+    }
+
+    #[test]
+    fn refine_spring_boot_is_noop_for_non_java_process() {
+        let base = detect_from_process(&["node".to_string()], &["server.js".to_string()]).unwrap();
+        let refined = refine_spring_boot(
+            base.clone(),
+            &["node".to_string()],
+            &["server.js".to_string()],
+        );
+        assert!(refined.subtype.is_none());
+    }
+
+    // ---- Labels-based detection ----
+
+    #[test]
+    fn detect_from_labels_angular_component() {
+        let labels = [("app.kubernetes.io/component", "angular")];
+        let t = detect_from_labels(&labels, &[]).unwrap();
+        assert_eq!(t.subtype.as_deref(), Some("angular"));
+        assert_eq!(t.source, "labels");
+    }
+
+    #[test]
+    fn detect_from_labels_spring_boot_component() {
+        let labels = [("app.kubernetes.io/component", "spring-boot")];
+        let t = detect_from_labels(&labels, &[]).unwrap();
+        assert_eq!(t.subtype.as_deref(), Some("spring_boot"));
+    }
+
+    #[test]
+    fn detect_from_labels_oracle_component() {
+        let labels = [("app.kubernetes.io/component", "oracle")];
+        let t = detect_from_labels(&labels, &[]).unwrap();
+        assert_eq!(t.subtype.as_deref(), Some("oracle_database"));
+    }
+
+    #[test]
+    fn detect_from_labels_angular_via_annotation() {
+        let annotations = [("angular.io/version", "17.0.0")];
+        let t = detect_from_labels(&[], &annotations).unwrap();
+        assert_eq!(t.subtype.as_deref(), Some("angular"));
+        assert_eq!(t.version.as_deref(), Some("17.0.0"));
+    }
+
+    #[test]
+    fn detect_from_labels_spring_via_annotation() {
+        let annotations = [("app.spring.io/version", "3.2.0")];
+        let t = detect_from_labels(&[], &annotations).unwrap();
+        assert_eq!(t.subtype.as_deref(), Some("spring_boot"));
+        assert_eq!(t.version.as_deref(), Some("3.2.0"));
+    }
+
+    #[test]
+    fn detect_from_labels_returns_none_when_no_markers() {
+        let labels = [("unrelated", "value")];
+        let t = detect_from_labels(&labels, &[]);
         assert!(t.is_none());
     }
 }
