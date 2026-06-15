@@ -418,6 +418,7 @@ src/
   tech.rs        # image-based technology detection + tests
   health.rs      # /livez /readyz /metrics
 agent.yaml      # ServiceAccount, RBAC (ClusterRole + Role), ConfigMap, DaemonSet
+docs/adr/       # architecture decision records (e.g. workload monitoring plugin)
 ```
 
 ## Contributing

@@ -156,6 +156,7 @@ Path parameter note:
 - `configuration`: `ConfigurationInventory`.
 - `storage`: `StorageInventory`.
 - `events`: array of `EventInfo`.
+- `plugins`: optional `Plugins`. Omitted from the JSON when no plugin is enabled. See `docs/adr/0001-workload-monitoring-plugin.md` for the plugin contract.
 
 `AgentInfo` fields:
 
