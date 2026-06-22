@@ -25,6 +25,11 @@ pub struct InventorySnapshot {
     /// clear, actionable signal alongside (possibly null) pod usage values.
     /// See `src/collector.rs::probe_pod_metrics` for classification.
     pub metrics: MetricsStatus,
+    /// CSI snapshot API availability state. Always present so the Hub can
+    /// render a clear, actionable signal when the snapshot CRDs are absent
+    /// or the API is unhealthy. See `src/collector.rs::probe_snapshot_api`
+    /// for classification.
+    pub snapshot_api: SnapshotApiStatus,
 }
 
 /// Pod-metrics availability state, surfaced in every snapshot so the Hub can
@@ -50,6 +55,21 @@ pub struct MetricsStatus {
     pub reason: Option<String>,
     pub source: &'static str,
     pub pod_metrics_count: usize,
+    pub last_attempt_at_ms: u128,
+}
+
+/// CSI snapshot API availability state, surfaced in every snapshot so the Hub
+/// can distinguish "CSI snapshot CRDs are not installed" from "ServiceAccount
+/// lacks `snapshot.storage.k8s.io` RBAC" from a transient failure. The
+/// `state` and `reason` semantics mirror [`MetricsStatus`].
+#[derive(Serialize, Debug)]
+pub struct SnapshotApiStatus {
+    pub state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub source: &'static str,
+    pub volumesnapshotclasses_count: usize,
+    pub volumesnapshots_count: usize,
     pub last_attempt_at_ms: u128,
 }
 
@@ -787,5 +807,44 @@ mod tests {
             !v.as_object().unwrap().contains_key("reason"),
             "reason must be omitted on ok"
         );
+    }
+
+    #[test]
+    fn snapshot_api_status_serializes_with_state_and_reason() {
+        let s = SnapshotApiStatus {
+            state: "missing",
+            reason: Some("CSI snapshot CRDs not installed".to_string()),
+            source: "snapshot.storage.k8s.io/v1",
+            volumesnapshotclasses_count: 0,
+            volumesnapshots_count: 0,
+            last_attempt_at_ms: 1748523600000,
+        };
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(v["state"], "missing");
+        assert_eq!(v["reason"], "CSI snapshot CRDs not installed");
+        assert_eq!(v["source"], "snapshot.storage.k8s.io/v1");
+        assert_eq!(v["volumesnapshotclasses_count"], 0);
+        assert_eq!(v["volumesnapshots_count"], 0);
+        assert_eq!(v["last_attempt_at_ms"].as_u64().unwrap(), 1748523600000);
+    }
+
+    #[test]
+    fn snapshot_api_status_omits_reason_when_state_is_ok() {
+        let s = SnapshotApiStatus {
+            state: "ok",
+            reason: None,
+            source: "snapshot.storage.k8s.io/v1",
+            volumesnapshotclasses_count: 3,
+            volumesnapshots_count: 5,
+            last_attempt_at_ms: 1748523600000,
+        };
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(v["state"], "ok");
+        assert!(
+            !v.as_object().unwrap().contains_key("reason"),
+            "reason must be omitted on ok"
+        );
+        assert_eq!(v["volumesnapshotclasses_count"], 3);
+        assert_eq!(v["volumesnapshots_count"], 5);
     }
 }

@@ -307,9 +307,11 @@ Target API route family is `/api/v1/...` on `https://api.hub.sentinel.la`.
 - `error decoding response body: expected value at line 1 column 1` usually means the poll endpoint returned non-JSON or empty body where JSON was expected.
 - For temporary wire diagnostics, set `AGENT_LOG=debug` and `AGENT_HTTP_DEBUG=true`. Set `AGENT_HTTP_DEBUG_BODIES=true` only when needed; logs include bounded (`200` chars) response body previews and POST request body previews. `FULL_DEBUG=true` is a last resort only and prints full payloads and bodies.
 
-### Troubleshooting missing pod usage
+### Troubleshooting runtime capabilities
 
-Every snapshot carries a top-level `metrics` field that reports the pod-metrics availability state:
+Every snapshot carries two top-level fields that report the availability state of optional Kubernetes APIs the agent depends on. The same `state ∈ {ok, missing, forbidden, unavailable, error}` enum is used in both.
+
+#### `metrics` — pod-metrics API (`metrics.k8s.io`)
 
 | `metrics.state` | Reason / action |
 |---|---|
@@ -319,7 +321,21 @@ Every snapshot carries a top-level `metrics` field that reports the pod-metrics 
 | `unavailable` | `metrics-server registered but not ready` (or `metrics-server timeout`). Check the metrics-server pods. |
 | `error` | Transient failure. The agent retries every cycle. Inspect the agent logs for the full kube error. |
 
-The agent tries `metrics.k8s.io/v1` first and falls back to `v1beta1` only on a clean v1 404. The `source` field reports which path succeeded. The agent logs the first hit and state transitions immediately; the same state is suppressed for 5 minutes before being re-emitted as a reminder.
+The agent tries `metrics.k8s.io/v1` first and falls back to `v1beta1` only on a clean v1 404. The `source` field reports which path succeeded.
+
+#### `snapshot_api` — CSI snapshot API (`snapshot.storage.k8s.io`)
+
+| `snapshot_api.state` | Reason / action |
+|---|---|
+| `ok` | CSI snapshot CRDs are installed. `volumesnapshotclasses_count` / `volumesnapshots_count` are populated. |
+| `missing` | `CSI snapshot CRDs not installed`. This is normal on clusters that don't use volume snapshots; the agent logs once and stays quiet. |
+| `forbidden` | `ServiceAccount missing snapshot.storage.k8s.io RBAC`. Grant the agent ServiceAccount `get/list/watch` on `volumesnapshotclasses` and `volumesnapshots`. |
+| `unavailable` | `CSI snapshot API registered but not ready` (or `CSI snapshot API timeout`). Check the snapshot-controller pods. |
+| `error` | Transient failure. The agent retries every cycle. Inspect the agent logs for the full kube error. |
+
+The agent probes `VolumeSnapshotClass` as the canonical signal. If that returns 404, the `VolumeSnapshot` probe is skipped (the API group is absent); the `volumesnapshots_count` is 0 in that case.
+
+For both fields, the agent logs the first hit and state transitions immediately; the same state is suppressed for 5 minutes before being re-emitted as a reminder.
 
 ## Configuration (env vars from ConfigMap/Secret)
 
