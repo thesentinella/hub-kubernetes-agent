@@ -9,6 +9,32 @@ env:
   RUSTFLAGS: "-D warnings"
 
 jobs:
+  changes:
+    name: Detect build-relevant changes
+    runs-on: ubuntu-latest
+
+    outputs:
+      docker: ${{ steps.filter.outputs.docker }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect build-relevant changes
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            docker:
+              - 'Dockerfile'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'build.rs'
+              - 'src/**'
+              - 'proto/**'
+              - '.github/workflows/**'
+
   check:
     name: Lint & Test
     runs-on: ubuntu-latest
@@ -50,19 +76,23 @@ jobs:
         run: cargo build --release
 
   docker-amd64:
-    name: Docker build (linux/amd64)
+    name: Docker build
     runs-on: ubuntu-latest
+    needs: [changes]
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Set up QEMU
+        if: needs.changes.outputs.docker == 'true'
         uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
+        if: needs.changes.outputs.docker == 'true'
         uses: docker/setup-buildx-action@v3
 
       - name: Build image (no push, native arch)
+        if: needs.changes.outputs.docker == 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -70,17 +100,9 @@ jobs:
 
   docker-arm64:
     name: Verify aarch64 build
-    # Path filter: only run when the PR touches build-affecting files.
-    # Docs-only / config-only PRs skip this job.
-    if: |
-      contains(github.event.pull_request.changed_files.*.filename, 'Cargo.toml') ||
-      contains(github.event.pull_request.changed_files.*.filename, 'Cargo.lock') ||
-      contains(github.event.pull_request.changed_files.*.filename, 'build.rs') ||
-      contains(github.event.pull_request.changed_files.*.filename, 'Dockerfile') ||
-      contains(github.event.pull_request.changed_files.*.path, 'src/') ||
-      contains(github.event.pull_request.changed_files.*.path, 'proto/') ||
-      contains(github.event.pull_request.changed_files.*.path, '.github/workflows/')
     runs-on: ubuntu-24.04-arm
+    needs: [changes]
+    if: needs.changes.outputs.docker == 'true'
 
     steps:
       - uses: actions/checkout@v4
@@ -98,7 +120,7 @@ jobs:
   notify-failure:
     name: Notify CI failure
     runs-on: ubuntu-latest
-    needs: [check, docker-amd64, docker-arm64]
+    needs: [changes, check, docker-amd64, docker-arm64]
     if: failure()
 
     steps:
