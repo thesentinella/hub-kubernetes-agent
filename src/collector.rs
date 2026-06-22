@@ -2,8 +2,8 @@
 
 use crate::config;
 use crate::health;
-use crate::model::MetricsStatus;
 use crate::model::*;
+use crate::model::{MetricsStatus, SnapshotApiStatus};
 use crate::tech;
 use crate::tetragon;
 use anyhow::Result;
@@ -55,6 +55,7 @@ pub async fn collect(
     StorageInventory,
     Vec<EventInfo>,
     MetricsStatus,
+    SnapshotApiStatus,
 )> {
     // Concurrency: launch all list calls in parallel; fail soft on individual lists.
     let lp = ListParams::default();
@@ -81,14 +82,7 @@ pub async fn collect(
     let storage_classes_fut = list_all::<StorageClass>(client, &lp);
     let pvs_fut = list_all::<PersistentVolume>(client, &lp);
     let pvcs_fut = list_all::<PersistentVolumeClaim>(client, &lp);
-    let volume_snapshot_classes_fut = list_dynamic_all(
-        client,
-        "snapshot.storage.k8s.io",
-        "v1",
-        "VolumeSnapshotClass",
-    );
-    let volume_snapshots_fut =
-        list_dynamic_all(client, "snapshot.storage.k8s.io", "v1", "VolumeSnapshot");
+    let snapshot_api_probe = probe_snapshot_api(client);
     let pod_metrics_probe = probe_pod_metrics(client);
     let vpa_fut = list_dynamic_all(client, "autoscaling.k8s.io", "v1", "VerticalPodAutoscaler");
     let cronjobs_fut = list_all::<CronJob>(client, &lp);
@@ -111,14 +105,13 @@ pub async fn collect(
         storage_classes,
         pvs,
         pvcs,
-        volume_snapshot_classes,
-        volume_snapshots,
         vpa,
         cronjobs,
         events,
         version,
         k8s_uid,
         (pod_metrics, metrics_status),
+        (volume_snapshot_classes, volume_snapshots, snapshot_api_status),
     ) = tokio::join!(
         nodes_fut,
         ns_fut,
@@ -135,14 +128,13 @@ pub async fn collect(
         storage_classes_fut,
         pvs_fut,
         pvcs_fut,
-        volume_snapshot_classes_fut,
-        volume_snapshots_fut,
         vpa_fut,
         cronjobs_fut,
         events_fut,
         version_fut,
         k8s_uid_fut,
-        pod_metrics_probe
+        pod_metrics_probe,
+        snapshot_api_probe
     );
 
     let nodes = soft_unwrap("nodes", nodes);
@@ -160,8 +152,6 @@ pub async fn collect(
     let storage_classes = soft_unwrap("storageclasses", storage_classes);
     let pvs = soft_unwrap("persistentvolumes", pvs);
     let pvcs = soft_unwrap("persistentvolumeclaims", pvcs);
-    let volume_snapshot_classes = soft_unwrap("volumesnapshotclasses", volume_snapshot_classes);
-    let volume_snapshots = soft_unwrap("volumesnapshots", volume_snapshots);
     let vpa = soft_unwrap("vpa", vpa);
     let mut cronjobs = soft_unwrap("cronjobs", cronjobs);
     let mut events = soft_unwrap("events", events);
@@ -257,6 +247,7 @@ pub async fn collect(
         storage,
         event_infos,
         metrics_status,
+        snapshot_api_status,
     ))
 }
 
@@ -941,6 +932,124 @@ fn now_ms() -> u128 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0)
+}
+
+/// Probe the CSI snapshot API for `VolumeSnapshotClass` (canonical signal)
+/// and, on success, `VolumeSnapshot`. On 404 from the canonical probe we
+/// skip the second probe entirely; the API group is absent. Returns
+/// `(classes, snapshots, status)`. On any failure, `classes` and `snapshots`
+/// are empty so the snapshot storage section is naturally empty.
+async fn probe_snapshot_api(
+    client: &Client,
+) -> (Vec<DynamicObject>, Vec<DynamicObject>, SnapshotApiStatus) {
+    const SOURCE: &str = "snapshot.storage.k8s.io/v1";
+
+    let classes_result = list_dynamic_all(
+        client,
+        "snapshot.storage.k8s.io",
+        "v1",
+        "VolumeSnapshotClass",
+    )
+    .await;
+    let classes = match classes_result {
+        Ok(items) => items,
+        Err(err) => {
+            if let Some(kube_err) = err.downcast_ref::<KubeError>() {
+                if is_not_found(kube_err) {
+                    // API group absent. Skip the second probe; the group is
+                    // not registered, so the second list would just 404
+                    // again and add another warn to the log.
+                    return (
+                        Vec::new(),
+                        Vec::new(),
+                        status_snapshot_from(
+                            "missing",
+                            "CSI snapshot CRDs not installed",
+                            SOURCE,
+                            0,
+                            0,
+                            now_ms(),
+                        ),
+                    );
+                }
+                let (state, reason) = classify_snapshot_api_error(kube_err);
+                warn!(
+                    error = %err,
+                    state,
+                    reason,
+                    "volume snapshot classes list failed"
+                );
+                return (
+                    Vec::new(),
+                    Vec::new(),
+                    status_snapshot_from(state, reason, SOURCE, 0, 0, now_ms()),
+                );
+            }
+            // anyhow error that didn't come from kube directly.
+            warn!(
+                "volume snapshot classes list failed (non-kube error): {:#}",
+                err
+            );
+            return (
+                Vec::new(),
+                Vec::new(),
+                status_snapshot_from("error", "transient: io", SOURCE, 0, 0, now_ms()),
+            );
+        }
+    };
+
+    let classes_count = classes.len();
+    let snapshots_result =
+        list_dynamic_all(client, "snapshot.storage.k8s.io", "v1", "VolumeSnapshot").await;
+    let snapshots = soft_unwrap("volumesnapshots", snapshots_result);
+    let snapshots_count = snapshots.len();
+
+    (
+        classes,
+        snapshots,
+        status_snapshot_from("ok", "", SOURCE, classes_count, snapshots_count, now_ms()),
+    )
+}
+
+fn status_snapshot_from(
+    state: &'static str,
+    reason: &'static str,
+    source: &'static str,
+    volumesnapshotclasses_count: usize,
+    volumesnapshots_count: usize,
+    last_attempt_at_ms: u128,
+) -> SnapshotApiStatus {
+    let reason = if reason.is_empty() {
+        None
+    } else {
+        Some(reason.to_string())
+    };
+    SnapshotApiStatus {
+        state,
+        reason,
+        source,
+        volumesnapshotclasses_count,
+        volumesnapshots_count,
+        last_attempt_at_ms,
+    }
+}
+
+/// Classify a kube error from a snapshot API call into a `(state, reason)`
+/// pair. State and reason semantics mirror `classify_metrics_error`.
+fn classify_snapshot_api_error(err: &KubeError) -> (&'static str, &'static str) {
+    match err {
+        KubeError::Api(status) => match status.code {
+            403 => (
+                "forbidden",
+                "ServiceAccount missing snapshot.storage.k8s.io RBAC",
+            ),
+            404 => ("missing", "CSI snapshot CRDs not installed"),
+            503 => ("unavailable", "CSI snapshot API registered but not ready"),
+            504 => ("unavailable", "CSI snapshot API timeout"),
+            _ => ("error", "kube API error"),
+        },
+        _ => classify_transient_error(err),
+    }
 }
 
 fn soft_unwrap<T>(what: &str, r: Result<Vec<T>>) -> Vec<T> {
@@ -2840,5 +2949,81 @@ mod tests {
         );
         assert_eq!(s.state, "missing");
         assert_eq!(s.reason.as_deref(), Some("metrics-server not installed"));
+    }
+
+    // ---- CSI snapshot API classification (SEN-330) ----
+
+    #[test]
+    fn classify_snapshot_api_error_forbidden() {
+        let err = kube_api_error(403);
+        let (state, reason) = classify_snapshot_api_error(&err);
+        assert_eq!(state, "forbidden");
+        assert_eq!(
+            reason,
+            "ServiceAccount missing snapshot.storage.k8s.io RBAC"
+        );
+    }
+
+    #[test]
+    fn classify_snapshot_api_error_not_found() {
+        let err = kube_api_error(404);
+        let (state, reason) = classify_snapshot_api_error(&err);
+        assert_eq!(state, "missing");
+        assert_eq!(reason, "CSI snapshot CRDs not installed");
+    }
+
+    #[test]
+    fn classify_snapshot_api_error_unavailable_503() {
+        let err = kube_api_error(503);
+        let (state, reason) = classify_snapshot_api_error(&err);
+        assert_eq!(state, "unavailable");
+        assert_eq!(reason, "CSI snapshot API registered but not ready");
+    }
+
+    #[test]
+    fn classify_snapshot_api_error_unavailable_504() {
+        let err = kube_api_error(504);
+        let (state, reason) = classify_snapshot_api_error(&err);
+        assert_eq!(state, "unavailable");
+        assert_eq!(reason, "CSI snapshot API timeout");
+    }
+
+    #[test]
+    fn classify_snapshot_api_error_other_api_code() {
+        let err = kube_api_error(500);
+        let (state, reason) = classify_snapshot_api_error(&err);
+        assert_eq!(state, "error");
+        assert_eq!(reason, "kube API error");
+    }
+
+    #[test]
+    fn status_snapshot_from_omits_reason_when_empty() {
+        let s = status_snapshot_from("ok", "", "snapshot.storage.k8s.io/v1", 0, 0, 0);
+        assert_eq!(s.state, "ok");
+        assert!(s.reason.is_none());
+    }
+
+    #[test]
+    fn status_snapshot_from_keeps_reason_when_present() {
+        let s = status_snapshot_from(
+            "missing",
+            "CSI snapshot CRDs not installed",
+            "snapshot.storage.k8s.io/v1",
+            0,
+            0,
+            0,
+        );
+        assert_eq!(s.state, "missing");
+        assert_eq!(s.reason.as_deref(), Some("CSI snapshot CRDs not installed"));
+        assert_eq!(s.volumesnapshotclasses_count, 0);
+        assert_eq!(s.volumesnapshots_count, 0);
+    }
+
+    #[test]
+    fn status_snapshot_from_preserves_counts() {
+        let s = status_snapshot_from("ok", "", "snapshot.storage.k8s.io/v1", 7, 12, 1748523600000);
+        assert_eq!(s.volumesnapshotclasses_count, 7);
+        assert_eq!(s.volumesnapshots_count, 12);
+        assert_eq!(s.last_attempt_at_ms, 1748523600000);
     }
 }
