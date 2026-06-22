@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.29.1](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.29.0...v0.29.1) (2026-06-22)
+
+
+### Bug Fixes
+
+* add tetragon readiness flag ([#117](https://github.com/thesentinella/hub-kubernetes-agent/issues/117)) ([1f3b5ed](https://github.com/thesentinella/hub-kubernetes-agent/commit/1f3b5ed1619aaa00709d6704cf9cbd3588d47f20))
+
 ## [0.29.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.28.2...v0.29.0) (2026-06-22)
 
 
