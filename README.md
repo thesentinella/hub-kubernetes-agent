@@ -77,6 +77,7 @@ Dependency collection is opt-in and disabled by default (`COLLECT_DEPENDENCIES_T
 - Source: Tetragon gRPC exposed on an internal Kubernetes service. When dependency collection is enabled, the default address is `tetragon-grpc.tetragon.svc.cluster.local:54321` via `TETRAGON_GRPC_ADDRESS`.
 - Output: metadata-only dependency edges (no packet payload capture, no process args/env collection).
 - Behavior: bounded, deterministic ordering, and fail-soft when the source is unavailable.
+- Readiness: by default the pod stays not-ready until Tetragon connects; set `TETRAGON_REQUIRED_FOR_READINESS=false` to relax readiness for dev or nodes that cannot run Tetragon.
 - The direct Rust Tetragon gRPC client auto-loads a node-local `tcp_sendmsg`/`tcp_close` tracing policy so users do not have to apply a policy manually.
 - Unknown destinations/sources are included as `kind="unknown"` edges.
 - Portability note: this remains optional and disabled by default so clusters without Tetragon are unaffected.
@@ -355,6 +356,7 @@ Recommended `HUB_URL` is `https://api.hub.sentinel.la`.
 | `ACTIONS_ENABLED` | ConfigMap | `false` |
 | `COLLECT_SECRETS` | ConfigMap | `false` |
 | `COLLECT_DEPENDENCIES_TETRAGON` | ConfigMap | `false` |
+| `TETRAGON_REQUIRED_FOR_READINESS` | ConfigMap | `true` |
 | `TETRAGON_GRPC_ADDRESS` | ConfigMap | when `COLLECT_DEPENDENCIES_TETRAGON=true`, default `tetragon-grpc.tetragon.svc.cluster.local:54321` |
 | `FULL_DEBUG` | ConfigMap | `false` |
 | `AGENT_HTTP_DEBUG` | ConfigMap | `false` |
@@ -369,7 +371,7 @@ When `COLLECT_SECRETS=true`, the agent attempts to collect Secret metadata and k
 
 When `COLLECT_DEPENDENCIES_TETRAGON=true`, Sentinella connects to Tetragon over internal Kubernetes gRPC using `TETRAGON_GRPC_ADDRESS`. The default address is `tetragon-grpc.tetragon.svc.cluster.local:54321`.
 
-Dependency collection remains fail-soft at the snapshot layer, but the agent readiness probe blocks the pod from becoming Ready while dependency collection is enabled and Tetragon is not connected.
+Dependency collection remains fail-soft at the snapshot layer. By default, the agent readiness probe blocks the pod from becoming Ready while dependency collection is enabled and Tetragon is not connected. Set `TETRAGON_REQUIRED_FOR_READINESS=false` to keep the pod Ready even when Tetragon is unavailable.
 
 ## Build
 
@@ -414,7 +416,7 @@ podman push ghcr.io/sentinella/sentinella-hub-k8s-agent:0.1.0
    - Edit `agent.yaml`:
      - `CLUSTER_ID` unique per cluster.
      - `image:` for the `agent` container pointing to your Rust agent image.
-     - For dependency collection: set `COLLECT_DEPENDENCIES_TETRAGON=true`. The default `TETRAGON_GRPC_ADDRESS` in that mode is `tetragon-grpc.tetragon.svc.cluster.local:54321`.
+    - For dependency collection: set `COLLECT_DEPENDENCIES_TETRAGON=true`. The default `TETRAGON_GRPC_ADDRESS` in that mode is `tetragon-grpc.tetragon.svc.cluster.local:54321`. Set `TETRAGON_REQUIRED_FOR_READINESS=false` for dev clusters or nodes that cannot run Tetragon.
      - Toleration block — current value runs on every node including control plane; trim if you want a smaller footprint.
    - Apply:
      ```bash
@@ -430,7 +432,7 @@ podman push ghcr.io/sentinella/sentinella-hub-k8s-agent:0.1.0
    curl localhost:9090/metrics
    ```
 
-OpenShift installs use the same agent image and code path. The installer auto-detects OpenShift and applies the right toleration/SCC annotations. With dependency collection disabled, the agent behaves like a normal inventory collector. With dependency collection enabled, readiness blocks until Tetragon is connected. The manifest checksum check is opt-in and off by default. `FULL_DEBUG` is a last resort only.
+OpenShift installs use the same agent image and code path. The installer auto-detects OpenShift and applies the right toleration/SCC annotations. With dependency collection disabled, the agent behaves like a normal inventory collector. With dependency collection enabled, readiness blocks until Tetragon is connected unless `TETRAGON_REQUIRED_FOR_READINESS=false`. The manifest checksum check is opt-in and off by default. `FULL_DEBUG` is a last resort only.
 
 The `Lease` object will appear once the first pod is up; its `holderIdentity` is the leader node's name.
 

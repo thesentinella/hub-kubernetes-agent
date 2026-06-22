@@ -49,12 +49,19 @@ struct State {
 static STATE: OnceCell<Arc<State>> = OnceCell::new();
 static STARTED: Lazy<Mutex<bool>> = Lazy::new(|| Mutex::new(false));
 
-pub fn init(enabled: bool, address: String) {
-    health::set_dependency_required(enabled);
+pub fn init(enabled: bool, required_for_readiness: bool, address: String) {
+    let dependency_required = enabled && required_for_readiness;
+    health::set_dependency_required(dependency_required);
     health::TETRAGON_CONNECTED.set(0);
     if !enabled {
         health::set_dependency_ready(true);
         return;
+    }
+
+    if dependency_required {
+        health::set_dependency_ready(false);
+    } else {
+        health::set_dependency_ready(true);
     }
 
     let mut started = STARTED.lock().expect("tetragon start mutex poisoned");
@@ -67,7 +74,6 @@ pub fn init(enabled: bool, address: String) {
         lines: Mutex::new(VecDeque::new()),
     });
     let _ = STATE.set(state.clone());
-    health::set_dependency_ready(false);
     tokio::spawn(run_loop(address, state));
 }
 

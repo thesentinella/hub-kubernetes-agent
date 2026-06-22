@@ -64,6 +64,7 @@ async fn main() -> Result<()> {
 
     tetragon::init(
         cfg.collect_dependencies_tetragon,
+        cfg.tetragon_required_for_readiness,
         cfg.tetragon_grpc_address.clone(),
     );
 
@@ -487,6 +488,7 @@ mod tests {
             actions_enabled: false,
             collect_secrets: false,
             collect_dependencies_tetragon: false,
+            tetragon_required_for_readiness: true,
             tetragon_grpc_address: tetragon::DEFAULT_GRPC_ADDRESS.into(),
             http_timeout: Duration::from_secs(20),
             http_debug: false,
