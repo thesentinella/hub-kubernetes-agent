@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.29.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.28.2...v0.29.0) (2026-06-22)
+
+
+### Features
+
+* sen-331 aarch64 support ([#115](https://github.com/thesentinella/hub-kubernetes-agent/issues/115)) ([83b4e09](https://github.com/thesentinella/hub-kubernetes-agent/commit/83b4e090a94cbc76223bf9bcab8d69ebc3fe30ad))
+
 ## [0.28.2](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.28.1...v0.28.2) (2026-06-22)
 
 
