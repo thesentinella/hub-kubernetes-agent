@@ -373,7 +373,7 @@ Dependency collection remains fail-soft at the snapshot layer, but the agent rea
 
 ## Build
 
-This repository produces a single Rust agent image from the `agent-runtime` target in `Dockerfile`.
+This repository produces a multi-arch Rust agent image from the `agent-runtime` target in `Dockerfile`. The published image is a manifest list for `linux/amd64` and `linux/arm64`; the runtime layer is `gcr.io/distroless/cc-debian12:nonroot`. aarch64 support is built with QEMU emulation in CI.
 
 ```bash
 podman build --target agent-runtime -t ghcr.io/sentinella/sentinella-hub-k8s-agent:0.1.0 .
