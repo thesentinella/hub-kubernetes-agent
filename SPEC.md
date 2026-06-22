@@ -40,6 +40,7 @@
 | `ACTIONS_ENABLED` | no | `false` | Only `true` or `1` enables action dispatch. |
 | `COLLECT_SECRETS` | no | `false` | When `true`, collect Secret metadata and key names only; requires separate `secrets` read RBAC. |
 | `COLLECT_DEPENDENCIES_TETRAGON` | no | `false` | When `true`, collect dependency edges from Tetragon gRPC. |
+| `TETRAGON_REQUIRED_FOR_READINESS` | no | `true` | When `true`, `/readyz` blocks until Tetragon connects; set `false` to relax readiness for dev or nodes without Tetragon. |
 | `TETRAGON_GRPC_ADDRESS` | no | when `COLLECT_DEPENDENCIES_TETRAGON=true`, `tetragon-grpc.tetragon.svc.cluster.local:54321` | Tetragon gRPC server address used for dependency collection. |
 | `AGENT_LOG` | no | `info` | Primary log filter variable for JSON tracing output. |
 | `RUST_LOG` | no | none | Optional legacy alias if `AGENT_LOG` is not set. |
@@ -473,7 +474,7 @@ The agent probes `VolumeSnapshotClass` as the canonical signal; if it returns 40
 - Process-level/runtime technology inspection is out of scope for this release and tracked as a separate follow-up.
 - Unknown images are still reported with `vendor: null`, `product: <image-name>`, `version: <tag>`, `source: "image"`.
 - Dependency collection from Tetragon gRPC is opt-in (`COLLECT_DEPENDENCIES_TETRAGON=true`) and fail-soft.
-- When dependency collection is enabled, the agent readiness probe blocks the pod from becoming Ready until it has connected to Tetragon.
+- When dependency collection is enabled, the agent readiness probe blocks the pod from becoming Ready until it has connected to Tetragon, unless `TETRAGON_REQUIRED_FOR_READINESS=false`.
 - Dependency output is bounded by internal caps (max edges and max fanout per source). Truncation sets `dependencies.truncated=true` and increments `dependencies.dropped_edges`.
 - Unknown endpoint mappings are included as `kind: "unknown"` edges and still include `ip` when known.
 - Dependency source is `tetragon_grpc`; the agent consumes Tetragon gRPC directly and manages its own node-local tracing policy.
@@ -588,6 +589,7 @@ Known command kinds:
 - `ACTIONS_ENABLED`
 - `COLLECT_SECRETS`
 - `COLLECT_DEPENDENCIES_TETRAGON`
+- `TETRAGON_REQUIRED_FOR_READINESS`
 - `TETRAGON_GRPC_ADDRESS`
 - `FULL_DEBUG`
 - `AGENT_HTTP_DEBUG`

@@ -126,6 +126,7 @@ data:
   ACTIONS_ENABLED: "false"           # read-only by default
   COLLECT_SECRETS: "false"           # requires separate secrets-reader RBAC when true
   COLLECT_DEPENDENCIES_TETRAGON: "false"  # opt-in; requires Tetragon with gRPC enabled
+  TETRAGON_REQUIRED_FOR_READINESS: "true" # set false in dev if Tetragon is unavailable on a node
   TETRAGON_GRPC_ADDRESS: "tetragon-grpc.tetragon.svc.cluster.local:54321"
   FULL_DEBUG: "false"                 # last resort only; emits full payloads and bodies
   AGENT_HTTP_DEBUG: "false"
