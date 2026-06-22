@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.28.2](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.28.1...v0.28.2) (2026-06-22)
+
+
+### Bug Fixes
+
+* report CSI snapshot API availability state in snapshot ([#112](https://github.com/thesentinella/hub-kubernetes-agent/issues/112)) ([2c2f81e](https://github.com/thesentinella/hub-kubernetes-agent/commit/2c2f81e9e338eb197f3488b3b5c6ef58e5dcc640))
+
 ## [0.28.1](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.28.0...v0.28.1) (2026-06-15)
 
 
