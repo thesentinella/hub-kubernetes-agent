@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.29.2](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.29.1...v0.29.2) (2026-06-23)
+
+
+### Bug Fixes
+
+* document release-please title casing ([#120](https://github.com/thesentinella/hub-kubernetes-agent/issues/120)) ([77c5e1e](https://github.com/thesentinella/hub-kubernetes-agent/commit/77c5e1e8ce2836149600b33f6daea6a55946c14b))
+
 ## [0.29.1](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.29.0...v0.29.1) (2026-06-22)
 
 
