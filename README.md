@@ -517,6 +517,8 @@ Work on a feature branch and open a PR against `main`. All merges use **squash m
 
 Releases are automated via [release-please](https://github.com/googleapis/release-please). The PR title determines whether a release is created and what version bump it triggers:
 
+Note: the prefix must be lowercase (`feat:`, `fix:`, `perf:`, etc.). Capitalized variants like `Feat:` are ignored.
+
 | Prefix | Effect | Example |
 |--------|--------|---------|
 | `feat:` | minor bump (`v0.1.0` → `v0.2.0`) | `feat: collect NetworkPolicies` |
