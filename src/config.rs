@@ -98,8 +98,8 @@ pub struct Config {
     /// the plugin block is omitted from the snapshot payload entirely.
     pub workload_monitoring_enabled: bool,
 
-    /// Allowlist of namespaces to monitor. Comma-separated env value. Empty
-    /// means the plugin is disabled regardless of the `enabled` flag.
+    /// Allowlist of namespaces to monitor. YAML list env value. Empty means
+    /// the plugin is disabled regardless of the `enabled` flag.
     pub workload_monitoring_namespaces: Vec<String>,
 
     /// Tech detection targets enabled for the plugin. Comma-separated env
@@ -147,7 +147,7 @@ impl Config {
             .unwrap_or_else(|_| "sentinella-hub-k8s-agent-leader".to_string());
 
         let workload_monitoring_enabled = env_flag("WORKLOAD_MONITORING_ENABLED");
-        let workload_monitoring_namespaces = parse_csv_env("WORKLOAD_MONITORING_NAMESPACES");
+        let workload_monitoring_namespaces = parse_yaml_list_env("WORKLOAD_MONITORING_NAMESPACES");
         let workload_monitoring_targets = parse_csv_env_or(
             "WORKLOAD_MONITORING_TARGETS",
             vec![
@@ -232,7 +232,9 @@ fn runtime_env_value(cfg: &Config, key: &str) -> Option<String> {
         "TETRAGON_GRPC_ADDRESS" => Some(cfg.tetragon_grpc_address.clone()),
         "TECH_DETECT_PROCESS" => Some(bool_string(cfg.tech_detect_process)),
         "WORKLOAD_MONITORING_ENABLED" => Some(bool_string(cfg.workload_monitoring_enabled)),
-        "WORKLOAD_MONITORING_NAMESPACES" => Some(cfg.workload_monitoring_namespaces.join(",")),
+        "WORKLOAD_MONITORING_NAMESPACES" => {
+            Some(yaml_list_string(&cfg.workload_monitoring_namespaces))
+        }
         "WORKLOAD_MONITORING_TARGETS" => Some(cfg.workload_monitoring_targets.join(",")),
         _ => None,
     }
@@ -302,13 +304,39 @@ fn env_flag(var: &str) -> bool {
 fn parse_csv_env(var: &str) -> Vec<String> {
     env::var(var)
         .ok()
-        .map(|raw| {
-            raw.split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect()
-        })
+        .map(|raw| parse_csv_values(&raw))
         .unwrap_or_default()
+}
+
+fn parse_yaml_list_env(var: &str) -> Vec<String> {
+    let Some(raw) = env::var(var).ok() else {
+        return Vec::new();
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+
+    serde_yaml::from_str::<Vec<String>>(trimmed)
+        .ok()
+        .unwrap_or_else(|| parse_csv_values(trimmed))
+}
+
+fn parse_csv_values(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+fn yaml_list_string(values: &[String]) -> String {
+    if values.is_empty() {
+        return String::new();
+    }
+
+    serde_yaml::to_string(values)
+        .map(|yaml| yaml.trim_end().to_string())
+        .unwrap_or_else(|_| values.join(","))
 }
 
 fn parse_csv_env_or(var: &str, default: Vec<String>) -> Vec<String> {
@@ -755,7 +783,7 @@ mod tests {
     }
 
     #[test]
-    fn workload_monitoring_parses_csv_values() {
+    fn workload_monitoring_parses_yaml_list_values() {
         let _lock = ENV_LOCK.lock().unwrap();
         unsafe {
             reset_env();
@@ -763,7 +791,7 @@ mod tests {
             env::set_var("WORKLOAD_MONITORING_ENABLED", "true");
             env::set_var(
                 "WORKLOAD_MONITORING_NAMESPACES",
-                "customer-app , customer-db,, ",
+                "- customer-app\n- customer-db\n",
             );
             env::set_var("WORKLOAD_MONITORING_TARGETS", "angular,spring_boot");
             let cfg = Config::from_env().unwrap();
@@ -778,5 +806,71 @@ mod tests {
             );
             clear_required();
         }
+    }
+
+    #[test]
+    fn workload_monitoring_runtime_env_serializes_yaml_list() {
+        let cfg = Config {
+            hub_url: "https://hub.example.com".into(),
+            cluster_id: "cluster-1".into(),
+            api_key: Some("shub_secret".into()),
+            agent_version_override: None,
+            collect_interval: Duration::from_secs(60),
+            poll_wait: Duration::from_secs(30),
+            actions_enabled: false,
+            collect_secrets: false,
+            collect_dependencies_tetragon: false,
+            tetragon_grpc_address: "tetragon:54321".into(),
+            http_timeout: Duration::from_secs(20),
+            http_debug: false,
+            http_debug_bodies: false,
+            full_debug: false,
+            agent_log: "info".into(),
+            tech_detect_process: false,
+            pod_name: "pod-1".into(),
+            pod_namespace: "sentinella".into(),
+            node_name: "node-1".into(),
+            lease_name: "lease".into(),
+            lease_ttl: Duration::from_secs(30),
+            workload_monitoring_enabled: true,
+            workload_monitoring_namespaces: vec!["customer-app".into(), "customer-db".into()],
+            workload_monitoring_targets: vec!["angular".into(), "spring_boot".into()],
+        };
+
+        let env = agent_runtime_env(&cfg);
+        let namespaces = env
+            .iter()
+            .find(|entry| entry.key == "WORKLOAD_MONITORING_NAMESPACES")
+            .unwrap();
+        assert_eq!(namespaces.value, "- customer-app\n- customer-db");
+    }
+
+    #[test]
+    fn agent_configured_env_preserves_yaml_list_values() {
+        let values = BTreeMap::from([
+            (
+                "WORKLOAD_MONITORING_NAMESPACES".to_string(),
+                "- customer-app\n- customer-db\n".to_string(),
+            ),
+            (
+                "WORKLOAD_MONITORING_ENABLED".to_string(),
+                "true".to_string(),
+            ),
+        ]);
+
+        let env = agent_configured_env(&values);
+        assert_eq!(
+            env,
+            vec![
+                KV {
+                    key: "WORKLOAD_MONITORING_ENABLED".into(),
+                    value: "true".into(),
+                },
+                KV {
+                    key: "WORKLOAD_MONITORING_NAMESPACES".into(),
+                    value: "- customer-app\n- customer-db".into(),
+                },
+            ]
+        );
     }
 }

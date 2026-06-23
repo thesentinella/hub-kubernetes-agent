@@ -283,7 +283,7 @@ The agent ships a plugin-style capability for namespace-scoped workload monitori
 | Variable | Default | Notes |
 |---|---|---|
 | `WORKLOAD_MONITORING_ENABLED` | `false` | Master switch. When `false`, the plugin block is omitted. |
-| `WORKLOAD_MONITORING_NAMESPACES` | empty | Comma-separated allowlist. Empty disables the plugin regardless of `ENABLED`. |
+| `WORKLOAD_MONITORING_NAMESPACES` | `[]` | YAML list allowlist. Empty disables the plugin regardless of `ENABLED`. |
 | `WORKLOAD_MONITORING_TARGETS` | `angular,spring_boot,oracle_database` | Tech detection targets enabled for the plugin. |
 
 When enabled with a non-empty allowlist, the snapshot gains:
@@ -379,7 +379,7 @@ Recommended `HUB_URL` is `https://api.hub.sentinel.la`.
 | `COLLECT_DEPENDENCIES_TETRAGON` | ConfigMap | `false` |
 | `TETRAGON_GRPC_ADDRESS` | ConfigMap | when `COLLECT_DEPENDENCIES_TETRAGON=true`, default `tetragon-grpc.tetragon.svc.cluster.local:54321` |
 | `WORKLOAD_MONITORING_ENABLED` | ConfigMap | `false` |
-| `WORKLOAD_MONITORING_NAMESPACES` | ConfigMap | empty |
+| `WORKLOAD_MONITORING_NAMESPACES` | ConfigMap | empty YAML list (`[]`) |
 | `WORKLOAD_MONITORING_TARGETS` | ConfigMap | `angular,spring_boot,oracle_database` |
 | `FULL_DEBUG` | ConfigMap | `false` |
 | `AGENT_HTTP_DEBUG` | ConfigMap | `false` |
