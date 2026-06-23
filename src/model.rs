@@ -21,6 +21,11 @@ pub struct InventorySnapshot {
     pub configuration: ConfigurationInventory,
     pub storage: StorageInventory,
     pub events: Vec<EventInfo>,
+    /// Optional plugin envelopes (e.g. workload_monitoring). Omitted from the
+    /// JSON when no plugin is enabled. See `docs/adr/0001-workload-monitoring-plugin.md`
+    /// for the contract.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plugins: Option<Plugins>,
     /// Pod-metrics availability state. Always present so the Hub can render a
     /// clear, actionable signal alongside (possibly null) pod usage values.
     /// See `src/collector.rs::probe_pod_metrics` for classification.
@@ -73,6 +78,44 @@ pub struct SnapshotApiStatus {
     pub last_attempt_at_ms: u128,
 }
 
+/// Top-level plugin envelope. Each enabled plugin contributes a sub-envelope.
+/// The full envelope is omitted from the JSON when no plugin is enabled.
+#[derive(Serialize, Debug, Default)]
+pub struct Plugins {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workload_monitoring: Option<WorkloadMonitoringPlugin>,
+}
+
+/// Namespace-scoped workload monitoring plugin block. See
+/// `docs/adr/0001-workload-monitoring-plugin.md` for the full contract.
+#[derive(Serialize, Debug)]
+pub struct WorkloadMonitoringPlugin {
+    pub enabled: bool,
+    pub namespaces: Vec<String>,
+    pub technology_targets: Vec<String>,
+    pub schema_version: u32,
+    pub generated_at_ms: u128,
+    pub signals: WorkloadMonitoringSignals,
+}
+
+/// Filtered, namespace-scoped projection of the cluster-wide inventory.
+/// Reuses the existing DTOs to avoid duplicate types in the wire format.
+#[derive(Serialize, Debug, Default)]
+pub struct WorkloadMonitoringSignals {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub workloads: Vec<WorkloadRef>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub pods: Vec<PodInfo>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub services: Vec<ServiceInfo>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub ingresses: Vec<IngressInfo>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<EventInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dependencies: Option<DependencyInventory>,
+}
+
 #[derive(Deserialize, Debug, Default)]
 pub struct SnapshotCreated {
     #[serde(default)]
@@ -94,7 +137,7 @@ pub struct DependencyInventory {
     pub dropped_edges: u64,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, Clone)]
 pub struct DependencyEdge {
     pub from: DependencyEndpoint,
     pub to: DependencyEndpoint,
@@ -108,7 +151,7 @@ pub struct DependencyEdge {
     pub last_seen_unix_ms: u128,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, Clone)]
 pub struct DependencyEndpoint {
     pub kind: String,
     pub namespace: Option<String>,
@@ -289,7 +332,7 @@ pub struct SecretInfo {
     pub data_keys: Vec<String>,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, Clone)]
 pub struct ServiceInfo {
     pub namespace: String,
     pub name: String,
@@ -302,7 +345,7 @@ pub struct ServiceInfo {
     pub load_balancer_ingress: Vec<String>,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, Clone)]
 pub struct ServicePortInfo {
     pub name: Option<String>,
     pub protocol: Option<String>,
@@ -311,7 +354,7 @@ pub struct ServicePortInfo {
     pub node_port: Option<i32>,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, Clone)]
 pub struct IngressInfo {
     pub namespace: String,
     pub name: String,
@@ -322,7 +365,7 @@ pub struct IngressInfo {
     pub load_balancer_ingress: Vec<String>,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, Clone)]
 pub struct IngressRuleInfo {
     pub host: Option<String>,
     pub path: Option<String>,
@@ -331,7 +374,7 @@ pub struct IngressRuleInfo {
     pub backend_port: Option<String>,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, Clone)]
 pub struct IngressTlsInfo {
     pub hosts: Vec<String>,
     pub secret_name: Option<String>,
@@ -381,7 +424,7 @@ pub struct VolumeSnapshotInfo {
     pub bound_content_name: Option<String>,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, Clone)]
 pub struct WorkloadRef {
     pub namespace: String,
     pub name: String,
@@ -389,7 +432,7 @@ pub struct WorkloadRef {
     pub replicas_ready: Option<i32>,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, Clone)]
 pub struct PodInfo {
     pub namespace: String,
     pub name: String,
@@ -403,7 +446,7 @@ pub struct PodInfo {
     pub containers: Vec<ContainerInfo>,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, Clone)]
 pub struct EventInfo {
     pub namespace: String,
     pub name: String,
@@ -419,7 +462,7 @@ pub struct EventInfo {
     pub involved_object: InvolvedObjectInfo,
 }
 
-#[derive(Serialize, Debug, Default)]
+#[derive(Serialize, Debug, Default, Clone)]
 pub struct InvolvedObjectInfo {
     pub kind: Option<String>,
     pub name: Option<String>,
@@ -427,7 +470,7 @@ pub struct InvolvedObjectInfo {
     pub uid: Option<String>,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, Clone)]
 pub struct ContainerInfo {
     pub name: String,
     pub image: String,
@@ -436,7 +479,7 @@ pub struct ContainerInfo {
     pub resources: ResourceSpec,
 }
 
-#[derive(Serialize, Debug, Default)]
+#[derive(Serialize, Debug, Default, Clone)]
 pub struct ResourceSpec {
     pub requests_cpu: Option<String>,
     pub requests_memory: Option<String>,
@@ -444,13 +487,22 @@ pub struct ResourceSpec {
     pub limits_memory: Option<String>,
 }
 
-#[derive(Serialize, Debug, Default)]
+#[derive(Serialize, Debug, Default, Clone)]
 pub struct Technology {
     pub vendor: Option<String>,
     pub product: Option<String>,
     pub version: Option<String>,
     pub language: Option<String>,
-    pub source: &'static str, // "image" for now; future: "labels", "exec"
+    /// Provenance string. `image` when detected from the container image name,
+    /// `process` when detected via `TECH_DETECT_PROCESS` from container
+    /// `command`/`args`, `labels` when detected from pod/workload labels or
+    /// annotations, `config` reserved for future Hub-pushed overrides.
+    pub source: &'static str,
+    /// Application stack tag. Used to identify the workload when the runtime
+    /// product is generic (e.g. `product=nginx, subtype=angular` for an
+    /// Angular app served by nginx). Null for everything else.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subtype: Option<String>,
 }
 
 #[derive(Serialize, Debug, Default, Clone, PartialEq, Eq)]

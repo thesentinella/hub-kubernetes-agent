@@ -275,6 +275,58 @@ On successful inventory ingest, when the Hub responds with `{"already_existed":t
 
 `InventorySnapshot.operational_maturity` includes descheduler detection (via well-known deployment names), VPA object count and update modes, and all CronJob summaries. All are fail-soft; snapshot still succeeds when those APIs are unavailable.
 
+`InventorySnapshot.plugins` is an optional envelope of plugin blocks. The field is omitted from the JSON when no plugin is enabled. The first supported plugin is `workload_monitoring` (see "Plugins" below); its data contract is defined in `docs/adr/0001-workload-monitoring-plugin.md`.
+
+### Plugins
+
+The agent ships a plugin-style capability for namespace-scoped workload monitoring. The plugin is opt-in and disabled by default; when disabled, the `plugins` field is omitted from the snapshot payload entirely.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `WORKLOAD_MONITORING_ENABLED` | `false` | Master switch. When `false`, the plugin block is omitted. |
+| `WORKLOAD_MONITORING_NAMESPACES` | `[]` | YAML list allowlist. Empty disables the plugin regardless of `ENABLED`. |
+| `WORKLOAD_MONITORING_TARGETS` | `angular,spring_boot,oracle_database` | Tech detection targets enabled for the plugin. |
+
+When enabled with a non-empty allowlist, the snapshot gains:
+
+```json
+{
+  "plugins": {
+    "workload_monitoring": {
+      "enabled": true,
+      "namespaces": ["customer-app", "customer-db"],
+      "technology_targets": ["angular", "spring_boot", "oracle_database"],
+      "schema_version": 1,
+      "generated_at_ms": 1748523600000,
+      "signals": {
+        "workloads": [ /* WorkloadRef, filtered */ ],
+        "pods":      [ /* PodInfo, filtered */ ],
+        "services":  [ /* ServiceInfo, filtered */ ],
+        "ingresses": [ /* IngressInfo, filtered */ ],
+        "events":    [ /* EventInfo, filtered */ ],
+        "dependencies": { /* DependencyInventory or null when tetragon off */ }
+      }
+    }
+  }
+}
+```
+
+Detection rules (in order, first match wins):
+
+- **Labels / annotations** — `app.kubernetes.io/component={angular,spring-boot,oracle}`, `angular.io/version`, `app.spring.io/version`.
+- **Image name patterns** — `springboot`/`spring-boot` in the image name; `container-registry.oracle.com/database/...`, `gvenzl/oracle-*`, `oracle/database`; `angular-*` / `*-ng-*`.
+- **Container command/args** — `java -jar *spring*.jar`, `-Dspring.profiles.active=...` (Spring Boot subtype); `oracle`, `dbca`, `sqlplus` (Oracle subtype).
+
+Each detection sets `Technology.subtype` (`angular` / `spring_boot` / `oracle_database`) and `Technology.source` (`labels` / `image` / `process`).
+
+**Limitations:**
+
+- No new RBAC; uses the existing reader `ClusterRole`.
+- No exec, no env var scraping, no command/args leak in the payload.
+- Multi-process containers are not detected; only the entrypoint.
+- Plugin block is fail-soft; missing metrics-server, Tetragon, or any optional API does not break the snapshot.
+- The Hub-pushed configuration path is **out of scope** for v1 and tracked as a follow-up issue.
+
 ### GET `/v1/clusters/{cluster_id}/commands/poll?wait=30s`
 
 Long-poll. The Hub holds the connection until it has a `CommandBatch` or until `wait` expires. Valid responses:
@@ -358,6 +410,9 @@ Recommended `HUB_URL` is `https://api.hub.sentinel.la`.
 | `COLLECT_DEPENDENCIES_TETRAGON` | ConfigMap | `false` |
 | `TETRAGON_REQUIRED_FOR_READINESS` | ConfigMap | `true` |
 | `TETRAGON_GRPC_ADDRESS` | ConfigMap | when `COLLECT_DEPENDENCIES_TETRAGON=true`, default `tetragon-grpc.tetragon.svc.cluster.local:54321` |
+| `WORKLOAD_MONITORING_ENABLED` | ConfigMap | `false` |
+| `WORKLOAD_MONITORING_NAMESPACES` | ConfigMap | empty YAML list (`[]`) |
+| `WORKLOAD_MONITORING_TARGETS` | ConfigMap | `angular,spring_boot,oracle_database` |
 | `FULL_DEBUG` | ConfigMap | `false` |
 | `AGENT_HTTP_DEBUG` | ConfigMap | `false` |
 | `AGENT_HTTP_DEBUG_BODIES` | ConfigMap | `false` |

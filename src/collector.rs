@@ -1246,14 +1246,29 @@ fn container_technology(
 ) -> Technology {
     let image = container.image.as_deref().unwrap_or("");
     if !tech_detect_process {
-        return tech::detect(image);
+        return refine_with_application_stack_image(tech::detect(image), image);
     }
 
     let image_tech = tech::detect(image);
     let command = container.command.clone().unwrap_or_default();
     let args = container.args.clone().unwrap_or_default();
 
-    tech::detect_from_process(&command, &args).unwrap_or(image_tech)
+    let detected = tech::detect_from_process(&command, &args).unwrap_or(image_tech);
+    let refined = tech::refine_spring_boot(detected, &command, &args);
+    refine_with_application_stack_image(refined, image)
+}
+
+fn refine_with_application_stack_image(
+    mut tech: crate::model::Technology,
+    image: &str,
+) -> crate::model::Technology {
+    if tech.subtype.is_some() {
+        return tech;
+    }
+    if let Some(stack) = tech::detect_application_stack_from_image(image) {
+        tech.subtype = stack.subtype;
+    }
+    tech
 }
 
 fn map_pod(

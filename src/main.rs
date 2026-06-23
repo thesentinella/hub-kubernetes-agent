@@ -5,6 +5,7 @@ mod health;
 mod hub;
 mod leader;
 mod model;
+mod plugins;
 mod tech;
 mod tetragon;
 
@@ -176,6 +177,17 @@ async fn build_and_send(cfg: &Config, kube: &KubeClient, hub: &HubClient) -> Res
     warn_metrics_status_change(&metrics);
     warn_snapshot_api_status_change(&snapshot_api);
     configuration.agent_runtime_env = config::agent_runtime_env(cfg);
+    let plugins = plugins::build_workload_monitoring(
+        cfg,
+        &workloads,
+        &pods,
+        &network,
+        &events,
+        &dependencies,
+    )
+    .map(|wm| Plugins {
+        workload_monitoring: Some(wm),
+    });
     let snap = InventorySnapshot {
         schema_version: 1,
         agent: AgentInfo {
@@ -201,6 +213,7 @@ async fn build_and_send(cfg: &Config, kube: &KubeClient, hub: &HubClient) -> Res
         configuration,
         storage,
         events,
+        plugins,
         metrics,
         snapshot_api,
     };
@@ -501,6 +514,9 @@ mod tests {
             node_name: "node-1".into(),
             lease_name: "lease".into(),
             lease_ttl: Duration::from_secs(30),
+            workload_monitoring_enabled: false,
+            workload_monitoring_namespaces: Vec::new(),
+            workload_monitoring_targets: vec!["angular".into(), "spring_boot".into()],
         }
     }
 

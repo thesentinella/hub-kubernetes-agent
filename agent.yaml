@@ -132,6 +132,9 @@ data:
   AGENT_HTTP_DEBUG: "false"
   AGENT_HTTP_DEBUG_BODIES: "false"
   AGENT_LOG: "info"
+  WORKLOAD_MONITORING_ENABLED: "false"      # opt-in; namespace-scoped plugin
+  WORKLOAD_MONITORING_NAMESPACES: "[]"       # YAML list allowlist; empty disables the plugin
+  WORKLOAD_MONITORING_TARGETS: "angular,spring_boot,oracle_database"
 ---
 apiVersion: apps/v1
 kind: DaemonSet
