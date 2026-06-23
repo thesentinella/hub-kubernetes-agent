@@ -164,6 +164,7 @@ mod tests {
             actions_enabled: false,
             collect_secrets: false,
             collect_dependencies_tetragon: false,
+            tetragon_required_for_readiness: true,
             tetragon_grpc_address: "tetragon:54321".into(),
             http_timeout: Duration::from_secs(20),
             http_debug: false,

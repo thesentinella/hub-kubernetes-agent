@@ -30,6 +30,7 @@ use tracing::{debug, error, info, warn};
 const AGENT_NAME: &str = "Sentinella Hub Kubernetes Agent";
 const WARN_SUPPRESSION_WINDOW: Duration = Duration::from_secs(60);
 const ACTIVE_CLUSTER_WARN_THRESHOLD_SECS: i64 = 300;
+const METRICS_WARN_SUPPRESSION_WINDOW: Duration = Duration::from_secs(300);
 
 static WARN_SUPPRESSION: Lazy<Mutex<HashMap<String, SuppressionState>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
@@ -64,6 +65,7 @@ async fn main() -> Result<()> {
 
     tetragon::init(
         cfg.collect_dependencies_tetragon,
+        cfg.tetragon_required_for_readiness,
         cfg.tetragon_grpc_address.clone(),
     );
 
@@ -163,6 +165,8 @@ async fn build_and_send(cfg: &Config, kube: &KubeClient, hub: &HubClient) -> Res
         mut configuration,
         storage,
         events,
+        metrics,
+        snapshot_api,
     ) = collector::collect(
         kube,
         cfg.collect_secrets,
@@ -170,6 +174,8 @@ async fn build_and_send(cfg: &Config, kube: &KubeClient, hub: &HubClient) -> Res
         cfg.tech_detect_process,
     )
     .await?;
+    warn_metrics_status_change(&metrics);
+    warn_snapshot_api_status_change(&snapshot_api);
     configuration.agent_runtime_env = config::agent_runtime_env(cfg);
     let plugins = plugins::build_workload_monitoring(
         cfg,
@@ -208,6 +214,8 @@ async fn build_and_send(cfg: &Config, kube: &KubeClient, hub: &HubClient) -> Res
         storage,
         events,
         plugins,
+        metrics,
+        snapshot_api,
     };
     hub.send_snapshot(&snap).await
 }
@@ -299,6 +307,123 @@ fn should_restart_after_ack(result: &CommandResult) -> bool {
     result.status == "ok" && result.restart_requested.unwrap_or(false)
 }
 
+/// Log the pod-metrics status with state-change re-warn. The first hit on a
+/// state is logged immediately; the same state is suppressed for
+/// `METRICS_WARN_SUPPRESSION_WINDOW` and re-emitted as a reminder; a state
+/// change resets the timer and is logged immediately.
+fn warn_metrics_status_change(status: &crate::model::MetricsStatus) {
+    if status.state == "ok" {
+        return;
+    }
+    let key = "metrics_status";
+    let message = match status.reason.as_deref() {
+        Some(reason) => format!(
+            "pod-metrics unavailable: state={} reason={} source={} pod_metrics_count={}",
+            status.state, reason, status.source, status.pod_metrics_count
+        ),
+        None => format!(
+            "pod-metrics unavailable: state={} source={} pod_metrics_count={}",
+            status.state, status.source, status.pod_metrics_count
+        ),
+    };
+
+    let now = Instant::now();
+    let mut map = WARN_SUPPRESSION
+        .lock()
+        .expect("warn suppression mutex poisoned");
+
+    match map.get_mut(key) {
+        None => {
+            warn!("{}", message);
+            map.insert(
+                key.to_string(),
+                SuppressionState {
+                    last_emitted_at: now,
+                    suppressed_count: 0,
+                },
+            );
+        }
+        Some(state) => {
+            if now.duration_since(state.last_emitted_at) >= METRICS_WARN_SUPPRESSION_WINDOW {
+                if state.suppressed_count > 0 {
+                    warn!(
+                        suppressed_count = state.suppressed_count,
+                        window_secs = METRICS_WARN_SUPPRESSION_WINDOW.as_secs(),
+                        "pod-metrics still unavailable"
+                    );
+                }
+                warn!("{}", message);
+                state.last_emitted_at = now;
+                state.suppressed_count = 0;
+            } else {
+                state.suppressed_count += 1;
+            }
+        }
+    }
+}
+
+/// Log the CSI snapshot API status with state-change re-warn. Same
+/// suppression shape as `warn_metrics_status_change`; uses a separate key
+/// in the same `WARN_SUPPRESSION` map so the two runtime capabilities do
+/// not interfere with each other.
+fn warn_snapshot_api_status_change(status: &crate::model::SnapshotApiStatus) {
+    if status.state == "ok" {
+        return;
+    }
+    let key = "snapshot_api_status";
+    let message = match status.reason.as_deref() {
+        Some(reason) => format!(
+            "snapshot API unavailable: state={} reason={} source={} classes={} snapshots={}",
+            status.state,
+            reason,
+            status.source,
+            status.volumesnapshotclasses_count,
+            status.volumesnapshots_count
+        ),
+        None => format!(
+            "snapshot API unavailable: state={} source={} classes={} snapshots={}",
+            status.state,
+            status.source,
+            status.volumesnapshotclasses_count,
+            status.volumesnapshots_count
+        ),
+    };
+
+    let now = Instant::now();
+    let mut map = WARN_SUPPRESSION
+        .lock()
+        .expect("warn suppression mutex poisoned");
+
+    match map.get_mut(key) {
+        None => {
+            warn!("{}", message);
+            map.insert(
+                key.to_string(),
+                SuppressionState {
+                    last_emitted_at: now,
+                    suppressed_count: 0,
+                },
+            );
+        }
+        Some(state) => {
+            if now.duration_since(state.last_emitted_at) >= METRICS_WARN_SUPPRESSION_WINDOW {
+                if state.suppressed_count > 0 {
+                    warn!(
+                        suppressed_count = state.suppressed_count,
+                        window_secs = METRICS_WARN_SUPPRESSION_WINDOW.as_secs(),
+                        "snapshot API still unavailable"
+                    );
+                }
+                warn!("{}", message);
+                state.last_emitted_at = now;
+                state.suppressed_count = 0;
+            } else {
+                state.suppressed_count += 1;
+            }
+        }
+    }
+}
+
 fn warn_with_suppression(key: &str, message: &str) {
     let now = Instant::now();
     let mut map = WARN_SUPPRESSION
@@ -376,6 +501,7 @@ mod tests {
             actions_enabled: false,
             collect_secrets: false,
             collect_dependencies_tetragon: false,
+            tetragon_required_for_readiness: true,
             tetragon_grpc_address: tetragon::DEFAULT_GRPC_ADDRESS.into(),
             http_timeout: Duration::from_secs(20),
             http_debug: false,

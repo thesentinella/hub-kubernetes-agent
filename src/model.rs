@@ -26,6 +26,56 @@ pub struct InventorySnapshot {
     /// for the contract.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plugins: Option<Plugins>,
+    /// Pod-metrics availability state. Always present so the Hub can render a
+    /// clear, actionable signal alongside (possibly null) pod usage values.
+    /// See `src/collector.rs::probe_pod_metrics` for classification.
+    pub metrics: MetricsStatus,
+    /// CSI snapshot API availability state. Always present so the Hub can
+    /// render a clear, actionable signal when the snapshot CRDs are absent
+    /// or the API is unhealthy. See `src/collector.rs::probe_snapshot_api`
+    /// for classification.
+    pub snapshot_api: SnapshotApiStatus,
+}
+
+/// Pod-metrics availability state, surfaced in every snapshot so the Hub can
+/// distinguish "metrics-server is not installed" from "ServiceAccount lacks
+/// `metrics.k8s.io` RBAC" from a transient failure.
+///
+/// `state` values:
+/// - `ok` — the metrics API returned successfully (with or without items).
+/// - `missing` — the metrics API is not registered (404). metrics-server is
+///   almost certainly not installed in this cluster.
+/// - `forbidden` — the agent's ServiceAccount is not allowed to read
+///   `metrics.k8s.io` resources (403). Grant the reader RBAC.
+/// - `unavailable` — the metrics API is registered but not ready (503/504).
+///   metrics-server is installed but unhealthy; check its pods.
+/// - `error` — any other transient or unexpected failure.
+///
+/// `reason` is a short, actionable one-liner suitable for a UI badge. It is
+/// always present for non-`ok` states and omitted on success.
+#[derive(Serialize, Debug)]
+pub struct MetricsStatus {
+    pub state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub source: &'static str,
+    pub pod_metrics_count: usize,
+    pub last_attempt_at_ms: u128,
+}
+
+/// CSI snapshot API availability state, surfaced in every snapshot so the Hub
+/// can distinguish "CSI snapshot CRDs are not installed" from "ServiceAccount
+/// lacks `snapshot.storage.k8s.io` RBAC" from a transient failure. The
+/// `state` and `reason` semantics mirror [`MetricsStatus`].
+#[derive(Serialize, Debug)]
+pub struct SnapshotApiStatus {
+    pub state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub source: &'static str,
+    pub volumesnapshotclasses_count: usize,
+    pub volumesnapshots_count: usize,
+    pub last_attempt_at_ms: u128,
 }
 
 /// Top-level plugin envelope. Each enabled plugin contributes a sub-envelope.
@@ -775,5 +825,78 @@ mod tests {
 
         let value = serde_json::to_value(&agent).unwrap();
         assert_eq!(value["collect_dependencies_tetragon"], true);
+    }
+
+    #[test]
+    fn metrics_status_serializes_with_state_and_reason() {
+        let s = MetricsStatus {
+            state: "missing",
+            reason: Some("metrics-server not installed".to_string()),
+            source: "metrics.k8s.io/v1",
+            pod_metrics_count: 0,
+            last_attempt_at_ms: 1748523600000,
+        };
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(v["state"], "missing");
+        assert_eq!(v["reason"], "metrics-server not installed");
+        assert_eq!(v["source"], "metrics.k8s.io/v1");
+        assert_eq!(v["pod_metrics_count"], 0);
+        assert_eq!(v["last_attempt_at_ms"].as_u64().unwrap(), 1748523600000);
+    }
+
+    #[test]
+    fn metrics_status_omits_reason_when_state_is_ok() {
+        let s = MetricsStatus {
+            state: "ok",
+            reason: None,
+            source: "metrics.k8s.io/v1",
+            pod_metrics_count: 7,
+            last_attempt_at_ms: 1748523600000,
+        };
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(v["state"], "ok");
+        assert!(
+            !v.as_object().unwrap().contains_key("reason"),
+            "reason must be omitted on ok"
+        );
+    }
+
+    #[test]
+    fn snapshot_api_status_serializes_with_state_and_reason() {
+        let s = SnapshotApiStatus {
+            state: "missing",
+            reason: Some("CSI snapshot CRDs not installed".to_string()),
+            source: "snapshot.storage.k8s.io/v1",
+            volumesnapshotclasses_count: 0,
+            volumesnapshots_count: 0,
+            last_attempt_at_ms: 1748523600000,
+        };
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(v["state"], "missing");
+        assert_eq!(v["reason"], "CSI snapshot CRDs not installed");
+        assert_eq!(v["source"], "snapshot.storage.k8s.io/v1");
+        assert_eq!(v["volumesnapshotclasses_count"], 0);
+        assert_eq!(v["volumesnapshots_count"], 0);
+        assert_eq!(v["last_attempt_at_ms"].as_u64().unwrap(), 1748523600000);
+    }
+
+    #[test]
+    fn snapshot_api_status_omits_reason_when_state_is_ok() {
+        let s = SnapshotApiStatus {
+            state: "ok",
+            reason: None,
+            source: "snapshot.storage.k8s.io/v1",
+            volumesnapshotclasses_count: 3,
+            volumesnapshots_count: 5,
+            last_attempt_at_ms: 1748523600000,
+        };
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(v["state"], "ok");
+        assert!(
+            !v.as_object().unwrap().contains_key("reason"),
+            "reason must be omitted on ok"
+        );
+        assert_eq!(v["volumesnapshotclasses_count"], 3);
+        assert_eq!(v["volumesnapshots_count"], 5);
     }
 }

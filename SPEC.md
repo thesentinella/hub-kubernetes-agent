@@ -40,6 +40,7 @@
 | `ACTIONS_ENABLED` | no | `false` | Only `true` or `1` enables action dispatch. |
 | `COLLECT_SECRETS` | no | `false` | When `true`, collect Secret metadata and key names only; requires separate `secrets` read RBAC. |
 | `COLLECT_DEPENDENCIES_TETRAGON` | no | `false` | When `true`, collect dependency edges from Tetragon gRPC. |
+| `TETRAGON_REQUIRED_FOR_READINESS` | no | `true` | When `true`, `/readyz` blocks until Tetragon connects; set `false` to relax readiness for dev or nodes without Tetragon. |
 | `TETRAGON_GRPC_ADDRESS` | no | when `COLLECT_DEPENDENCIES_TETRAGON=true`, `tetragon-grpc.tetragon.svc.cluster.local:54321` | Tetragon gRPC server address used for dependency collection. |
 | `AGENT_LOG` | no | `info` | Primary log filter variable for JSON tracing output. |
 | `RUST_LOG` | no | none | Optional legacy alias if `AGENT_LOG` is not set. |
@@ -156,6 +157,8 @@ Path parameter note:
 - `configuration`: `ConfigurationInventory`.
 - `storage`: `StorageInventory`.
 - `events`: array of `EventInfo`.
+- `metrics`: `MetricsStatus`. Always present.
+- `snapshot_api`: `SnapshotApiStatus`. Always present.
 
 `AgentInfo` fields:
 
@@ -380,6 +383,47 @@ Compatibility note:
 - `events`: array of `EventInfo` filtered to the allowlist.
 - `dependencies`: optional `DependencyInventory`. Present only when `COLLECT_DEPENDENCIES_TETRAGON=true`; edges are filtered to those touching the allowlist on at least one side.
 
+`MetricsStatus` fields:
+
+- `state`: string. One of `ok`, `missing`, `forbidden`, `unavailable`, `error`.
+- `reason`: optional string. Short, actionable one-liner. Omitted when `state = "ok"`.
+- `source`: string. The metrics API path the agent attempted. `metrics.k8s.io/v1` or `metrics.k8s.io/v1beta1`.
+- `pod_metrics_count`: integer. Number of `PodMetrics` items returned in the most recent attempt. Zero for non-`ok` states.
+- `last_attempt_at_ms`: integer. Unix epoch milliseconds of the most recent probe.
+
+Classification rules (see `src/collector.rs::classify_metrics_error`):
+
+- 200 OK (with or without items) → `ok` (reason omitted).
+- 403 Forbidden → `forbidden` + `ServiceAccount missing metrics.k8s.io RBAC`.
+- 404 Not Found (v1 or v1beta1) → `missing` + `metrics-server not installed`.
+- 503 Service Unavailable → `unavailable` + `metrics-server registered but not ready`.
+- 504 Gateway Timeout → `unavailable` + `metrics-server timeout`.
+- other kube API error → `error` + `kube API error`.
+- non-kube error (reqwest, IO) → `error` + one of `transient: timeout`, `transient: connection refused`, `transient: dns`, `transient: tls`, `transient: io`.
+
+The agent logs the first hit on a state and any state change immediately; the same state is suppressed for 5 minutes and re-emitted as a reminder.
+
+`SnapshotApiStatus` fields:
+
+- `state`: string. One of `ok`, `missing`, `forbidden`, `unavailable`, `error`.
+- `reason`: optional string. Short, actionable one-liner. Omitted when `state = "ok"`.
+- `source`: string. The snapshot API path the agent attempted. `snapshot.storage.k8s.io/v1`.
+- `volumesnapshotclasses_count`: integer. Number of `VolumeSnapshotClass` items returned in the most recent attempt. Zero for non-`ok` states and for `missing`.
+- `volumesnapshots_count`: integer. Number of `VolumeSnapshot` items returned in the most recent attempt. Zero for non-`ok` states and for `missing` (the second probe is skipped on 404).
+- `last_attempt_at_ms`: integer. Unix epoch milliseconds of the most recent probe.
+
+Classification rules (see `src/collector.rs::classify_snapshot_api_error`):
+
+- 200 OK (with or without items) → `ok` (reason omitted).
+- 403 Forbidden → `forbidden` + `ServiceAccount missing snapshot.storage.k8s.io RBAC`.
+- 404 Not Found → `missing` + `CSI snapshot CRDs not installed` (and the `VolumeSnapshot` probe is skipped).
+- 503 Service Unavailable → `unavailable` + `CSI snapshot API registered but not ready`.
+- 504 Gateway Timeout → `unavailable` + `CSI snapshot API timeout`.
+- other kube API error → `error` + `kube API error`.
+- non-kube error (reqwest, IO) → `error` + one of `transient: timeout`, `transient: connection refused`, `transient: dns`, `transient: tls`, `transient: io`.
+
+The agent probes `VolumeSnapshotClass` as the canonical signal; if it returns 404, the `VolumeSnapshot` probe is skipped entirely (no point listing it when the API group is absent). The agent logs the first hit on a state and any state change immediately; the same state is suppressed for 5 minutes and re-emitted as a reminder.
+
 `StorageInventory` fields:
 
 - `storage_classes`: array of `StorageClassInfo`.
@@ -442,6 +486,8 @@ Compatibility note:
 ## Inventory Collection Behavior
 
 - The collector lists nodes, namespaces, deployments, statefulsets, daemonsets, pods, services, ingresses, storage resources, events, snapshot resources, and apiserver version concurrently.
+- Pod-metrics collection tries `metrics.k8s.io/v1` first and falls back to `v1beta1` only on a clean v1 404. The result of the probe (items + classification) is reported in the top-level `metrics` field.
+- CSI snapshot API collection probes `VolumeSnapshotClass` as the canonical signal; on 404 the `VolumeSnapshot` probe is skipped. The result of the probe (classes, snapshots, classification) is reported in the top-level `snapshot_api` field.
 - Individual Kubernetes list failures are fail-soft: the failed resource list becomes empty and a warning is logged.
 - Event payload is bounded: keep up to 500 events per snapshot; each event message is truncated to 500 chars.
 - Event ordering for snapshots is deterministic: `Warning` first, then newest-first timestamp, then namespace/name tie-breaker.
@@ -451,7 +497,7 @@ Compatibility note:
 - Process-level/runtime technology inspection is out of scope for this release and tracked as a separate follow-up.
 - Unknown images are still reported with `vendor: null`, `product: <image-name>`, `version: <tag>`, `source: "image"`.
 - Dependency collection from Tetragon gRPC is opt-in (`COLLECT_DEPENDENCIES_TETRAGON=true`) and fail-soft.
-- When dependency collection is enabled, the agent readiness probe blocks the pod from becoming Ready until it has connected to Tetragon.
+- When dependency collection is enabled, the agent readiness probe blocks the pod from becoming Ready until it has connected to Tetragon, unless `TETRAGON_REQUIRED_FOR_READINESS=false`.
 - Dependency output is bounded by internal caps (max edges and max fanout per source). Truncation sets `dependencies.truncated=true` and increments `dependencies.dropped_edges`.
 - Unknown endpoint mappings are included as `kind: "unknown"` edges and still include `ip` when known.
 - Dependency source is `tetragon_grpc`; the agent consumes Tetragon gRPC directly and manages its own node-local tracing policy.
@@ -566,6 +612,7 @@ Known command kinds:
 - `ACTIONS_ENABLED`
 - `COLLECT_SECRETS`
 - `COLLECT_DEPENDENCIES_TETRAGON`
+- `TETRAGON_REQUIRED_FOR_READINESS`
 - `TETRAGON_GRPC_ADDRESS`
 - `FULL_DEBUG`
 - `AGENT_HTTP_DEBUG`

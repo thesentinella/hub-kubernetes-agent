@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.29.1](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.29.0...v0.29.1) (2026-06-22)
+
+
+### Bug Fixes
+
+* add tetragon readiness flag ([#117](https://github.com/thesentinella/hub-kubernetes-agent/issues/117)) ([1f3b5ed](https://github.com/thesentinella/hub-kubernetes-agent/commit/1f3b5ed1619aaa00709d6704cf9cbd3588d47f20))
+
+## [0.29.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.28.2...v0.29.0) (2026-06-22)
+
+
+### Features
+
+* sen-331 aarch64 support ([#115](https://github.com/thesentinella/hub-kubernetes-agent/issues/115)) ([83b4e09](https://github.com/thesentinella/hub-kubernetes-agent/commit/83b4e090a94cbc76223bf9bcab8d69ebc3fe30ad))
+
+## [0.28.2](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.28.1...v0.28.2) (2026-06-22)
+
+
+### Bug Fixes
+
+* report CSI snapshot API availability state in snapshot ([#112](https://github.com/thesentinella/hub-kubernetes-agent/issues/112)) ([2c2f81e](https://github.com/thesentinella/hub-kubernetes-agent/commit/2c2f81e9e338eb197f3488b3b5c6ef58e5dcc640))
+
+## [0.28.1](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.28.0...v0.28.1) (2026-06-15)
+
+
+### Bug Fixes
+
+* report pod-metrics availability state in snapshot ([#109](https://github.com/thesentinella/hub-kubernetes-agent/issues/109)) ([fa9a574](https://github.com/thesentinella/hub-kubernetes-agent/commit/fa9a5748bba878f8657cc22a184f93fbf4d6a4ac))
+
 ## [0.28.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.27.0...v0.28.0) (2026-06-11)
 
 
