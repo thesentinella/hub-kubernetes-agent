@@ -376,12 +376,81 @@ Compatibility note:
 
 `WorkloadMonitoringSignals` fields:
 
-- `workloads`: array of `WorkloadRef` (deployments, statefulsets, daemonsets merged) filtered to the allowlist.
-- `pods`: array of `PodInfo` filtered to the allowlist.
-- `services`: array of `ServiceInfo` filtered to the allowlist.
-- `ingresses`: array of `IngressInfo` filtered to the allowlist.
-- `events`: array of `EventInfo` filtered to the allowlist.
-- `dependencies`: optional `DependencyInventory`. Present only when `COLLECT_DEPENDENCIES_TETRAGON=true`; edges are filtered to those touching the allowlist on at least one side.
+- `workloads`: array of `WorkloadRef` (deployments, statefulsets, daemonsets merged) filtered to the allowlist. Omitted when empty.
+- `pods`: array of `PodInfo` filtered to the allowlist. Omitted when empty.
+- `services`: array of `ServiceInfo` filtered to the allowlist. Omitted when empty.
+- `ingresses`: array of `IngressInfo` filtered to the allowlist. Omitted when empty.
+- `events`: array of `EventInfo` filtered to the allowlist. Omitted when empty.
+- `dependencies`: optional `DependencyInventory`. Omitted when dependency collection is disabled or when the filtered inventory is empty.
+
+Example payload:
+
+```json
+{
+  "plugins": {
+    "workload_monitoring": {
+      "enabled": true,
+      "namespaces": ["customer-app", "customer-db"],
+      "technology_targets": ["angular", "spring_boot", "oracle_database"],
+      "schema_version": 1,
+      "generated_at_ms": 1748523600000,
+      "signals": {
+        "workloads": [
+          {
+            "namespace": "customer-app",
+            "name": "api",
+            "replicas_desired": 3,
+            "replicas_ready": 2
+          }
+        ],
+        "pods": [
+          {
+            "namespace": "customer-app",
+            "name": "api-1",
+            "phase": "Running",
+            "containers": [
+              {
+                "name": "api",
+                "image": "nginx:1.27",
+                "technology": {
+                  "product": "nginx",
+                  "subtype": "angular",
+                  "source": "image"
+                },
+                "resources": {
+                  "requests_cpu": "100m",
+                  "requests_memory": "128Mi"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    }
+  }
+}
+```
+
+The example omits empty signal arrays and omits `dependencies` because the field is not serialized when dependency collection is disabled or the filtered inventory is empty.
+
+### Backend
+
+- Treat `plugins.workload_monitoring` as optional.
+- Consume the block only when `enabled = true` and `namespaces` is non-empty; otherwise the plugin block is omitted.
+- Treat `schema_version` as the wire version (`1` today), `generated_at_ms` as Unix epoch milliseconds, and `technology_targets` as the configured tech detection allowlist.
+- Treat empty signal arrays as omitted, not as `null`.
+- Treat `dependencies` as optional and omitted when dependency collection is disabled or the filtered inventory is empty.
+- Treat `Technology.subtype` as additive and optional.
+- Keep older snapshots valid when the plugin block is absent.
+
+### UI
+
+- Render the plugin panel only when `plugins.workload_monitoring` is present.
+- Show the allowlisted namespaces and enabled technology targets.
+- Handle missing signal arrays and missing dependencies as empty/disabled sections.
+- Surface `Technology.subtype` when present, but do not require it.
+- Treat missing plugin data as disabled, not as an error state.
+- Remain compatible with older snapshots that omit the plugin block entirely.
 
 `MetricsStatus` fields:
 
