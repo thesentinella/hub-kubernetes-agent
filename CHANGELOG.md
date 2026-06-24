@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.29.3](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.29.2...v0.29.3) (2026-06-24)
+
+
+### Bug Fixes
+
+* add postgres tech subtype ([#123](https://github.com/thesentinella/hub-kubernetes-agent/issues/123)) ([0aca926](https://github.com/thesentinella/hub-kubernetes-agent/commit/0aca9269ff76385e5fcf702bead2a6fee704a3ba))
+
 ## [0.29.2](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.29.1...v0.29.2) (2026-06-23)
 
 
