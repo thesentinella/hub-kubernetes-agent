@@ -191,6 +191,9 @@ pub struct AgentInfo {
     pub node_name: String,
     pub actions_enabled: bool,
     pub collect_dependencies_tetragon: bool,
+    pub workload_monitoring_enabled: bool,
+    pub workload_monitoring_namespaces: Vec<String>,
+    pub workload_monitoring_targets: Vec<String>,
 }
 
 #[derive(Serialize, Debug, Default)]
@@ -842,10 +845,16 @@ mod tests {
             node_name: "node-1".into(),
             actions_enabled: false,
             collect_dependencies_tetragon: true,
+            workload_monitoring_enabled: true,
+            workload_monitoring_namespaces: vec!["causas-judiciales".into()],
+            workload_monitoring_targets: vec!["spring_boot".into()],
         };
 
         let value = serde_json::to_value(&agent).unwrap();
         assert_eq!(value["collect_dependencies_tetragon"], true);
+        assert_eq!(value["workload_monitoring_enabled"], true);
+        assert_eq!(value["workload_monitoring_namespaces"][0], "causas-judiciales");
+        assert_eq!(value["workload_monitoring_targets"][0], "spring_boot");
     }
 
     #[test]
