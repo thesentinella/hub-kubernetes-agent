@@ -17,18 +17,21 @@ use k8s_openapi::api::networking::v1::{Ingress, NetworkPolicy};
 use k8s_openapi::api::rbac::v1::ClusterRoleBinding;
 use k8s_openapi::api::storage::v1::StorageClass;
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
-use kube::api::{ApiResource, DynamicObject, ListParams};
+use kube::api::{ApiResource, DynamicObject, ListParams, LogParams};
 use kube::core::GroupVersionKind;
 use kube::{Api, Client, Error as KubeError};
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
+use tokio::task::JoinSet;
 use tracing::warn;
 
 const AGENT_CONFIGMAP_NAME: &str = "sentinella-hub-k8s-agent-config";
 const PSA_ENFORCE_LABEL: &str = "pod-security.kubernetes.io/enforce";
 const PSA_AUDIT_LABEL: &str = "pod-security.kubernetes.io/audit";
 const PSA_WARN_LABEL: &str = "pod-security.kubernetes.io/warn";
+const WORKLOAD_MONITORING_LOG_TAIL_LINES: i64 = 200;
+const WORKLOAD_MONITORING_LOG_LIMIT_BYTES: i64 = 65_536;
 
 #[derive(Default)]
 struct PodUsageTotals {
@@ -249,6 +252,141 @@ pub async fn collect(
         metrics_status,
         snapshot_api_status,
     ))
+}
+
+pub async fn collect_workload_monitoring_logs(
+    client: &Client,
+    cfg: &config::Config,
+    pods: &[PodInfo],
+) -> WorkloadMonitoringLogs {
+    if !cfg.workload_monitoring_enabled || cfg.workload_monitoring_namespaces.is_empty() {
+        return WorkloadMonitoringLogs::default();
+    }
+
+    let allow = cfg.workload_monitoring_namespaces.clone();
+    let mut tasks = JoinSet::new();
+
+    for (index, pod) in pods.iter().enumerate() {
+        if !allow.iter().any(|namespace| namespace == &pod.namespace) {
+            continue;
+        }
+        if pod.containers.is_empty() {
+            continue;
+        }
+
+        let client = client.clone();
+        let namespace = pod.namespace.clone();
+        let pod_name = pod.name.clone();
+        let containers = pod
+            .containers
+            .iter()
+            .map(|container| container.name.clone())
+            .collect::<Vec<_>>();
+
+        tasks.spawn(async move {
+            let logs =
+                collect_workload_monitoring_pod_logs(client, namespace, pod_name, containers).await;
+            (index, logs)
+        });
+    }
+
+    let mut pod_logs = Vec::new();
+    while let Some(joined) = tasks.join_next().await {
+        match joined {
+            Ok((index, Some(logs))) => pod_logs.push((index, logs)),
+            Ok((_, None)) => {}
+            Err(err) => warn!(error = %err, "workload monitoring log task failed"),
+        }
+    }
+
+    pod_logs.sort_by_key(|(index, _)| *index);
+
+    WorkloadMonitoringLogs {
+        pods: pod_logs.into_iter().map(|(_, logs)| logs).collect(),
+    }
+}
+
+async fn collect_workload_monitoring_pod_logs(
+    client: Client,
+    namespace: String,
+    pod_name: String,
+    containers: Vec<String>,
+) -> Option<WorkloadMonitoringPodLogs> {
+    let mut container_logs = Vec::new();
+
+    for container in containers {
+        if let Some(logs) = collect_workload_monitoring_container_logs(
+            client.clone(),
+            &namespace,
+            &pod_name,
+            &container,
+        )
+        .await
+        {
+            container_logs.push(logs);
+        }
+    }
+
+    if container_logs.is_empty() {
+        return None;
+    }
+
+    Some(WorkloadMonitoringPodLogs {
+        namespace,
+        name: pod_name,
+        containers: container_logs,
+    })
+}
+
+async fn collect_workload_monitoring_container_logs(
+    client: Client,
+    namespace: &str,
+    pod_name: &str,
+    container_name: &str,
+) -> Option<WorkloadMonitoringContainerLogs> {
+    let pods: Api<Pod> = Api::namespaced(client, namespace);
+    let params = LogParams {
+        container: Some(container_name.to_string()),
+        follow: false,
+        limit_bytes: Some(WORKLOAD_MONITORING_LOG_LIMIT_BYTES),
+        pretty: false,
+        previous: false,
+        since_seconds: None,
+        since_time: None,
+        tail_lines: Some(WORKLOAD_MONITORING_LOG_TAIL_LINES),
+        timestamps: false,
+    };
+
+    match pods.logs(pod_name, &params).await {
+        Ok(output) => {
+            let (lines, truncated) = split_log_output(&output);
+            Some(WorkloadMonitoringContainerLogs {
+                name: container_name.to_string(),
+                truncated,
+                lines,
+            })
+        }
+        Err(err) => {
+            warn!(
+                namespace = %namespace,
+                pod = %pod_name,
+                container = %container_name,
+                error = %err,
+                "failed to read workload monitoring logs"
+            );
+            None
+        }
+    }
+}
+
+fn split_log_output(output: &str) -> (Vec<String>, bool) {
+    let lines = output
+        .lines()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>();
+    let truncated = output.len() >= WORKLOAD_MONITORING_LOG_LIMIT_BYTES as usize
+        || lines.len() >= WORKLOAD_MONITORING_LOG_TAIL_LINES as usize;
+    (lines, truncated)
 }
 
 async fn kube_system_uid(client: &Client) -> Option<String> {
@@ -2140,6 +2278,35 @@ fn truncate_chars(input: &str, max_chars: usize) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn split_log_output_keeps_short_logs_intact() {
+        let (lines, truncated) = split_log_output("alpha\nbeta\ngamma");
+
+        assert_eq!(lines, vec!["alpha", "beta", "gamma"]);
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn split_log_output_marks_truncated_when_line_cap_is_hit() {
+        let output = (0..WORKLOAD_MONITORING_LOG_TAIL_LINES)
+            .map(|n| format!("line-{n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let (_, truncated) = split_log_output(&output);
+
+        assert!(truncated);
+    }
+
+    #[test]
+    fn split_log_output_marks_truncated_when_byte_cap_is_hit() {
+        let output = "x".repeat(WORKLOAD_MONITORING_LOG_LIMIT_BYTES as usize);
+
+        let (_, truncated) = split_log_output(&output);
+
+        assert!(truncated);
+    }
 
     #[test]
     fn truncate_chars_respects_max_length() {

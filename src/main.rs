@@ -177,6 +177,8 @@ async fn build_and_send(cfg: &Config, kube: &KubeClient, hub: &HubClient) -> Res
     warn_metrics_status_change(&metrics);
     warn_snapshot_api_status_change(&snapshot_api);
     configuration.agent_runtime_env = config::agent_runtime_env(cfg);
+    let workload_monitoring_logs =
+        collector::collect_workload_monitoring_logs(kube, cfg, &pods).await;
     let plugins = plugins::build_workload_monitoring(
         cfg,
         &workloads,
@@ -184,6 +186,7 @@ async fn build_and_send(cfg: &Config, kube: &KubeClient, hub: &HubClient) -> Res
         &network,
         &events,
         &dependencies,
+        workload_monitoring_logs,
     )
     .map(|wm| Plugins {
         workload_monitoring: Some(wm),
