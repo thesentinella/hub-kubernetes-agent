@@ -96,6 +96,7 @@ pub struct WorkloadMonitoringPlugin {
     pub schema_version: u32,
     pub generated_at_ms: u128,
     pub signals: WorkloadMonitoringSignals,
+    pub logs: WorkloadMonitoringLogs,
 }
 
 /// Filtered, namespace-scoped projection of the cluster-wide inventory.
@@ -114,6 +115,26 @@ pub struct WorkloadMonitoringSignals {
     pub events: Vec<EventInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dependencies: Option<DependencyInventory>,
+}
+
+/// Current pod/container log tails for the workload monitoring allowlist.
+#[derive(Serialize, Debug, Default)]
+pub struct WorkloadMonitoringLogs {
+    pub pods: Vec<WorkloadMonitoringPodLogs>,
+}
+
+#[derive(Serialize, Debug, Clone)]
+pub struct WorkloadMonitoringPodLogs {
+    pub namespace: String,
+    pub name: String,
+    pub containers: Vec<WorkloadMonitoringContainerLogs>,
+}
+
+#[derive(Serialize, Debug, Clone)]
+pub struct WorkloadMonitoringContainerLogs {
+    pub name: String,
+    pub truncated: bool,
+    pub lines: Vec<String>,
 }
 
 #[derive(Deserialize, Debug, Default)]
@@ -698,7 +719,7 @@ fn now_ms() -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::Value;
+    use serde_json::{Value, json};
 
     #[test]
     fn command_result_simple_fields() {
@@ -825,6 +846,30 @@ mod tests {
 
         let value = serde_json::to_value(&agent).unwrap();
         assert_eq!(value["collect_dependencies_tetragon"], true);
+    }
+
+    #[test]
+    fn workload_monitoring_logs_serializes_lines_and_truncation() {
+        let logs = WorkloadMonitoringLogs {
+            pods: vec![WorkloadMonitoringPodLogs {
+                namespace: "customer-app".into(),
+                name: "api-1".into(),
+                containers: vec![WorkloadMonitoringContainerLogs {
+                    name: "api".into(),
+                    truncated: true,
+                    lines: vec!["hello".into(), "world".into()],
+                }],
+            }],
+        };
+
+        let value = serde_json::to_value(&logs).unwrap();
+        assert_eq!(value["pods"][0]["namespace"], "customer-app");
+        assert_eq!(value["pods"][0]["containers"][0]["name"], "api");
+        assert_eq!(value["pods"][0]["containers"][0]["truncated"], true);
+        assert_eq!(
+            value["pods"][0]["containers"][0]["lines"],
+            json!(["hello", "world"])
+        );
     }
 
     #[test]

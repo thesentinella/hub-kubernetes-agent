@@ -876,6 +876,16 @@ fn quantity_map_to_value(resources: &BTreeMap<String, Quantity>) -> Value {
         .into()
 }
 
+fn parse_spec<T: serde::de::DeserializeOwned>(cmd: &Command) -> Result<T, String> {
+    serde_json::from_value(cmd.spec.clone())
+        .map_err(|e| format!("invalid spec for kind {}: {}", cmd.kind, e))
+}
+
+fn spec_error(cmd: &Command, message: String) -> CommandResult {
+    warn!(command_id = %cmd.id, kind = %cmd.kind, "{}", message);
+    CommandResult::simple(cmd.id.clone(), "error", Some(message))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1202,14 +1212,4 @@ mod tests {
         .unwrap_err();
         assert_eq!(err, "update_agent image has invalid sha256 digest format");
     }
-}
-
-fn parse_spec<T: serde::de::DeserializeOwned>(cmd: &Command) -> Result<T, String> {
-    serde_json::from_value(cmd.spec.clone())
-        .map_err(|e| format!("invalid spec for kind {}: {}", cmd.kind, e))
-}
-
-fn spec_error(cmd: &Command, message: String) -> CommandResult {
-    warn!(command_id = %cmd.id, kind = %cmd.kind, "{}", message);
-    CommandResult::simple(cmd.id.clone(), "error", Some(message))
 }
