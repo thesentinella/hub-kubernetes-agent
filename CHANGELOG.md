@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.30.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.29.3...v0.30.0) (2026-06-24)
+
+
+### Features
+
+* add workload monitoring log tails ([#125](https://github.com/thesentinella/hub-kubernetes-agent/issues/125)) ([adb18f6](https://github.com/thesentinella/hub-kubernetes-agent/commit/adb18f64683e6d9082d27a7bb08d8272fcbe1be4))
+
 ## [0.29.3](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.29.2...v0.29.3) (2026-06-24)
 
 
