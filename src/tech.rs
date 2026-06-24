@@ -38,6 +38,11 @@ pub fn detect(image: &str) -> Technology {
     // Match against the rules table.
     for rule in RULES {
         if rule.matches(&name) {
+            let subtype = if rule.product == "postgres" {
+                Some("postgresql".to_string())
+            } else {
+                None
+            };
             return Technology {
                 vendor: Some(rule.vendor.to_string()),
                 product: Some(rule.product.to_string()),
@@ -48,7 +53,7 @@ pub fn detect(image: &str) -> Technology {
                     Some(rule.language.to_string())
                 },
                 source: "image",
-                subtype: None,
+                subtype,
             };
         }
     }
@@ -820,6 +825,11 @@ pub fn detect_from_process(command: &[String], args: &[String]) -> Option<Techno
         for rule in PROCESS_RULES {
             if *exe == rule.executable {
                 let version = extract_process_version(args);
+                let subtype = if rule.product == "postgres" {
+                    Some("postgresql".to_string())
+                } else {
+                    None
+                };
                 return Some(Technology {
                     vendor: if rule.vendor.is_empty() {
                         None
@@ -834,7 +844,7 @@ pub fn detect_from_process(command: &[String], args: &[String]) -> Option<Techno
                         Some(rule.language.to_string())
                     },
                     source: "process",
-                    subtype: None,
+                    subtype,
                 });
             }
         }
@@ -909,6 +919,16 @@ pub fn detect_from_labels(
             continue;
         }
         let v = value.to_lowercase();
+        if v == "postgres" || v == "postgresql" {
+            return Some(Technology {
+                vendor: Some("postgresql".to_string()),
+                product: Some("postgres".to_string()),
+                version: None,
+                language: Some("C".to_string()),
+                source: "labels",
+                subtype: Some("postgresql".to_string()),
+            });
+        }
         if v == "angular" {
             return Some(Technology {
                 vendor: None,
@@ -985,6 +1005,7 @@ mod tests {
         assert_eq!(t.product.as_deref(), Some("postgres"));
         assert_eq!(t.version.as_deref(), Some("15.4"));
         assert_eq!(t.language.as_deref(), Some("C"));
+        assert_eq!(t.subtype.as_deref(), Some("postgresql"));
     }
 
     #[test]
@@ -1154,6 +1175,14 @@ mod tests {
     }
 
     #[test]
+    fn detect_from_process_postgres() {
+        let t = detect_from_process(&["postgres".to_string()], &[]).unwrap();
+        assert_eq!(t.product.as_deref(), Some("postgres"));
+        assert_eq!(t.subtype.as_deref(), Some("postgresql"));
+        assert_eq!(t.source, "process");
+    }
+
+    #[test]
     fn detect_from_process_nginx() {
         let t = detect_from_process(
             &["nginx".to_string()],
@@ -1293,6 +1322,23 @@ mod tests {
         let labels = [("app.kubernetes.io/component", "oracle")];
         let t = detect_from_labels(&labels, &[]).unwrap();
         assert_eq!(t.subtype.as_deref(), Some("oracle_database"));
+    }
+
+    #[test]
+    fn detect_from_labels_postgres_component() {
+        let labels = [("app.kubernetes.io/component", "postgres")];
+        let t = detect_from_labels(&labels, &[]).unwrap();
+        assert_eq!(t.product.as_deref(), Some("postgres"));
+        assert_eq!(t.subtype.as_deref(), Some("postgresql"));
+        assert_eq!(t.source, "labels");
+    }
+
+    #[test]
+    fn detect_from_labels_postgresql_component() {
+        let labels = [("app.kubernetes.io/component", "postgresql")];
+        let t = detect_from_labels(&labels, &[]).unwrap();
+        assert_eq!(t.product.as_deref(), Some("postgres"));
+        assert_eq!(t.subtype.as_deref(), Some("postgresql"));
     }
 
     #[test]
