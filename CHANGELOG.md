@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.31.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.30.0...v0.31.0) (2026-06-25)
+
+
+### Features
+
+* add openshift version payload ([#127](https://github.com/thesentinella/hub-kubernetes-agent/issues/127)) ([f08c227](https://github.com/thesentinella/hub-kubernetes-agent/commit/f08c227fdf8ea8a7d8e206717b55b699899af68d))
+
 ## [0.30.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.29.3...v0.30.0) (2026-06-24)
 
 
