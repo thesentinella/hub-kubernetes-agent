@@ -5,7 +5,8 @@
 //! enabled with a non-empty namespace allowlist, the snapshot gains a
 //! `plugins.workload_monitoring` block that reuses the existing
 //! `WorkloadRef`, `PodInfo`, `ServiceInfo`, `IngressInfo`, `EventInfo`, and
-//! `DependencyInventory` DTOs filtered by namespace.
+//! `DependencyInventory` DTOs filtered by namespace, plus current pod log
+//! tails for the same allowlist.
 //!
 //! See `docs/adr/0001-workload-monitoring-plugin.md` for the full contract.
 
@@ -26,6 +27,7 @@ pub fn build_workload_monitoring(
     network: &NetworkInventory,
     events: &[EventInfo],
     dependencies: &DependencyInventory,
+    logs: WorkloadMonitoringLogs,
 ) -> Option<WorkloadMonitoringPlugin> {
     if !cfg.workload_monitoring_enabled {
         return None;
@@ -115,6 +117,7 @@ pub fn build_workload_monitoring(
             events: filtered_events,
             dependencies: filtered_dependencies,
         },
+        logs,
     })
 }
 
@@ -217,6 +220,7 @@ mod tests {
             &NetworkInventory::default(),
             &[],
             &DependencyInventory::default(),
+            WorkloadMonitoringLogs::default(),
         );
         assert!(result.is_none());
     }
@@ -231,6 +235,7 @@ mod tests {
             &NetworkInventory::default(),
             &[],
             &DependencyInventory::default(),
+            WorkloadMonitoringLogs::default(),
         );
         assert!(result.is_none());
     }
@@ -252,12 +257,43 @@ mod tests {
             &NetworkInventory::default(),
             &events,
             &DependencyInventory::default(),
+            WorkloadMonitoringLogs::default(),
         )
         .unwrap();
         assert_eq!(result.namespaces, vec!["customer-app"]);
         assert_eq!(result.signals.workloads.len(), 2);
         assert_eq!(result.signals.pods.len(), 1);
         assert_eq!(result.signals.pods[0].name, "api-1");
+    }
+
+    #[test]
+    fn build_preserves_workload_monitoring_logs() {
+        let cfg = base_config(true, vec!["customer-app".into()]);
+        let logs = WorkloadMonitoringLogs {
+            pods: vec![WorkloadMonitoringPodLogs {
+                namespace: "customer-app".into(),
+                name: "api-1".into(),
+                containers: vec![WorkloadMonitoringContainerLogs {
+                    name: "api".into(),
+                    truncated: false,
+                    lines: vec!["ready".into()],
+                }],
+            }],
+        };
+
+        let result = build_workload_monitoring(
+            &cfg,
+            &Workloads::default(),
+            &[],
+            &NetworkInventory::default(),
+            &[],
+            &DependencyInventory::default(),
+            logs,
+        )
+        .unwrap();
+
+        assert_eq!(result.logs.pods.len(), 1);
+        assert_eq!(result.logs.pods[0].containers[0].lines, vec!["ready"]);
     }
 
     #[test]
@@ -270,6 +306,7 @@ mod tests {
             &NetworkInventory::default(),
             &[],
             &DependencyInventory::default(),
+            WorkloadMonitoringLogs::default(),
         )
         .unwrap();
         assert!(result.signals.dependencies.is_none());
@@ -318,6 +355,7 @@ mod tests {
             &NetworkInventory::default(),
             &[],
             &deps,
+            WorkloadMonitoringLogs::default(),
         )
         .unwrap();
         let signals_deps = result.signals.dependencies.unwrap();

@@ -374,6 +374,7 @@ Compatibility note:
 - `schema_version`: integer, currently `1`.
 - `generated_at_ms`: Unix epoch milliseconds.
 - `signals`: `WorkloadMonitoringSignals`.
+- `logs`: `WorkloadMonitoringLogs` with current log tails for pods in the allowlist.
 
 `WorkloadMonitoringSignals` fields:
 
@@ -383,6 +384,22 @@ Compatibility note:
 - `ingresses`: array of `IngressInfo` filtered to the allowlist. Omitted when empty.
 - `events`: array of `EventInfo` filtered to the allowlist. Omitted when empty.
 - `dependencies`: optional `DependencyInventory`. Omitted when dependency collection is disabled or when the filtered inventory is empty.
+
+`WorkloadMonitoringLogs` fields:
+
+- `pods`: array of `WorkloadMonitoringPodLogs`; may be empty when no pod logs could be read.
+
+`WorkloadMonitoringPodLogs` fields:
+
+- `namespace`: string.
+- `name`: string.
+- `containers`: array of `WorkloadMonitoringContainerLogs`.
+
+`WorkloadMonitoringContainerLogs` fields:
+
+- `name`: string.
+- `truncated`: boolean; `true` when the configured tail limit was hit.
+- `lines`: array of strings; the current log tail, one line per entry.
 
 Example payload:
 
@@ -426,13 +443,28 @@ Example payload:
             ]
           }
         ]
+      },
+      "logs": {
+        "pods": [
+          {
+            "namespace": "customer-app",
+            "name": "api-1",
+            "containers": [
+              {
+                "name": "api",
+                "truncated": false,
+                "lines": ["Starting server...", "Ready"]
+              }
+            ]
+          }
+        ]
       }
     }
   }
 }
 ```
 
-The example omits empty signal arrays and omits `dependencies` because the field is not serialized when dependency collection is disabled or the filtered inventory is empty.
+The example omits empty signal arrays and omits `dependencies` because the field is not serialized when dependency collection is disabled or the filtered inventory is empty. `logs.pods` may be empty when no pod logs could be read.
 
 ### Backend
 
@@ -443,12 +475,15 @@ The example omits empty signal arrays and omits `dependencies` because the field
 - Treat `dependencies` as optional and omitted when dependency collection is disabled or the filtered inventory is empty.
 - Treat `Technology.subtype` as additive and optional.
 - Keep older snapshots valid when the plugin block is absent.
+- Treat `logs` as a current-log tail projection, not a long-term archive.
+- Preserve `lines` order as returned by Kubernetes; set `truncated=true` when the configured tail limit is hit.
 
 ### UI
 
 - Render the plugin panel only when `plugins.workload_monitoring` is present.
 - Show the allowlisted namespaces and enabled technology targets.
 - Handle missing signal arrays and missing dependencies as empty/disabled sections.
+- Render log tails per pod/container, and surface `truncated` clearly when the tail was cut.
 - Surface `Technology.subtype` when present, but do not require it.
 - Treat missing plugin data as disabled, not as an error state.
 - Remain compatible with older snapshots that omit the plugin block entirely.

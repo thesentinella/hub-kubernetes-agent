@@ -305,11 +305,28 @@ When enabled with a non-empty allowlist, the snapshot gains:
         "ingresses": [ /* IngressInfo, filtered */ ],
         "events":    [ /* EventInfo, filtered */ ],
         "dependencies": { /* DependencyInventory or null when tetragon off */ }
+      },
+      "logs": {
+        "pods": [
+          {
+            "namespace": "customer-app",
+            "name": "api-1",
+            "containers": [
+              {
+                "name": "api",
+                "truncated": false,
+                "lines": ["Starting server...", "Ready"]
+              }
+            ]
+          }
+        ]
       }
     }
   }
 }
 ```
+
+`plugins.workload_monitoring.logs` is the current log-tail projection for pods in the allowlist. It reads current logs only (no `previous` logs), one container at a time, and marks a container as `truncated=true` when the configured tail limit is hit.
 
 Detection rules (in order, first match wins):
 
