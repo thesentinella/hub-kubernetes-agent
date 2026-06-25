@@ -7,7 +7,7 @@ Inventory collector and (future) action executor for Kubernetes and OpenShift cl
 - Connects to the Kubernetes API using its `ServiceAccount` (cluster-wide read-only RBAC).
 - Runs as a **DaemonSet** with **leader election** via a `coordination.k8s.io/Lease`. Only the leader collects and ships inventory; non-leaders idle on that loop. All pods poll for commands.
 - Every minute the leader collects and sends to the Hub an inventory **snapshot**:
-  - **Cluster**: Kubernetes version, detected platform (vanilla / openshift / eks / gke / aks), nodes with capacity/allocatable, kubelet version, container runtime, OS image, roles.
+  - **Cluster**: Kubernetes version, detected platform (vanilla / openshift / eks / gke / aks), OpenShift version when present, nodes with capacity/allocatable, kubelet version, container runtime, OS image, roles.
   - **Namespaces** with labels and phase.
   - **Workloads**: deployments, statefulsets, daemonsets (name, namespace, desired/ready replicas).
   - **Pods**: age in seconds (`age_seconds`), actual pod `usage_cpu` / `usage_memory` when metrics-server is available, and each container with image, **detected technology** (vendor/product/version inferred from the image, or from `command`/`args` when `TECH_DETECT_PROCESS=true`), `requests` and `limits` (CPU and memory).

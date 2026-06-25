@@ -44,6 +44,10 @@ rules:
     resources:
       - clusterrolebindings
     verbs: ["get", "list", "watch"]
+  - apiGroups: ["config.openshift.io"]
+    resources:
+      - clusterversions
+    verbs: ["get", "list", "watch"]
   - apiGroups: ["apps"]
     resources:
       - deployments

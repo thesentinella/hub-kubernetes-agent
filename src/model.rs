@@ -176,6 +176,8 @@ pub struct AgentInfo {
 pub struct ClusterInfo {
     pub kubernetes_version: Option<String>,
     pub platform: Option<String>, // "openshift", "vanilla", "eks", ... if detectable
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub openshift_version: Option<String>,
     pub node_count: usize,
     pub nodes: Vec<NodeInfo>,
 }
@@ -825,6 +827,21 @@ mod tests {
 
         let value = serde_json::to_value(&agent).unwrap();
         assert_eq!(value["collect_dependencies_tetragon"], true);
+    }
+
+    #[test]
+    fn cluster_info_serializes_openshift_version() {
+        let cluster = ClusterInfo {
+            kubernetes_version: Some("v1.31.0".into()),
+            platform: Some("openshift".into()),
+            openshift_version: Some("4.16.18".into()),
+            node_count: 2,
+            nodes: vec![],
+        };
+
+        let value = serde_json::to_value(&cluster).unwrap();
+        assert_eq!(value["platform"], "openshift");
+        assert_eq!(value["openshift_version"], "4.16.18");
     }
 
     #[test]
