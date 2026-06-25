@@ -247,6 +247,7 @@ All operational maturity detection paths are fail-soft: snapshots still succeed 
 
 - `kubernetes_version`: optional string from apiserver version.
 - `platform`: optional string; detected values include `eks`, `gke`, `aks`, `openshift`, and `vanilla`.
+- `openshift_version`: optional string when `platform = "openshift"`.
 - `node_count`: number.
 - `nodes`: array of `NodeInfo`.
 

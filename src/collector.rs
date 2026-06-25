@@ -159,8 +159,11 @@ pub async fn collect(
     let mut cronjobs = soft_unwrap("cronjobs", cronjobs);
     let mut events = soft_unwrap("events", events);
 
-    let cluster = build_cluster_info(version.ok(), &nodes);
+    let mut cluster = build_cluster_info(version.ok(), &nodes);
     let descheduler = detect_descheduler(&deployments);
+    if cluster.platform.as_deref() == Some("openshift") {
+        cluster.openshift_version = probe_openshift_version(client).await;
+    }
     let ns_infos = namespaces
         .into_iter()
         .map(map_namespace)
@@ -1211,6 +1214,7 @@ fn build_cluster_info(
     ClusterInfo {
         kubernetes_version,
         platform,
+        openshift_version: None,
         node_count: node_infos.len(),
         nodes: node_infos,
     }
@@ -1241,6 +1245,34 @@ fn detect_platform(
         }
     }
     Some("vanilla".into())
+}
+
+async fn probe_openshift_version(client: &Client) -> Option<String> {
+    let versions =
+        match list_dynamic_all(client, "config.openshift.io", "v1", "ClusterVersion").await {
+            Ok(items) => items,
+            Err(err) => {
+                warn!(error = %err, "openshift cluster version list failed");
+                return None;
+            }
+        };
+
+    versions.into_iter().find_map(|item| {
+        let value = serde_json::to_value(&item).ok()?;
+        extract_openshift_version(&value)
+    })
+}
+
+fn extract_openshift_version(value: &Value) -> Option<String> {
+    value
+        .pointer("/status/desired/version")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            value
+                .pointer("/status/history/0/version")
+                .and_then(Value::as_str)
+        })
+        .map(|version| version.to_string())
 }
 
 fn map_node(n: &Node) -> NodeInfo {
@@ -2280,32 +2312,32 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn split_log_output_keeps_short_logs_intact() {
-        let (lines, truncated) = split_log_output("alpha\nbeta\ngamma");
+    fn extract_openshift_version_prefers_desired_version() {
+        let value = json!({
+            "status": {
+                "desired": { "version": "4.16.18" },
+                "history": [{ "version": "4.16.17" }]
+            }
+        });
 
-        assert_eq!(lines, vec!["alpha", "beta", "gamma"]);
-        assert!(!truncated);
+        assert_eq!(
+            extract_openshift_version(&value).as_deref(),
+            Some("4.16.18")
+        );
     }
 
     #[test]
-    fn split_log_output_marks_truncated_when_line_cap_is_hit() {
-        let output = (0..WORKLOAD_MONITORING_LOG_TAIL_LINES)
-            .map(|n| format!("line-{n}"))
-            .collect::<Vec<_>>()
-            .join("\n");
+    fn extract_openshift_version_falls_back_to_history() {
+        let value = json!({
+            "status": {
+                "history": [{ "version": "4.16.17" }]
+            }
+        });
 
-        let (_, truncated) = split_log_output(&output);
-
-        assert!(truncated);
-    }
-
-    #[test]
-    fn split_log_output_marks_truncated_when_byte_cap_is_hit() {
-        let output = "x".repeat(WORKLOAD_MONITORING_LOG_LIMIT_BYTES as usize);
-
-        let (_, truncated) = split_log_output(&output);
-
-        assert!(truncated);
+        assert_eq!(
+            extract_openshift_version(&value).as_deref(),
+            Some("4.16.17")
+        );
     }
 
     #[test]

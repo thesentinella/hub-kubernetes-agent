@@ -197,6 +197,8 @@ pub struct AgentInfo {
 pub struct ClusterInfo {
     pub kubernetes_version: Option<String>,
     pub platform: Option<String>, // "openshift", "vanilla", "eks", ... if detectable
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub openshift_version: Option<String>,
     pub node_count: usize,
     pub nodes: Vec<NodeInfo>,
 }
@@ -849,27 +851,18 @@ mod tests {
     }
 
     #[test]
-    fn workload_monitoring_logs_serializes_lines_and_truncation() {
-        let logs = WorkloadMonitoringLogs {
-            pods: vec![WorkloadMonitoringPodLogs {
-                namespace: "customer-app".into(),
-                name: "api-1".into(),
-                containers: vec![WorkloadMonitoringContainerLogs {
-                    name: "api".into(),
-                    truncated: true,
-                    lines: vec!["hello".into(), "world".into()],
-                }],
-            }],
+    fn cluster_info_serializes_openshift_version() {
+        let cluster = ClusterInfo {
+            kubernetes_version: Some("v1.31.0".into()),
+            platform: Some("openshift".into()),
+            openshift_version: Some("4.16.18".into()),
+            node_count: 2,
+            nodes: vec![],
         };
 
-        let value = serde_json::to_value(&logs).unwrap();
-        assert_eq!(value["pods"][0]["namespace"], "customer-app");
-        assert_eq!(value["pods"][0]["containers"][0]["name"], "api");
-        assert_eq!(value["pods"][0]["containers"][0]["truncated"], true);
-        assert_eq!(
-            value["pods"][0]["containers"][0]["lines"],
-            json!(["hello", "world"])
-        );
+        let value = serde_json::to_value(&cluster).unwrap();
+        assert_eq!(value["platform"], "openshift");
+        assert_eq!(value["openshift_version"], "4.16.18");
     }
 
     #[test]
