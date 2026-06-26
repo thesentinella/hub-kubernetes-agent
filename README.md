@@ -275,7 +275,7 @@ On successful inventory ingest, when the Hub responds with `{"already_existed":t
 
 `InventorySnapshot.operational_maturity` includes descheduler detection (via well-known deployment names), VPA object count and update modes, and all CronJob summaries. All are fail-soft; snapshot still succeeds when those APIs are unavailable.
 
-`InventorySnapshot.plugins` is an optional envelope of plugin blocks. The field is omitted from the JSON when no plugin is enabled. The first supported plugin is `workload_monitoring` (see "Plugins" below); its data contract is defined in `docs/adr/0001-workload-monitoring-plugin.md`.
+`InventorySnapshot.plugins` is an optional envelope of plugin blocks. The field is omitted from the JSON when no plugin is enabled. The supported plugin blocks are `workload_monitoring` and `postgresql_monitoring` (see "Plugins" below); the workload data contract is defined in `docs/adr/0001-workload-monitoring-plugin.md`.
 
 ### Plugins
 
@@ -286,6 +286,8 @@ The agent ships a plugin-style capability for namespace-scoped workload monitori
 | `WORKLOAD_MONITORING_ENABLED` | `false` | Master switch. When `false`, the plugin block is omitted. |
 | `WORKLOAD_MONITORING_NAMESPACES` | `[]` | YAML list allowlist. Empty disables the plugin regardless of `ENABLED`. |
 | `WORKLOAD_MONITORING_TARGETS` | `angular,spring_boot,oracle_database` | Tech detection targets enabled for the plugin. |
+| `POSTGRESQL_MONITORING_ENABLED` | `false` | Master switch. When `false`, the plugin block is omitted. |
+| `POSTGRESQL_MONITORING_NAMESPACES` | `[]` | YAML list allowlist. Empty disables the plugin regardless of `ENABLED`. |
 
 When enabled with a non-empty allowlist, the snapshot gains:
 
@@ -327,6 +329,45 @@ When enabled with a non-empty allowlist, the snapshot gains:
 ```
 
 `plugins.workload_monitoring.logs` is the current log-tail projection for pods in the allowlist. It reads current logs only (no `previous` logs), one container at a time, and marks a container as `truncated=true` when the configured tail limit is hit.
+
+### PostgreSQL monitoring
+
+The PostgreSQL plugin is opt-in, namespace-scoped, and discovery-only in v1. It does not connect to the database yet; it derives a synthesized health status from Kubernetes evidence in the configured namespaces.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `POSTGRESQL_MONITORING_ENABLED` | `false` | Master switch. When `false`, the plugin block is omitted. |
+| `POSTGRESQL_MONITORING_NAMESPACES` | `[]` | YAML list allowlist. Empty disables the plugin regardless of `ENABLED`. |
+
+When enabled with a non-empty allowlist, the snapshot gains:
+
+```json
+{
+  "plugins": {
+    "postgresql_monitoring": {
+      "enabled": true,
+      "namespaces": ["customer-db"],
+      "schema_version": 1,
+      "generated_at_ms": 1748523600000,
+      "status": "healthy",
+      "summary": "PostgreSQL workload found in 1 namespace(s) with 1 running pod(s)",
+      "detail": [
+        { "title": "namespaces", "value": "customer-db" },
+        { "title": "matched workloads", "value": "1" }
+      ],
+      "evidence": [
+        { "title": "workload", "value": "customer-db/postgresql" },
+        { "title": "pod", "value": "customer-db/postgresql-0 phase=Running image=postgres:16" }
+      ],
+      "missing_data": []
+    }
+  }
+}
+```
+
+`status` is synthesized from the available evidence: `healthy`, `warning`, `critical`, or `unknown`. `detail`, `evidence`, and `missing_data` are arrays of `{title, value}` objects.
+
+`critical` means no PostgreSQL-like workload was found in the configured namespaces. `warning` means a workload was found but one or more supporting signals are incomplete. `healthy` means the discovery signals are consistent. `unknown` is reserved for ambiguous evidence.
 
 Detection rules (in order, first match wins):
 
@@ -430,6 +471,8 @@ Recommended `HUB_URL` is `https://api.hub.sentinel.la`.
 | `WORKLOAD_MONITORING_ENABLED` | ConfigMap | `false` |
 | `WORKLOAD_MONITORING_NAMESPACES` | ConfigMap | empty YAML list (`[]`) |
 | `WORKLOAD_MONITORING_TARGETS` | ConfigMap | `angular,spring_boot,oracle_database` |
+| `POSTGRESQL_MONITORING_ENABLED` | ConfigMap | `false` |
+| `POSTGRESQL_MONITORING_NAMESPACES` | ConfigMap | empty YAML list (`[]`) |
 | `FULL_DEBUG` | ConfigMap | `false` |
 | `AGENT_HTTP_DEBUG` | ConfigMap | `false` |
 | `AGENT_HTTP_DEBUG_BODIES` | ConfigMap | `false` |

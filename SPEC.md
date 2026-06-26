@@ -365,6 +365,7 @@ Compatibility note:
 `Plugins` fields:
 
 - `workload_monitoring`: optional `WorkloadMonitoringPlugin`.
+- `postgresql_monitoring`: optional `PostgresqlMonitoringPlugin`.
 
 `WorkloadMonitoringPlugin` fields:
 
@@ -400,6 +401,20 @@ Compatibility note:
 - `name`: string.
 - `truncated`: boolean; `true` when the configured tail limit was hit.
 - `lines`: array of strings; the current log tail, one line per entry.
+
+`PostgresqlMonitoringPlugin` fields:
+
+- `enabled`: boolean; always `true` when the block is present.
+- `namespaces`: array of strings; the allowlist configured on the agent.
+- `schema_version`: integer, currently `1`.
+- `generated_at_ms`: Unix epoch milliseconds.
+- `status`: string. One of `healthy`, `warning`, `critical`, `unknown`.
+- `summary`: short human-readable status summary.
+- `detail`: array of `{title, value}` objects with structured summary fields.
+- `evidence`: array of `{title, value}` objects with the Kubernetes signals used to classify the workload.
+- `missing_data`: array of `{title, value}` objects describing signals that were unavailable or incomplete.
+
+The PostgreSQL plugin is discovery-only in v1. It does not connect to the database yet; it synthesizes status from Kubernetes evidence in the configured namespaces.
 
 Example payload:
 
@@ -478,6 +493,14 @@ The example omits empty signal arrays and omits `dependencies` because the field
 - Treat `logs` as a current-log tail projection, not a long-term archive.
 - Preserve `lines` order as returned by Kubernetes; set `truncated=true` when the configured tail limit is hit.
 
+PostgreSQL plugin backend rules:
+
+- Treat `plugins.postgresql_monitoring` as optional.
+- Consume the block only when `enabled = true` and `namespaces` is non-empty; otherwise the plugin block is omitted.
+- Treat `status` as a synthesized health signal, not a database connection state.
+- Treat `detail`, `evidence`, and `missing_data` as arrays of structured `{title, value}` objects.
+- Treat the plugin as discovery-only in v1; do not assume a live PostgreSQL connection.
+
 ### UI
 
 - Render the plugin panel only when `plugins.workload_monitoring` is present.
@@ -487,6 +510,12 @@ The example omits empty signal arrays and omits `dependencies` because the field
 - Surface `Technology.subtype` when present, but do not require it.
 - Treat missing plugin data as disabled, not as an error state.
 - Remain compatible with older snapshots that omit the plugin block entirely.
+
+- Render the PostgreSQL panel only when `plugins.postgresql_monitoring` is present.
+- Show the allowlisted namespaces, synthesized `status`, and `summary`.
+- Render structured `detail`, `evidence`, and `missing_data` entries as label/value rows.
+- Treat `critical` as no PostgreSQL workload found, `warning` as incomplete supporting signals, `healthy` as consistent discovery, and `unknown` as ambiguous evidence.
+- Remain compatible with older snapshots that omit the PostgreSQL plugin block entirely.
 
 `MetricsStatus` fields:
 

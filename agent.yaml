@@ -139,6 +139,8 @@ data:
   WORKLOAD_MONITORING_ENABLED: "false"      # opt-in; namespace-scoped plugin
   WORKLOAD_MONITORING_NAMESPACES: "[]"       # YAML list allowlist; empty disables the plugin
   WORKLOAD_MONITORING_TARGETS: "angular,spring_boot,oracle_database"
+  POSTGRESQL_MONITORING_ENABLED: "false"     # opt-in; discovery-only namespace-scoped plugin
+  POSTGRESQL_MONITORING_NAMESPACES: "[]"     # YAML list allowlist; empty disables the plugin
 ---
 apiVersion: apps/v1
 kind: DaemonSet
