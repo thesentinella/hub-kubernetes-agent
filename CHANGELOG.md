@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.32.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.31.0...v0.32.0) (2026-06-26)
+
+
+### Features
+
+* add postgresql monitoring plugin ([#129](https://github.com/thesentinella/hub-kubernetes-agent/issues/129)) ([e1761c9](https://github.com/thesentinella/hub-kubernetes-agent/commit/e1761c9077bfa58f3a09615fdb978ee9ce4cc997))
+
 ## [0.31.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.30.0...v0.31.0) (2026-06-25)
 
 
