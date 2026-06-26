@@ -414,7 +414,7 @@ Compatibility note:
 - `evidence`: array of `{title, value}` objects with the Kubernetes signals used to classify the workload.
 - `missing_data`: array of `{title, value}` objects describing signals that were unavailable or incomplete.
 
-The PostgreSQL plugin is discovery-only in v1. It does not connect to the database yet; it synthesizes status from Kubernetes evidence in the configured namespaces.
+The PostgreSQL plugin is discovery-first. It synthesizes status from Kubernetes evidence in the configured namespaces, and it may add an unauthenticated `SELECT 1` probe when a Service clearly matches the PostgreSQL heuristics. The probe currently uses `NoTls`.
 
 Example payload:
 
@@ -499,7 +499,8 @@ PostgreSQL plugin backend rules:
 - Consume the block only when `enabled = true` and `namespaces` is non-empty; otherwise the plugin block is omitted.
 - Treat `status` as a synthesized health signal, not a database connection state.
 - Treat `detail`, `evidence`, and `missing_data` as arrays of structured `{title, value}` objects.
-- Treat the plugin as discovery-only in v1; do not assume a live PostgreSQL connection.
+- Treat the live probe as best-effort and unauthenticated; only run it when a Service clearly matches the PostgreSQL heuristics.
+- Treat probe failures as fail-soft signals that can downgrade confidence, not as snapshot failures.
 
 ### UI
 

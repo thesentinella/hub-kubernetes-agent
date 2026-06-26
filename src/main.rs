@@ -189,7 +189,8 @@ async fn build_and_send(cfg: &Config, kube: &KubeClient, hub: &HubClient) -> Res
         workload_monitoring_logs,
     );
     let postgresql_monitoring =
-        plugins::build_postgresql_monitoring(cfg, &workloads, &pods, &network, &storage, &events);
+        plugins::build_postgresql_monitoring(cfg, &workloads, &pods, &network, &storage, &events)
+            .await;
     let plugins = if workload_monitoring.is_some() || postgresql_monitoring.is_some() {
         Some(Plugins {
             workload_monitoring,

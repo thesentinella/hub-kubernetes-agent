@@ -18,7 +18,11 @@
 use crate::config::Config;
 use crate::model::*;
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::future::Future;
+use std::pin::Pin;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::time::timeout;
+use tokio_postgres::NoTls;
 
 /// Build the workload monitoring plugin block from the cluster-wide inventory.
 /// Returns `Some(...)` when the plugin is enabled and the namespace allowlist
@@ -129,7 +133,7 @@ pub fn build_workload_monitoring(
 /// Build the discovery-only PostgreSQL monitoring plugin block from the
 /// cluster-wide inventory. Returns `Some(...)` when the plugin is enabled and
 /// the namespace allowlist is non-empty; `None` otherwise.
-pub fn build_postgresql_monitoring(
+pub async fn build_postgresql_monitoring(
     cfg: &Config,
     workloads: &Workloads,
     pods: &[PodInfo],
@@ -137,6 +141,32 @@ pub fn build_postgresql_monitoring(
     storage: &StorageInventory,
     events: &[EventInfo],
 ) -> Option<PostgresqlMonitoringPlugin> {
+    build_postgresql_monitoring_with_probe(
+        cfg,
+        workloads,
+        pods,
+        network,
+        storage,
+        events,
+        |service| Box::pin(probe_postgresql_service(service)),
+    )
+    .await
+}
+
+type ProbeFuture<'a> = Pin<Box<dyn Future<Output = PostgresqlProbeResult> + Send + 'a>>;
+
+async fn build_postgresql_monitoring_with_probe<F>(
+    cfg: &Config,
+    workloads: &Workloads,
+    pods: &[PodInfo],
+    network: &NetworkInventory,
+    storage: &StorageInventory,
+    events: &[EventInfo],
+    probe_fn: F,
+) -> Option<PostgresqlMonitoringPlugin>
+where
+    F: for<'a> Fn(&'a ServiceInfo) -> ProbeFuture<'a>,
+{
     if !cfg.postgresql_monitoring_enabled {
         return None;
     }
@@ -196,8 +226,31 @@ pub fn build_postgresql_monitoring(
         .flat_map(|service| service.ports.iter())
         .filter(|port| port.port == 5432 || port.target_port.as_deref() == Some("5432"))
         .count();
+    let mut missing_data = Vec::new();
+    let clear_candidates = filtered_services
+        .iter()
+        .filter(|service| is_clear_postgresql_service(service))
+        .collect::<Vec<_>>();
+    let mut probe_note = None;
+    let probe_result = match clear_candidates.as_slice() {
+        [service] => Some(probe_fn(service).await),
+        [] if !filtered_services.is_empty() => {
+            probe_note = Some(
+                "Service did not clearly match PostgreSQL heuristics; live probe skipped"
+                    .to_string(),
+            );
+            None
+        }
+        _ if clear_candidates.len() > 1 => {
+            probe_note = Some(
+                "Multiple services matched PostgreSQL heuristics; live probe skipped".to_string(),
+            );
+            None
+        }
+        _ => None,
+    };
 
-    let status = if filtered_workloads.is_empty()
+    let base_status = if filtered_workloads.is_empty()
         && filtered_pods.is_empty()
         && filtered_services.is_empty()
         && filtered_pvcs.is_empty()
@@ -221,15 +274,43 @@ pub fn build_postgresql_monitoring(
         "warning"
     };
 
-    let summary = match status {
-        "healthy" => format!(
-            "PostgreSQL workload found in {} namespace(s) with {} running pod(s)",
-            allow.len(),
-            ready_pods
-        ),
-        "warning" => "PostgreSQL workload found, but one or more signals are incomplete".to_string(),
-        "unknown" => "PostgreSQL-related activity was seen, but the workload could not be classified confidently".to_string(),
-        _ => "No PostgreSQL workload found in the configured namespaces".to_string(),
+    let mut status = base_status;
+    if matches!(probe_result, Some(PostgresqlProbeResult::Failed { .. })) && status == "healthy" {
+        status = "warning";
+    }
+
+    let summary = if let Some(result) = &probe_result {
+        match result {
+            PostgresqlProbeResult::Connected { latency_ms, .. } if status == "healthy" => format!(
+                "PostgreSQL workload found in {} namespace(s) with {} running pod(s); live SELECT 1 succeeded in {} ms",
+                allow.len(),
+                ready_pods,
+                latency_ms
+            ),
+            PostgresqlProbeResult::Connected { latency_ms, .. } => format!(
+                "PostgreSQL workload found, live SELECT 1 succeeded in {} ms, but one or more signals are incomplete",
+                latency_ms
+            ),
+            PostgresqlProbeResult::Failed { classification, .. } => format!(
+                "PostgreSQL workload found, but live SELECT 1 {}",
+                classification
+            ),
+        }
+    } else {
+        match status {
+            "healthy" => format!(
+                "PostgreSQL workload found in {} namespace(s) with {} running pod(s)",
+                allow.len(),
+                ready_pods
+            ),
+            "warning" => {
+                "PostgreSQL workload found, but one or more signals are incomplete".to_string()
+            }
+            "unknown" => {
+                "PostgreSQL-related activity was seen, but the workload could not be classified confidently".to_string()
+            }
+            _ => "No PostgreSQL workload found in the configured namespaces".to_string(),
+        }
     };
 
     let mut detail = vec![
@@ -330,7 +411,60 @@ pub fn build_postgresql_monitoring(
             }),
     );
 
-    let mut missing_data = Vec::new();
+    if let Some(note) = probe_note {
+        detail.push(PostgresqlMonitoringDetailItem {
+            title: "live probe".into(),
+            value: note.clone(),
+        });
+        missing_data.push(PostgresqlMonitoringMissingDataItem {
+            title: "live probe".into(),
+            value: note,
+        });
+    }
+
+    if let Some(result) = &probe_result {
+        match result {
+            PostgresqlProbeResult::Connected {
+                host,
+                port,
+                latency_ms,
+            } => {
+                detail.push(PostgresqlMonitoringDetailItem {
+                    title: "live probe".into(),
+                    value: format!(
+                        "SELECT 1 succeeded on {}:{} in {} ms",
+                        host, port, latency_ms
+                    ),
+                });
+                evidence.push(PostgresqlMonitoringEvidenceItem {
+                    title: "probe".into(),
+                    value: format!(
+                        "SELECT 1 succeeded on {}:{} in {} ms",
+                        host, port, latency_ms
+                    ),
+                });
+            }
+            PostgresqlProbeResult::Failed {
+                host,
+                port,
+                classification,
+            } => {
+                detail.push(PostgresqlMonitoringDetailItem {
+                    title: "live probe".into(),
+                    value: format!("SELECT 1 {} on {}:{}", classification, host, port),
+                });
+                evidence.push(PostgresqlMonitoringEvidenceItem {
+                    title: "probe".into(),
+                    value: format!("SELECT 1 {} on {}:{}", classification, host, port),
+                });
+                missing_data.push(PostgresqlMonitoringMissingDataItem {
+                    title: "live probe".into(),
+                    value: format!("SELECT 1 {} on {}:{}", classification, host, port),
+                });
+            }
+        }
+    }
+
     if filtered_workloads.is_empty() {
         missing_data.push(PostgresqlMonitoringMissingDataItem {
             title: "workload discovery".into(),
@@ -474,6 +608,136 @@ fn matches_postgresql_event(event: &EventInfo) -> bool {
             .as_deref()
             .map(matches_postgresql_name)
             .unwrap_or(false)
+}
+
+fn is_clear_postgresql_service(service: &ServiceInfo) -> bool {
+    let name_or_selector = matches_postgresql_name(&service.name)
+        || service
+            .selector
+            .iter()
+            .any(|kv| matches_postgresql_name(&kv.key) || matches_postgresql_name(&kv.value));
+    let has_postgresql_port = service
+        .ports
+        .iter()
+        .any(|port| port.port == 5432 || port.target_port.as_deref() == Some("5432"));
+
+    name_or_selector && has_postgresql_port
+}
+
+enum PostgresqlProbeResult {
+    Connected {
+        host: String,
+        port: u16,
+        latency_ms: u128,
+    },
+    Failed {
+        host: String,
+        port: u16,
+        classification: String,
+    },
+}
+
+async fn probe_postgresql_service(service: &ServiceInfo) -> PostgresqlProbeResult {
+    let Some(port) = select_postgresql_port(service) else {
+        return PostgresqlProbeResult::Failed {
+            host: postgresql_service_host(service),
+            port: 5432,
+            classification: "failed: no usable port".into(),
+        };
+    };
+
+    let host = postgresql_service_host(service);
+    let connect_str = format!("host={} port={} user=postgres dbname=postgres", host, port);
+    let started_at = Instant::now();
+
+    let connect = timeout(
+        Duration::from_secs(4),
+        tokio_postgres::connect(&connect_str, NoTls),
+    )
+    .await;
+
+    let (client, connection) = match connect {
+        Ok(Ok(pair)) => pair,
+        Ok(Err(err)) => {
+            let message = err.to_string();
+            return PostgresqlProbeResult::Failed {
+                host,
+                port,
+                classification: classify_postgresql_probe_error(&message),
+            };
+        }
+        Err(_) => {
+            return PostgresqlProbeResult::Failed {
+                host,
+                port,
+                classification: "failed: timeout".into(),
+            };
+        }
+    };
+
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+
+    let query = timeout(Duration::from_secs(4), client.query_one("SELECT 1", &[])).await;
+    match query {
+        Ok(Ok(_row)) => PostgresqlProbeResult::Connected {
+            host,
+            port,
+            latency_ms: started_at.elapsed().as_millis(),
+        },
+        Ok(Err(err)) => {
+            let message = err.to_string();
+            PostgresqlProbeResult::Failed {
+                host,
+                port,
+                classification: classify_postgresql_probe_error(&message),
+            }
+        }
+        Err(_) => PostgresqlProbeResult::Failed {
+            host,
+            port,
+            classification: "failed: timeout".into(),
+        },
+    }
+}
+
+fn select_postgresql_port(service: &ServiceInfo) -> Option<u16> {
+    service
+        .ports
+        .iter()
+        .find(|port| port.port == 5432 || port.target_port.as_deref() == Some("5432"))
+        .map(|port| port.port as u16)
+}
+
+fn postgresql_service_host(service: &ServiceInfo) -> String {
+    format!("{}.{}.svc.cluster.local", service.name, service.namespace)
+}
+
+fn classify_postgresql_probe_error(message: &str) -> String {
+    let lower = message.to_ascii_lowercase();
+    let classification = if lower.contains("timed out") || lower.contains("timeout") {
+        "failed: timeout"
+    } else if lower.contains("refused") {
+        "failed: connection refused"
+    } else if lower.contains("lookup")
+        || lower.contains("resolve")
+        || lower.contains("name or service not known")
+        || lower.contains("no such host")
+    {
+        "failed: dns"
+    } else if lower.contains("authentication")
+        || lower.contains("password")
+        || lower.contains("permission denied")
+    {
+        "failed: auth"
+    } else if lower.contains("ssl") || lower.contains("tls") || lower.contains("handshake") {
+        "failed: tls"
+    } else {
+        "failed: io"
+    };
+
+    classification.to_string()
 }
 
 fn now_ms() -> u128 {
@@ -770,7 +1034,52 @@ mod tests {
     }
 
     #[test]
-    fn build_postgresql_returns_none_when_disabled() {
+    fn clear_postgresql_service_requires_name_and_port() {
+        let name_only = ServiceInfo {
+            namespace: "customer-db".into(),
+            name: "db-service".into(),
+            type_: "ClusterIP".into(),
+            cluster_ip: Some("10.0.0.2".into()),
+            external_ips: vec![],
+            selector: vec![],
+            ports: vec![ServicePortInfo {
+                name: Some("postgresql".into()),
+                protocol: Some("TCP".into()),
+                port: 5432,
+                target_port: Some("5432".into()),
+                node_port: None,
+            }],
+            load_balancer_ingress: vec![],
+        };
+        assert!(!is_clear_postgresql_service(&name_only));
+
+        let portless = ServiceInfo {
+            namespace: "customer-db".into(),
+            name: "postgresql".into(),
+            type_: "ClusterIP".into(),
+            cluster_ip: Some("10.0.0.2".into()),
+            external_ips: vec![],
+            selector: vec![KV {
+                key: "app".into(),
+                value: "postgresql".into(),
+            }],
+            ports: vec![ServicePortInfo {
+                name: Some("http".into()),
+                protocol: Some("TCP".into()),
+                port: 8080,
+                target_port: Some("8080".into()),
+                node_port: None,
+            }],
+            load_balancer_ingress: vec![],
+        };
+        assert!(!is_clear_postgresql_service(&portless));
+
+        let clear = postgres_service("customer-db", "postgresql");
+        assert!(is_clear_postgresql_service(&clear));
+    }
+
+    #[tokio::test]
+    async fn build_postgresql_returns_none_when_disabled() {
         let cfg = base_config(false, vec!["customer-app".into()]);
         let result = build_postgresql_monitoring(
             &cfg,
@@ -779,12 +1088,13 @@ mod tests {
             &NetworkInventory::default(),
             &StorageInventory::default(),
             &[],
-        );
+        )
+        .await;
         assert!(result.is_none());
     }
 
-    #[test]
-    fn build_postgresql_is_healthy_with_complete_evidence() {
+    #[tokio::test]
+    async fn build_postgresql_is_healthy_with_complete_evidence() {
         let mut cfg = base_config(false, vec![]);
         cfg.postgresql_monitoring_enabled = true;
         cfg.postgresql_monitoring_namespaces = vec!["customer-db".into()];
@@ -812,9 +1122,23 @@ mod tests {
         };
         let events = vec![postgres_event("customer-db", "postgresql-0")];
 
-        let result =
-            build_postgresql_monitoring(&cfg, &workloads, &pods, &network, &storage, &events)
-                .expect("plugin should be present");
+        let result = build_postgresql_monitoring_with_probe(
+            &cfg,
+            &workloads,
+            &pods,
+            &network,
+            &storage,
+            &events,
+            |_| {
+                Box::pin(std::future::ready(PostgresqlProbeResult::Connected {
+                    host: "postgresql.customer-db.svc.cluster.local".into(),
+                    port: 5432,
+                    latency_ms: 12,
+                }))
+            },
+        )
+        .await
+        .expect("plugin should be present");
 
         assert_eq!(result.status, "healthy");
         assert_eq!(result.namespaces, vec!["customer-db"]);
@@ -829,8 +1153,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn build_postgresql_reports_warning_when_signals_are_incomplete() {
+    #[tokio::test]
+    async fn build_postgresql_reports_warning_when_signals_are_incomplete() {
         let mut cfg = base_config(false, vec![]);
         cfg.postgresql_monitoring_enabled = true;
         cfg.postgresql_monitoring_namespaces = vec!["customer-db".into()];
@@ -854,6 +1178,7 @@ mod tests {
             &StorageInventory::default(),
             &[],
         )
+        .await
         .expect("plugin should be present");
 
         assert_eq!(result.status, "warning");
@@ -871,8 +1196,54 @@ mod tests {
         );
     }
 
-    #[test]
-    fn build_postgresql_reports_critical_when_no_evidence_matches() {
+    #[tokio::test]
+    async fn build_postgresql_skips_live_probe_when_service_is_not_clear() {
+        let mut cfg = base_config(false, vec![]);
+        cfg.postgresql_monitoring_enabled = true;
+        cfg.postgresql_monitoring_namespaces = vec!["customer-db".into()];
+
+        let services = NetworkInventory {
+            services: vec![ServiceInfo {
+                namespace: "customer-db".into(),
+                name: "db-service".into(),
+                type_: "ClusterIP".into(),
+                cluster_ip: Some("10.0.0.2".into()),
+                external_ips: vec![],
+                selector: vec![],
+                ports: vec![ServicePortInfo {
+                    name: Some("postgresql".into()),
+                    protocol: Some("TCP".into()),
+                    port: 5432,
+                    target_port: Some("5432".into()),
+                    node_port: None,
+                }],
+                load_balancer_ingress: vec![],
+            }],
+            ingresses: vec![],
+        };
+
+        let result = build_postgresql_monitoring(
+            &cfg,
+            &Workloads::default(),
+            &[],
+            &services,
+            &StorageInventory::default(),
+            &[],
+        )
+        .await
+        .expect("plugin should be present");
+
+        assert!(
+            result
+                .missing_data
+                .iter()
+                .any(|item| item.title == "live probe")
+        );
+        assert!(result.evidence.iter().all(|item| item.title != "probe"));
+    }
+
+    #[tokio::test]
+    async fn build_postgresql_reports_critical_when_no_evidence_matches() {
         let mut cfg = base_config(false, vec![]);
         cfg.postgresql_monitoring_enabled = true;
         cfg.postgresql_monitoring_namespaces = vec!["customer-db".into()];
@@ -885,6 +1256,7 @@ mod tests {
             &StorageInventory::default(),
             &[],
         )
+        .await
         .expect("plugin should be present");
 
         assert_eq!(result.status, "critical");
