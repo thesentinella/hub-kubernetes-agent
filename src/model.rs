@@ -84,6 +84,8 @@ pub struct SnapshotApiStatus {
 pub struct Plugins {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workload_monitoring: Option<WorkloadMonitoringPlugin>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub postgresql_monitoring: Option<PostgresqlMonitoringPlugin>,
 }
 
 /// Namespace-scoped workload monitoring plugin block. See
@@ -135,6 +137,41 @@ pub struct WorkloadMonitoringContainerLogs {
     pub name: String,
     pub truncated: bool,
     pub lines: Vec<String>,
+}
+
+/// Discovery-only PostgreSQL monitoring plugin block.
+#[derive(Serialize, Debug)]
+pub struct PostgresqlMonitoringPlugin {
+    pub enabled: bool,
+    pub namespaces: Vec<String>,
+    pub schema_version: u32,
+    pub generated_at_ms: u128,
+    pub status: String,
+    pub summary: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub detail: Vec<PostgresqlMonitoringDetailItem>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<PostgresqlMonitoringEvidenceItem>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub missing_data: Vec<PostgresqlMonitoringMissingDataItem>,
+}
+
+#[derive(Serialize, Debug, Clone)]
+pub struct PostgresqlMonitoringDetailItem {
+    pub title: String,
+    pub value: String,
+}
+
+#[derive(Serialize, Debug, Clone)]
+pub struct PostgresqlMonitoringEvidenceItem {
+    pub title: String,
+    pub value: String,
+}
+
+#[derive(Serialize, Debug, Clone)]
+pub struct PostgresqlMonitoringMissingDataItem {
+    pub title: String,
+    pub value: String,
 }
 
 #[derive(Deserialize, Debug, Default)]
@@ -425,7 +462,7 @@ pub struct PersistentVolumeInfo {
     pub storage_class: Option<String>,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, Clone)]
 pub struct PersistentVolumeClaimInfo {
     pub namespace: String,
     pub name: String,
@@ -721,7 +758,7 @@ fn now_ms() -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::{Value, json};
+    use serde_json::Value;
 
     #[test]
     fn command_result_simple_fields() {

@@ -179,7 +179,7 @@ async fn build_and_send(cfg: &Config, kube: &KubeClient, hub: &HubClient) -> Res
     configuration.agent_runtime_env = config::agent_runtime_env(cfg);
     let workload_monitoring_logs =
         collector::collect_workload_monitoring_logs(kube, cfg, &pods).await;
-    let plugins = plugins::build_workload_monitoring(
+    let workload_monitoring = plugins::build_workload_monitoring(
         cfg,
         &workloads,
         &pods,
@@ -187,10 +187,17 @@ async fn build_and_send(cfg: &Config, kube: &KubeClient, hub: &HubClient) -> Res
         &events,
         &dependencies,
         workload_monitoring_logs,
-    )
-    .map(|wm| Plugins {
-        workload_monitoring: Some(wm),
-    });
+    );
+    let postgresql_monitoring =
+        plugins::build_postgresql_monitoring(cfg, &workloads, &pods, &network, &storage, &events);
+    let plugins = if workload_monitoring.is_some() || postgresql_monitoring.is_some() {
+        Some(Plugins {
+            workload_monitoring,
+            postgresql_monitoring,
+        })
+    } else {
+        None
+    };
     let snap = InventorySnapshot {
         schema_version: 1,
         agent: AgentInfo {
@@ -520,6 +527,8 @@ mod tests {
             workload_monitoring_enabled: false,
             workload_monitoring_namespaces: Vec::new(),
             workload_monitoring_targets: vec!["angular".into(), "spring_boot".into()],
+            postgresql_monitoring_enabled: false,
+            postgresql_monitoring_namespaces: Vec::new(),
         }
     }
 

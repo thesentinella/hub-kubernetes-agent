@@ -20,6 +20,8 @@ pub const AGENT_CONFIG_ENV_ALLOWLIST: &[&str] = &[
     "LEASE_NAME",
     "LEASE_TTL_SECS",
     "POLL_WAIT_SECS",
+    "POSTGRESQL_MONITORING_ENABLED",
+    "POSTGRESQL_MONITORING_NAMESPACES",
     "TETRAGON_GRPC_ADDRESS",
     "TECH_DETECT_PROCESS",
     "WORKLOAD_MONITORING_ENABLED",
@@ -108,6 +110,13 @@ pub struct Config {
     /// Tech detection targets enabled for the plugin. Comma-separated env
     /// value. Defaults to `["angular", "spring_boot", "oracle_database"]`.
     pub workload_monitoring_targets: Vec<String>,
+
+    /// Master switch for the PostgreSQL monitoring plugin. When false (default)
+    /// the plugin block is omitted from the snapshot payload entirely.
+    pub postgresql_monitoring_enabled: bool,
+
+    /// Allowlist of namespaces to inspect for PostgreSQL workloads.
+    pub postgresql_monitoring_namespaces: Vec<String>,
 }
 
 impl Config {
@@ -161,6 +170,9 @@ impl Config {
                 "oracle_database".to_string(),
             ],
         );
+        let postgresql_monitoring_enabled = env_flag("POSTGRESQL_MONITORING_ENABLED");
+        let postgresql_monitoring_namespaces =
+            parse_yaml_list_env("POSTGRESQL_MONITORING_NAMESPACES");
 
         Ok(Self {
             hub_url: hub_url.trim_end_matches('/').to_string(),
@@ -188,6 +200,8 @@ impl Config {
             workload_monitoring_enabled,
             workload_monitoring_namespaces,
             workload_monitoring_targets,
+            postgresql_monitoring_enabled,
+            postgresql_monitoring_namespaces,
         })
     }
 }
@@ -237,6 +251,10 @@ fn runtime_env_value(cfg: &Config, key: &str) -> Option<String> {
         "POLL_WAIT_SECS" => Some(cfg.poll_wait.as_secs().to_string()),
         "TETRAGON_GRPC_ADDRESS" => Some(cfg.tetragon_grpc_address.clone()),
         "TECH_DETECT_PROCESS" => Some(bool_string(cfg.tech_detect_process)),
+        "POSTGRESQL_MONITORING_ENABLED" => Some(bool_string(cfg.postgresql_monitoring_enabled)),
+        "POSTGRESQL_MONITORING_NAMESPACES" => {
+            Some(yaml_list_string(&cfg.postgresql_monitoring_namespaces))
+        }
         "WORKLOAD_MONITORING_ENABLED" => Some(bool_string(cfg.workload_monitoring_enabled)),
         "WORKLOAD_MONITORING_NAMESPACES" => {
             Some(yaml_list_string(&cfg.workload_monitoring_namespaces))
@@ -255,6 +273,7 @@ fn configured_env_value(key: &str, value: &str) -> Option<String> {
         | "COLLECT_DEPENDENCIES_TETRAGON"
         | "COLLECT_SECRETS"
         | "FULL_DEBUG"
+        | "POSTGRESQL_MONITORING_ENABLED"
         | "TECH_DETECT_PROCESS" => Some(bool_string(trimmed == "true" || trimmed == "1")),
         "AGENT_LOG" => Some(if trimmed.is_empty() {
             "info".to_string()
@@ -399,6 +418,8 @@ mod tests {
             "WORKLOAD_MONITORING_ENABLED",
             "WORKLOAD_MONITORING_NAMESPACES",
             "WORKLOAD_MONITORING_TARGETS",
+            "POSTGRESQL_MONITORING_ENABLED",
+            "POSTGRESQL_MONITORING_NAMESPACES",
         ] {
             unsafe { env::remove_var(var) };
         }
@@ -641,6 +662,8 @@ mod tests {
             workload_monitoring_enabled: false,
             workload_monitoring_namespaces: Vec::new(),
             workload_monitoring_targets: vec!["angular".into(), "spring_boot".into()],
+            postgresql_monitoring_enabled: false,
+            postgresql_monitoring_namespaces: Vec::new(),
         };
 
         let env = agent_runtime_env(&cfg);
@@ -854,6 +877,8 @@ mod tests {
             workload_monitoring_enabled: true,
             workload_monitoring_namespaces: vec!["customer-app".into(), "customer-db".into()],
             workload_monitoring_targets: vec!["angular".into(), "spring_boot".into()],
+            postgresql_monitoring_enabled: false,
+            postgresql_monitoring_namespaces: Vec::new(),
         };
 
         let env = agent_runtime_env(&cfg);
@@ -862,6 +887,46 @@ mod tests {
             .find(|entry| entry.key == "WORKLOAD_MONITORING_NAMESPACES")
             .unwrap();
         assert_eq!(namespaces.value, "- customer-app\n- customer-db");
+    }
+
+    #[test]
+    fn postgresql_monitoring_runtime_env_serializes_yaml_list() {
+        let cfg = Config {
+            hub_url: "https://hub.example.com".into(),
+            cluster_id: "cluster-1".into(),
+            api_key: Some("shub_secret".into()),
+            agent_version_override: None,
+            collect_interval: Duration::from_secs(60),
+            poll_wait: Duration::from_secs(30),
+            actions_enabled: false,
+            collect_secrets: false,
+            collect_dependencies_tetragon: false,
+            tetragon_required_for_readiness: true,
+            tetragon_grpc_address: "tetragon:54321".into(),
+            http_timeout: Duration::from_secs(20),
+            http_debug: false,
+            http_debug_bodies: false,
+            full_debug: false,
+            agent_log: "info".into(),
+            tech_detect_process: false,
+            pod_name: "pod-1".into(),
+            pod_namespace: "sentinella".into(),
+            node_name: "node-1".into(),
+            lease_name: "lease".into(),
+            lease_ttl: Duration::from_secs(30),
+            workload_monitoring_enabled: false,
+            workload_monitoring_namespaces: Vec::new(),
+            workload_monitoring_targets: vec!["angular".into(), "spring_boot".into()],
+            postgresql_monitoring_enabled: true,
+            postgresql_monitoring_namespaces: vec!["customer-db".into(), "analytics".into()],
+        };
+
+        let env = agent_runtime_env(&cfg);
+        let namespaces = env
+            .iter()
+            .find(|entry| entry.key == "POSTGRESQL_MONITORING_NAMESPACES")
+            .unwrap();
+        assert_eq!(namespaces.value, "- customer-db\n- analytics");
     }
 
     #[test]
