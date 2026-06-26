@@ -4,7 +4,7 @@
 # builder stages. Reused as the base for both, so the toolchain (rustc,
 # cargo, build-base, binutils, protobuf-dev) is laid down once.
 FROM rust:1.95-alpine3.23 AS chef
-RUN apk add --no-cache build-base binutils protobuf-dev
+RUN apk add --no-cache build-base binutils openssl-dev openssl-libs-static protobuf-dev
 RUN cargo install cargo-chef --locked
 WORKDIR /build
 

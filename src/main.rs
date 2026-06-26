@@ -188,9 +188,16 @@ async fn build_and_send(cfg: &Config, kube: &KubeClient, hub: &HubClient) -> Res
         &dependencies,
         workload_monitoring_logs,
     );
-    let postgresql_monitoring =
-        plugins::build_postgresql_monitoring(cfg, &workloads, &pods, &network, &storage, &events)
-            .await;
+    let postgresql_monitoring = plugins::build_postgresql_monitoring(
+        Some(kube),
+        cfg,
+        &workloads,
+        &pods,
+        &network,
+        &storage,
+        &events,
+    )
+    .await;
     let plugins = if workload_monitoring.is_some() || postgresql_monitoring.is_some() {
         Some(Plugins {
             workload_monitoring,
@@ -530,6 +537,14 @@ mod tests {
             workload_monitoring_targets: vec!["angular".into(), "spring_boot".into()],
             postgresql_monitoring_enabled: false,
             postgresql_monitoring_namespaces: Vec::new(),
+            postgresql_monitoring_secret_name: None,
+            postgresql_monitoring_host: None,
+            postgresql_monitoring_port: None,
+            postgresql_monitoring_user: None,
+            postgresql_monitoring_password: None,
+            postgresql_monitoring_database: None,
+            postgresql_monitoring_sslmode: None,
+            postgresql_monitoring_sslrootcert: None,
         }
     }
 

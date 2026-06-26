@@ -48,6 +48,12 @@
 | `POD_NAMESPACE` | no | `default` | Usually set by downward API. |
 | `NODE_NAME` | no | `unknown-node` | Usually set by downward API; used for lease holder identity. |
 
+- PostgreSQL monitoring is opt-in and namespace-scoped. When enabled, the plugin probes only clear PostgreSQL service matches.
+- Probe settings come from `POSTGRESQL_MONITORING_SECRET_NAME` first, then `POSTGRESQL_MONITORING_*` env vars.
+- If configured, Secret keys are `host`, `port`, `user`, `password`, `database`, `sslmode`, and `sslrootcert`.
+- Missing probe values fall back to the discovered Service DNS name, discovered Service port, `postgres` user, `postgres` database, and `sslmode=disable`.
+- `sslmode=disable` uses `NoTls`; any other `sslmode` value enables TLS with `native-tls`.
+
 ## Agent Endpoints
 
 - `:9090/livez` returns liveness status for kubelet probes.

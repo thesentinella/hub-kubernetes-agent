@@ -20,8 +20,14 @@ pub const AGENT_CONFIG_ENV_ALLOWLIST: &[&str] = &[
     "LEASE_NAME",
     "LEASE_TTL_SECS",
     "POLL_WAIT_SECS",
+    "POSTGRESQL_MONITORING_DATABASE",
     "POSTGRESQL_MONITORING_ENABLED",
+    "POSTGRESQL_MONITORING_HOST",
+    "POSTGRESQL_MONITORING_PORT",
+    "POSTGRESQL_MONITORING_SECRET_NAME",
     "POSTGRESQL_MONITORING_NAMESPACES",
+    "POSTGRESQL_MONITORING_SSLMODE",
+    "POSTGRESQL_MONITORING_USER",
     "TETRAGON_GRPC_ADDRESS",
     "TECH_DETECT_PROCESS",
     "WORKLOAD_MONITORING_ENABLED",
@@ -117,6 +123,30 @@ pub struct Config {
 
     /// Allowlist of namespaces to inspect for PostgreSQL workloads.
     pub postgresql_monitoring_namespaces: Vec<String>,
+
+    /// Optional Secret name used to source PostgreSQL probe auth/TLS settings.
+    pub postgresql_monitoring_secret_name: Option<String>,
+
+    /// Optional host override for the PostgreSQL probe.
+    pub postgresql_monitoring_host: Option<String>,
+
+    /// Optional port override for the PostgreSQL probe.
+    pub postgresql_monitoring_port: Option<u16>,
+
+    /// Optional username override for the PostgreSQL probe.
+    pub postgresql_monitoring_user: Option<String>,
+
+    /// Optional password override for the PostgreSQL probe.
+    pub postgresql_monitoring_password: Option<String>,
+
+    /// Optional database override for the PostgreSQL probe.
+    pub postgresql_monitoring_database: Option<String>,
+
+    /// Optional sslmode override for the PostgreSQL probe.
+    pub postgresql_monitoring_sslmode: Option<String>,
+
+    /// Optional PEM-encoded root certificate override for the PostgreSQL probe.
+    pub postgresql_monitoring_sslrootcert: Option<String>,
 }
 
 impl Config {
@@ -173,6 +203,16 @@ impl Config {
         let postgresql_monitoring_enabled = env_flag("POSTGRESQL_MONITORING_ENABLED");
         let postgresql_monitoring_namespaces =
             parse_yaml_list_env("POSTGRESQL_MONITORING_NAMESPACES");
+        let postgresql_monitoring_secret_name =
+            parse_non_empty_env("POSTGRESQL_MONITORING_SECRET_NAME");
+        let postgresql_monitoring_host = parse_non_empty_env("POSTGRESQL_MONITORING_HOST");
+        let postgresql_monitoring_port = parse_u16_env("POSTGRESQL_MONITORING_PORT");
+        let postgresql_monitoring_user = parse_non_empty_env("POSTGRESQL_MONITORING_USER");
+        let postgresql_monitoring_password = parse_non_empty_env("POSTGRESQL_MONITORING_PASSWORD");
+        let postgresql_monitoring_database = parse_non_empty_env("POSTGRESQL_MONITORING_DATABASE");
+        let postgresql_monitoring_sslmode = parse_non_empty_env("POSTGRESQL_MONITORING_SSLMODE");
+        let postgresql_monitoring_sslrootcert =
+            parse_non_empty_env("POSTGRESQL_MONITORING_SSLROOTCERT");
 
         Ok(Self {
             hub_url: hub_url.trim_end_matches('/').to_string(),
@@ -202,6 +242,14 @@ impl Config {
             workload_monitoring_targets,
             postgresql_monitoring_enabled,
             postgresql_monitoring_namespaces,
+            postgresql_monitoring_secret_name,
+            postgresql_monitoring_host,
+            postgresql_monitoring_port,
+            postgresql_monitoring_user,
+            postgresql_monitoring_password,
+            postgresql_monitoring_database,
+            postgresql_monitoring_sslmode,
+            postgresql_monitoring_sslrootcert,
         })
     }
 }
@@ -249,12 +297,20 @@ fn runtime_env_value(cfg: &Config, key: &str) -> Option<String> {
         "LEASE_NAME" => Some(cfg.lease_name.clone()),
         "LEASE_TTL_SECS" => Some(cfg.lease_ttl.as_secs().to_string()),
         "POLL_WAIT_SECS" => Some(cfg.poll_wait.as_secs().to_string()),
+        "POSTGRESQL_MONITORING_DATABASE" => cfg.postgresql_monitoring_database.clone(),
         "TETRAGON_GRPC_ADDRESS" => Some(cfg.tetragon_grpc_address.clone()),
         "TECH_DETECT_PROCESS" => Some(bool_string(cfg.tech_detect_process)),
+        "POSTGRESQL_MONITORING_HOST" => cfg.postgresql_monitoring_host.clone(),
+        "POSTGRESQL_MONITORING_PORT" => cfg
+            .postgresql_monitoring_port
+            .map(|value| value.to_string()),
         "POSTGRESQL_MONITORING_ENABLED" => Some(bool_string(cfg.postgresql_monitoring_enabled)),
+        "POSTGRESQL_MONITORING_SECRET_NAME" => cfg.postgresql_monitoring_secret_name.clone(),
         "POSTGRESQL_MONITORING_NAMESPACES" => {
             Some(yaml_list_string(&cfg.postgresql_monitoring_namespaces))
         }
+        "POSTGRESQL_MONITORING_SSLMODE" => cfg.postgresql_monitoring_sslmode.clone(),
+        "POSTGRESQL_MONITORING_USER" => cfg.postgresql_monitoring_user.clone(),
         "WORKLOAD_MONITORING_ENABLED" => Some(bool_string(cfg.workload_monitoring_enabled)),
         "WORKLOAD_MONITORING_NAMESPACES" => {
             Some(yaml_list_string(&cfg.workload_monitoring_namespaces))
@@ -288,6 +344,16 @@ fn configured_env_value(key: &str, value: &str) -> Option<String> {
                 .ok()
                 .or_else(|| Some(trimmed.to_string()))
         }
+        "POSTGRESQL_MONITORING_PORT" => trimmed
+            .parse::<u16>()
+            .map(|value| value.to_string())
+            .ok()
+            .or_else(|| Some(trimmed.to_string())),
+        "POSTGRESQL_MONITORING_DATABASE"
+        | "POSTGRESQL_MONITORING_HOST"
+        | "POSTGRESQL_MONITORING_SECRET_NAME"
+        | "POSTGRESQL_MONITORING_SSLMODE"
+        | "POSTGRESQL_MONITORING_USER" => parse_non_empty_value(trimmed),
         "HUB_URL" => Some(trimmed.trim_end_matches('/').to_string()),
         _ => Some(trimmed.to_string()),
     }
@@ -369,6 +435,10 @@ fn parse_csv_env_or(var: &str, default: Vec<String>) -> Vec<String> {
     if parsed.is_empty() { default } else { parsed }
 }
 
+fn parse_u16_env(var: &str) -> Option<u16> {
+    env::var(var).ok()?.trim().parse::<u16>().ok()
+}
+
 fn env_flag_with_default(var: &str, default: bool) -> bool {
     env::var(var)
         .ok()
@@ -415,6 +485,14 @@ mod tests {
             "POD_NAMESPACE",
             "NODE_NAME",
             "LEASE_NAME",
+            "POSTGRESQL_MONITORING_DATABASE",
+            "POSTGRESQL_MONITORING_HOST",
+            "POSTGRESQL_MONITORING_PASSWORD",
+            "POSTGRESQL_MONITORING_PORT",
+            "POSTGRESQL_MONITORING_SECRET_NAME",
+            "POSTGRESQL_MONITORING_SSLMODE",
+            "POSTGRESQL_MONITORING_SSLROOTCERT",
+            "POSTGRESQL_MONITORING_USER",
             "WORKLOAD_MONITORING_ENABLED",
             "WORKLOAD_MONITORING_NAMESPACES",
             "WORKLOAD_MONITORING_TARGETS",
@@ -664,6 +742,14 @@ mod tests {
             workload_monitoring_targets: vec!["angular".into(), "spring_boot".into()],
             postgresql_monitoring_enabled: false,
             postgresql_monitoring_namespaces: Vec::new(),
+            postgresql_monitoring_secret_name: Some("postgresql-monitoring".into()),
+            postgresql_monitoring_host: Some("postgresql.customer-db.svc.cluster.local".into()),
+            postgresql_monitoring_port: Some(5432),
+            postgresql_monitoring_user: Some("postgres".into()),
+            postgresql_monitoring_password: None,
+            postgresql_monitoring_database: Some("postgres".into()),
+            postgresql_monitoring_sslmode: Some("require".into()),
+            postgresql_monitoring_sslrootcert: None,
         };
 
         let env = agent_runtime_env(&cfg);
@@ -879,6 +965,14 @@ mod tests {
             workload_monitoring_targets: vec!["angular".into(), "spring_boot".into()],
             postgresql_monitoring_enabled: false,
             postgresql_monitoring_namespaces: Vec::new(),
+            postgresql_monitoring_secret_name: None,
+            postgresql_monitoring_host: None,
+            postgresql_monitoring_port: None,
+            postgresql_monitoring_user: None,
+            postgresql_monitoring_password: None,
+            postgresql_monitoring_database: None,
+            postgresql_monitoring_sslmode: None,
+            postgresql_monitoring_sslrootcert: None,
         };
 
         let env = agent_runtime_env(&cfg);
@@ -919,6 +1013,14 @@ mod tests {
             workload_monitoring_targets: vec!["angular".into(), "spring_boot".into()],
             postgresql_monitoring_enabled: true,
             postgresql_monitoring_namespaces: vec!["customer-db".into(), "analytics".into()],
+            postgresql_monitoring_secret_name: None,
+            postgresql_monitoring_host: None,
+            postgresql_monitoring_port: None,
+            postgresql_monitoring_user: None,
+            postgresql_monitoring_password: None,
+            postgresql_monitoring_database: None,
+            postgresql_monitoring_sslmode: None,
+            postgresql_monitoring_sslrootcert: None,
         };
 
         let env = agent_runtime_env(&cfg);
