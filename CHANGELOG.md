@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.33.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.32.0...v0.33.0) (2026-06-26)
+
+
+### Features
+
+* add live postgres probe ([#131](https://github.com/thesentinella/hub-kubernetes-agent/issues/131)) ([1586587](https://github.com/thesentinella/hub-kubernetes-agent/commit/1586587c17a221f8f0b18da5b34b064a3aee6a80))
+
 ## [0.32.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.31.0...v0.32.0) (2026-06-26)
 
 
