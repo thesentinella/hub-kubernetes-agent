@@ -332,7 +332,7 @@ When enabled with a non-empty allowlist, the snapshot gains:
 
 ### PostgreSQL monitoring
 
-The PostgreSQL plugin is opt-in, namespace-scoped, and discovery-only in v1. It does not connect to the database yet; it derives a synthesized health status from Kubernetes evidence in the configured namespaces.
+The PostgreSQL plugin is opt-in, namespace-scoped, and discovery-first. It derives a synthesized health status from Kubernetes evidence in the configured namespaces, and it adds an unauthenticated `SELECT 1` probe only when a Service clearly matches the PostgreSQL heuristics. The probe uses `NoTls`.
 
 | Variable | Default | Notes |
 |---|---|---|
@@ -365,7 +365,7 @@ When enabled with a non-empty allowlist, the snapshot gains:
 }
 ```
 
-`status` is synthesized from the available evidence: `healthy`, `warning`, `critical`, or `unknown`. `detail`, `evidence`, and `missing_data` are arrays of `{title, value}` objects.
+`status` is synthesized from the available evidence: `healthy`, `warning`, `critical`, or `unknown`. `detail`, `evidence`, and `missing_data` are arrays of `{title, value}` objects. When the live probe runs, `evidence` includes a `probe` entry and `detail` includes the probe outcome.
 
 `critical` means no PostgreSQL-like workload was found in the configured namespaces. `warning` means a workload was found but one or more supporting signals are incomplete. `healthy` means the discovery signals are consistent. `unknown` is reserved for ambiguous evidence.
 
