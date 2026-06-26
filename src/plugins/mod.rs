@@ -180,11 +180,23 @@ where
         .map(|s| s.as_str())
         .collect();
 
-    let filtered_workloads = filter_workloads(&workloads.deployments, &allow)
+    let filtered_deployments = filter_workloads(&workloads.deployments, &allow)
         .into_iter()
-        .chain(filter_workloads(&workloads.statefulsets, &allow))
-        .chain(filter_workloads(&workloads.daemonsets, &allow))
         .filter(|workload| matches_postgresql_name(&workload.name))
+        .collect::<Vec<_>>();
+    let filtered_statefulsets = filter_workloads(&workloads.statefulsets, &allow)
+        .into_iter()
+        .filter(|workload| matches_postgresql_name(&workload.name))
+        .collect::<Vec<_>>();
+    let filtered_daemonsets = filter_workloads(&workloads.daemonsets, &allow)
+        .into_iter()
+        .filter(|workload| matches_postgresql_name(&workload.name))
+        .collect::<Vec<_>>();
+    let filtered_workloads = filtered_deployments
+        .iter()
+        .chain(filtered_statefulsets.iter())
+        .chain(filtered_daemonsets.iter())
+        .cloned()
         .collect::<Vec<_>>();
 
     let filtered_pods: Vec<PodInfo> = pods
@@ -231,6 +243,12 @@ where
         .iter()
         .filter(|service| is_clear_postgresql_service(service))
         .collect::<Vec<_>>();
+    let weak_candidates = filtered_services
+        .iter()
+        .filter(|service| {
+            matches_postgresql_service(service) && !is_clear_postgresql_service(service)
+        })
+        .collect::<Vec<_>>();
     let mut probe_note = None;
     let probe_result = match clear_candidates.as_slice() {
         [service] => Some(probe_fn(service).await),
@@ -250,31 +268,30 @@ where
         _ => None,
     };
 
-    let base_status = if filtered_workloads.is_empty()
-        && filtered_pods.is_empty()
-        && filtered_services.is_empty()
-        && filtered_pvcs.is_empty()
-    {
-        if filtered_events.is_empty() {
-            "critical"
+    let mut status = if clear_candidates.len() > 1 {
+        "unknown"
+    } else if clear_candidates.len() == 1 {
+        if ready_pods > 0 && service_ports > 0 && !filtered_pvcs.is_empty() {
+            if matches!(probe_result, Some(PostgresqlProbeResult::Connected { .. })) {
+                "healthy"
+            } else {
+                "warning"
+            }
         } else {
-            "unknown"
+            "warning"
         }
-    } else if ready_pods > 0
-        && (filtered_services.is_empty() || service_ports == 0 || filtered_pvcs.is_empty())
+    } else if !filtered_services.is_empty()
+        || !filtered_workloads.is_empty()
+        || !filtered_pods.is_empty()
+        || !filtered_pvcs.is_empty()
     {
         "warning"
-    } else if ready_pods > 0
-        && !filtered_services.is_empty()
-        && service_ports > 0
-        && !filtered_pvcs.is_empty()
-    {
-        "healthy"
+    } else if filtered_events.is_empty() {
+        "critical"
     } else {
-        "warning"
+        "unknown"
     };
 
-    let mut status = base_status;
     if matches!(probe_result, Some(PostgresqlProbeResult::Failed { .. })) && status == "healthy" {
         status = "warning";
     }
@@ -335,6 +352,14 @@ where
             value: filtered_services.len().to_string(),
         },
         PostgresqlMonitoringDetailItem {
+            title: "clear services".into(),
+            value: clear_candidates.len().to_string(),
+        },
+        PostgresqlMonitoringDetailItem {
+            title: "weak services".into(),
+            value: weak_candidates.len().to_string(),
+        },
+        PostgresqlMonitoringDetailItem {
             title: "service ports on 5432".into(),
             value: service_ports.to_string(),
         },
@@ -346,11 +371,34 @@ where
 
     let mut evidence = Vec::new();
     evidence.extend(
-        filtered_workloads
+        filtered_deployments
             .iter()
             .map(|workload| PostgresqlMonitoringEvidenceItem {
-                title: "workload".into(),
-                value: format!("{}/{}", workload.namespace, workload.name),
+                title: "workload_name".into(),
+                value: format!(
+                    "deployment {}/{} match=name",
+                    workload.namespace, workload.name
+                ),
+            }),
+    );
+    evidence.extend(filtered_statefulsets.iter().map(|workload| {
+        PostgresqlMonitoringEvidenceItem {
+            title: "workload_owner".into(),
+            value: format!(
+                "statefulset {}/{} match=name",
+                workload.namespace, workload.name
+            ),
+        }
+    }));
+    evidence.extend(
+        filtered_daemonsets
+            .iter()
+            .map(|workload| PostgresqlMonitoringEvidenceItem {
+                title: "workload_name".into(),
+                value: format!(
+                    "daemonset {}/{} match=name",
+                    workload.namespace, workload.name
+                ),
             }),
     );
     evidence.extend(filtered_pods.iter().map(|pod| {
@@ -359,18 +407,25 @@ where
             .first()
             .map(|container| container.image.as_str())
             .unwrap_or("unknown");
+        let owner = match (&pod.owner_kind, &pod.owner_name) {
+            (Some(kind), Some(name)) => format!("owner={} name={}", kind, name),
+            (Some(kind), None) => format!("owner={}", kind),
+            (None, Some(name)) => format!("name={}", name),
+            _ => "owner=unknown".to_string(),
+        };
         PostgresqlMonitoringEvidenceItem {
             title: "pod".into(),
             value: format!(
-                "{}/{} phase={} image={}",
+                "{}/{} {} phase={} image={}",
                 pod.namespace,
                 pod.name,
+                owner,
                 pod.phase.as_deref().unwrap_or("unknown"),
                 image
             ),
         }
     }));
-    evidence.extend(filtered_services.iter().map(|service| {
+    evidence.extend(clear_candidates.iter().map(|service| {
         let ports = service
             .ports
             .iter()
@@ -379,7 +434,31 @@ where
             .join(",");
         PostgresqlMonitoringEvidenceItem {
             title: "service".into(),
-            value: format!("{}/{} ports={}", service.namespace, service.name, ports),
+            value: format!(
+                "clear {}/{} ports={} selector={}",
+                service.namespace,
+                service.name,
+                ports,
+                service.selector.len()
+            ),
+        }
+    }));
+    evidence.extend(weak_candidates.iter().map(|service| {
+        let ports = service
+            .ports
+            .iter()
+            .map(|port| port.port.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        PostgresqlMonitoringEvidenceItem {
+            title: "service".into(),
+            value: format!(
+                "weak {}/{} ports={} selector={}",
+                service.namespace,
+                service.name,
+                ports,
+                service.selector.len()
+            ),
         }
     }));
     evidence.extend(
@@ -388,9 +467,10 @@ where
             .map(|pvc| PostgresqlMonitoringEvidenceItem {
                 title: "pvc".into(),
                 value: format!(
-                    "{}/{} storage_class={} volume={}",
+                    "{}/{} match={} storage_class={} volume={}",
                     pvc.namespace,
                     pvc.name,
+                    pvc_match_reason(pvc),
                     pvc.storage_class.as_deref().unwrap_or("unknown"),
                     pvc.volume_name.as_deref().unwrap_or("unknown")
                 ),
@@ -550,6 +630,29 @@ fn matches_postgresql_name(value: &str) -> bool {
     value.contains("postgres") || value.contains("postgresql") || value.contains("pgsql")
 }
 
+fn matches_clear_postgresql_name(value: &str) -> bool {
+    ["postgresql", "postgres", "pgsql"]
+        .iter()
+        .any(|needle| contains_token(value, needle))
+}
+
+fn contains_token(value: &str, needle: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    let mut start = 0usize;
+    while let Some(idx) = lower[start..].find(needle) {
+        let idx = start + idx;
+        let before = lower[..idx].chars().next_back();
+        let after = lower[idx + needle.len()..].chars().next();
+        let before_ok = before.map(|c| !c.is_ascii_alphanumeric()).unwrap_or(true);
+        let after_ok = after.map(|c| !c.is_ascii_alphanumeric()).unwrap_or(true);
+        if before_ok && after_ok {
+            return true;
+        }
+        start = idx + needle.len();
+    }
+    false
+}
+
 fn matches_postgresql_pod(pod: &PodInfo) -> bool {
     matches_postgresql_name(&pod.name)
         || pod
@@ -611,11 +714,10 @@ fn matches_postgresql_event(event: &EventInfo) -> bool {
 }
 
 fn is_clear_postgresql_service(service: &ServiceInfo) -> bool {
-    let name_or_selector = matches_postgresql_name(&service.name)
-        || service
-            .selector
-            .iter()
-            .any(|kv| matches_postgresql_name(&kv.key) || matches_postgresql_name(&kv.value));
+    let name_or_selector = matches_clear_postgresql_name(&service.name)
+        || service.selector.iter().any(|kv| {
+            matches_clear_postgresql_name(&kv.key) || matches_clear_postgresql_name(&kv.value)
+        });
     let has_postgresql_port = service
         .ports
         .iter()
@@ -738,6 +840,34 @@ fn classify_postgresql_probe_error(message: &str) -> String {
     };
 
     classification.to_string()
+}
+
+fn pvc_match_reason(pvc: &PersistentVolumeClaimInfo) -> String {
+    let mut reasons = Vec::new();
+    if matches_postgresql_name(&pvc.name) {
+        reasons.push("name");
+    }
+    if pvc
+        .volume_name
+        .as_deref()
+        .map(matches_postgresql_name)
+        .unwrap_or(false)
+    {
+        reasons.push("volume_name");
+    }
+    if pvc
+        .storage_class
+        .as_deref()
+        .map(matches_postgresql_name)
+        .unwrap_or(false)
+    {
+        reasons.push("storage_class");
+    }
+    if reasons.is_empty() {
+        "unknown".to_string()
+    } else {
+        reasons.join(",")
+    }
 }
 
 fn now_ms() -> u128 {
@@ -1143,7 +1273,18 @@ mod tests {
         assert_eq!(result.status, "healthy");
         assert_eq!(result.namespaces, vec!["customer-db"]);
         assert!(result.summary.contains("running pod"));
-        assert!(result.evidence.iter().any(|item| item.title == "service"));
+        assert!(
+            result
+                .evidence
+                .iter()
+                .any(|item| item.title == "service" && item.value.starts_with("clear "))
+        );
+        assert!(
+            result
+                .evidence
+                .iter()
+                .any(|item| item.title == "workload_owner")
+        );
         assert!(
             result.missing_data.is_empty()
                 || result
@@ -1240,6 +1381,56 @@ mod tests {
                 .any(|item| item.title == "live probe")
         );
         assert!(result.evidence.iter().all(|item| item.title != "probe"));
+    }
+
+    #[tokio::test]
+    async fn build_postgresql_reports_unknown_when_multiple_clear_services_exist() {
+        let mut cfg = base_config(false, vec![]);
+        cfg.postgresql_monitoring_enabled = true;
+        cfg.postgresql_monitoring_namespaces = vec!["customer-db".into()];
+
+        let services = NetworkInventory {
+            services: vec![
+                postgres_service("customer-db", "postgresql-a"),
+                postgres_service("customer-db", "postgresql-b"),
+            ],
+            ingresses: vec![],
+        };
+
+        let result = build_postgresql_monitoring_with_probe(
+            &cfg,
+            &Workloads::default(),
+            &[],
+            &services,
+            &StorageInventory::default(),
+            &[],
+            |_| {
+                Box::pin(std::future::ready(PostgresqlProbeResult::Connected {
+                    host: "should-not-run".into(),
+                    port: 5432,
+                    latency_ms: 1,
+                }))
+            },
+        )
+        .await
+        .expect("plugin should be present");
+
+        assert_eq!(result.status, "unknown");
+        assert!(
+            result
+                .missing_data
+                .iter()
+                .any(|item| item.title == "live probe")
+        );
+        assert!(result.evidence.iter().all(|item| item.title != "probe"));
+        assert_eq!(
+            result
+                .detail
+                .iter()
+                .find(|item| item.title == "clear services")
+                .map(|item| item.value.as_str()),
+            Some("2")
+        );
     }
 
     #[tokio::test]
