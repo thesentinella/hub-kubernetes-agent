@@ -141,6 +141,12 @@ data:
   WORKLOAD_MONITORING_TARGETS: "angular,spring_boot,oracle_database"
   POSTGRESQL_MONITORING_ENABLED: "false"     # opt-in; discovery-only namespace-scoped plugin
   POSTGRESQL_MONITORING_NAMESPACES: "[]"     # YAML list allowlist; empty disables the plugin
+  POSTGRESQL_MONITORING_SECRET_NAME: ""      # optional Secret name in target namespaces
+  POSTGRESQL_MONITORING_HOST: ""             # env fallback; defaults to discovered Service DNS
+  POSTGRESQL_MONITORING_PORT: ""             # env fallback; defaults to the discovered Service port
+  POSTGRESQL_MONITORING_USER: ""             # env fallback; defaults to postgres
+  POSTGRESQL_MONITORING_DATABASE: ""         # env fallback; defaults to postgres
+  POSTGRESQL_MONITORING_SSLMODE: "disable"   # env fallback; disable skips TLS
 ---
 apiVersion: apps/v1
 kind: DaemonSet

@@ -21,6 +21,8 @@ kube-leader-election = "0.43"
 # HTTP client to the Hub
 reqwest = { version = "0.12", default-features = false, features = ["json", "gzip", "rustls-tls", "http2"] }
 tokio-postgres = "0.7"
+native-tls = "0.2"
+postgres-native-tls = "0.5"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

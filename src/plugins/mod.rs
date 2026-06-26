@@ -18,6 +18,10 @@
 use crate::config::Config;
 use crate::model::*;
 
+use k8s_openapi::api::core::v1::Secret;
+use kube::{Api, Client};
+use native_tls::{Certificate, TlsConnector};
+use postgres_native_tls::MakeTlsConnector;
 use std::future::Future;
 use std::pin::Pin;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -134,6 +138,7 @@ pub fn build_workload_monitoring(
 /// cluster-wide inventory. Returns `Some(...)` when the plugin is enabled and
 /// the namespace allowlist is non-empty; `None` otherwise.
 pub async fn build_postgresql_monitoring(
+    client: Option<&Client>,
     cfg: &Config,
     workloads: &Workloads,
     pods: &[PodInfo],
@@ -141,14 +146,22 @@ pub async fn build_postgresql_monitoring(
     storage: &StorageInventory,
     events: &[EventInfo],
 ) -> Option<PostgresqlMonitoringPlugin> {
+    let probe_client = client.cloned();
+    let probe_cfg = cfg.clone();
+    let closure_client = probe_client.clone();
+    let closure_cfg = probe_cfg.clone();
     build_postgresql_monitoring_with_probe(
-        cfg,
+        &probe_cfg,
         workloads,
         pods,
         network,
         storage,
         events,
-        |service| Box::pin(probe_postgresql_service(service)),
+        move |service| {
+            let client = closure_client.clone();
+            let cfg = closure_cfg.clone();
+            Box::pin(async move { probe_postgresql_service(client.as_ref(), &cfg, service).await })
+        },
     )
     .await
 }
@@ -739,7 +752,11 @@ enum PostgresqlProbeResult {
     },
 }
 
-async fn probe_postgresql_service(service: &ServiceInfo) -> PostgresqlProbeResult {
+async fn probe_postgresql_service(
+    client: Option<&Client>,
+    cfg: &Config,
+    service: &ServiceInfo,
+) -> PostgresqlProbeResult {
     let Some(port) = select_postgresql_port(service) else {
         return PostgresqlProbeResult::Failed {
             host: postgresql_service_host(service),
@@ -748,8 +765,212 @@ async fn probe_postgresql_service(service: &ServiceInfo) -> PostgresqlProbeResul
         };
     };
 
-    let host = postgresql_service_host(service);
-    let connect_str = format!("host={} port={} user=postgres dbname=postgres", host, port);
+    let settings = resolve_postgresql_probe_settings(client, cfg, service, port).await;
+    let host = settings.host.clone();
+    let started_at = Instant::now();
+
+    let probe = if settings.uses_tls() {
+        match build_tls_connector(&settings) {
+            Ok(tls) => probe_with_tls(&settings, tls).await,
+            Err(classification) => PostgresqlProbeResult::Failed {
+                host,
+                port,
+                classification,
+            },
+        }
+    } else {
+        probe_without_tls(&settings).await
+    };
+
+    match probe {
+        PostgresqlProbeResult::Connected { .. } => PostgresqlProbeResult::Connected {
+            host: settings.host,
+            port: settings.port,
+            latency_ms: started_at.elapsed().as_millis(),
+        },
+        PostgresqlProbeResult::Failed { classification, .. } => PostgresqlProbeResult::Failed {
+            host: settings.host,
+            port: settings.port,
+            classification,
+        },
+    }
+}
+
+#[derive(Clone, Debug)]
+struct PostgresqlProbeSettings {
+    host: String,
+    port: u16,
+    user: String,
+    password: Option<String>,
+    database: String,
+    sslmode: String,
+    sslrootcert: Option<String>,
+}
+
+impl PostgresqlProbeSettings {
+    fn uses_tls(&self) -> bool {
+        !self.sslmode.eq_ignore_ascii_case("disable")
+    }
+
+    fn connection_string(&self) -> String {
+        let mut parts = vec![
+            format!("host={}", self.host),
+            format!("port={}", self.port),
+            format!("user={}", self.user),
+            format!("dbname={}", self.database),
+        ];
+        if let Some(password) = &self.password {
+            parts.push(format!("password={}", password));
+        }
+        parts.join(" ")
+    }
+}
+
+async fn resolve_postgresql_probe_settings(
+    client: Option<&Client>,
+    cfg: &Config,
+    service: &ServiceInfo,
+    port: u16,
+) -> PostgresqlProbeSettings {
+    let mut settings = PostgresqlProbeSettings {
+        host: postgresql_service_host(service),
+        port,
+        user: "postgres".to_string(),
+        password: None,
+        database: "postgres".to_string(),
+        sslmode: "disable".to_string(),
+        sslrootcert: None,
+    };
+
+    if let (Some(client), Some(secret_name)) =
+        (client, cfg.postgresql_monitoring_secret_name.as_deref())
+    {
+        if let Some(secret_data) =
+            load_secret_string_data(client, &service.namespace, secret_name).await
+        {
+            apply_postgresql_probe_overrides(&mut settings, &secret_data);
+        }
+    }
+
+    apply_postgresql_probe_overrides_from_config(&mut settings, cfg);
+    settings
+}
+
+fn apply_postgresql_probe_overrides(
+    settings: &mut PostgresqlProbeSettings,
+    values: &std::collections::BTreeMap<String, String>,
+) {
+    if let Some(value) = values.get("host").filter(|value| !value.trim().is_empty()) {
+        settings.host = value.trim().to_string();
+    }
+    if let Some(value) = values
+        .get("port")
+        .and_then(|value| value.trim().parse::<u16>().ok())
+    {
+        settings.port = value;
+    }
+    if let Some(value) = values.get("user").filter(|value| !value.trim().is_empty()) {
+        settings.user = value.trim().to_string();
+    }
+    if let Some(value) = values
+        .get("password")
+        .filter(|value| !value.trim().is_empty())
+    {
+        settings.password = Some(value.trim().to_string());
+    }
+    if let Some(value) = values
+        .get("database")
+        .filter(|value| !value.trim().is_empty())
+    {
+        settings.database = value.trim().to_string();
+    }
+    if let Some(value) = values
+        .get("sslmode")
+        .filter(|value| !value.trim().is_empty())
+    {
+        settings.sslmode = value.trim().to_string();
+    }
+    if let Some(value) = values
+        .get("sslrootcert")
+        .filter(|value| !value.trim().is_empty())
+    {
+        settings.sslrootcert = Some(value.trim().to_string());
+    }
+}
+
+fn apply_postgresql_probe_overrides_from_config(
+    settings: &mut PostgresqlProbeSettings,
+    cfg: &Config,
+) {
+    if let Some(value) = cfg
+        .postgresql_monitoring_host
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        settings.host = value.trim().to_string();
+    }
+    if let Some(value) = cfg.postgresql_monitoring_port {
+        settings.port = value;
+    }
+    if let Some(value) = cfg
+        .postgresql_monitoring_user
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        settings.user = value.trim().to_string();
+    }
+    if let Some(value) = cfg
+        .postgresql_monitoring_password
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        settings.password = Some(value.trim().to_string());
+    }
+    if let Some(value) = cfg
+        .postgresql_monitoring_database
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        settings.database = value.trim().to_string();
+    }
+    if let Some(value) = cfg
+        .postgresql_monitoring_sslmode
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        settings.sslmode = value.trim().to_string();
+    }
+    if let Some(value) = cfg
+        .postgresql_monitoring_sslrootcert
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        settings.sslrootcert = Some(value.trim().to_string());
+    }
+}
+
+async fn load_secret_string_data(
+    client: &Client,
+    namespace: &str,
+    secret_name: &str,
+) -> Option<std::collections::BTreeMap<String, String>> {
+    let api: Api<Secret> = Api::namespaced(client.clone(), namespace);
+    let secret = api.get_opt(secret_name).await.ok().flatten()?;
+    let mut values = std::collections::BTreeMap::new();
+
+    if let Some(data) = secret.data {
+        for (key, bytes) in data {
+            if let Ok(value) = String::from_utf8(bytes.0) {
+                values.insert(key, value);
+            }
+        }
+    }
+
+    Some(values)
+}
+
+async fn probe_without_tls(settings: &PostgresqlProbeSettings) -> PostgresqlProbeResult {
+    let connect_str = settings.connection_string();
     let started_at = Instant::now();
 
     let connect = timeout(
@@ -763,15 +984,15 @@ async fn probe_postgresql_service(service: &ServiceInfo) -> PostgresqlProbeResul
         Ok(Err(err)) => {
             let message = err.to_string();
             return PostgresqlProbeResult::Failed {
-                host,
-                port,
+                host: settings.host.clone(),
+                port: settings.port,
                 classification: classify_postgresql_probe_error(&message),
             };
         }
         Err(_) => {
             return PostgresqlProbeResult::Failed {
-                host,
-                port,
+                host: settings.host.clone(),
+                port: settings.port,
                 classification: "failed: timeout".into(),
             };
         }
@@ -784,24 +1005,97 @@ async fn probe_postgresql_service(service: &ServiceInfo) -> PostgresqlProbeResul
     let query = timeout(Duration::from_secs(4), client.query_one("SELECT 1", &[])).await;
     match query {
         Ok(Ok(_row)) => PostgresqlProbeResult::Connected {
-            host,
-            port,
+            host: settings.host.clone(),
+            port: settings.port,
             latency_ms: started_at.elapsed().as_millis(),
         },
         Ok(Err(err)) => {
             let message = err.to_string();
             PostgresqlProbeResult::Failed {
-                host,
-                port,
+                host: settings.host.clone(),
+                port: settings.port,
                 classification: classify_postgresql_probe_error(&message),
             }
         }
         Err(_) => PostgresqlProbeResult::Failed {
-            host,
-            port,
+            host: settings.host.clone(),
+            port: settings.port,
             classification: "failed: timeout".into(),
         },
     }
+}
+
+async fn probe_with_tls(
+    settings: &PostgresqlProbeSettings,
+    tls: MakeTlsConnector,
+) -> PostgresqlProbeResult {
+    let connect_str = settings.connection_string();
+    let started_at = Instant::now();
+
+    let connect = timeout(
+        Duration::from_secs(4),
+        tokio_postgres::connect(&connect_str, tls),
+    )
+    .await;
+
+    let (client, connection) = match connect {
+        Ok(Ok(pair)) => pair,
+        Ok(Err(err)) => {
+            let message = err.to_string();
+            return PostgresqlProbeResult::Failed {
+                host: settings.host.clone(),
+                port: settings.port,
+                classification: classify_postgresql_probe_error(&message),
+            };
+        }
+        Err(_) => {
+            return PostgresqlProbeResult::Failed {
+                host: settings.host.clone(),
+                port: settings.port,
+                classification: "failed: timeout".into(),
+            };
+        }
+    };
+
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+
+    let query = timeout(Duration::from_secs(4), client.query_one("SELECT 1", &[])).await;
+    match query {
+        Ok(Ok(_row)) => PostgresqlProbeResult::Connected {
+            host: settings.host.clone(),
+            port: settings.port,
+            latency_ms: started_at.elapsed().as_millis(),
+        },
+        Ok(Err(err)) => {
+            let message = err.to_string();
+            PostgresqlProbeResult::Failed {
+                host: settings.host.clone(),
+                port: settings.port,
+                classification: classify_postgresql_probe_error(&message),
+            }
+        }
+        Err(_) => PostgresqlProbeResult::Failed {
+            host: settings.host.clone(),
+            port: settings.port,
+            classification: "failed: timeout".into(),
+        },
+    }
+}
+
+fn build_tls_connector(settings: &PostgresqlProbeSettings) -> Result<MakeTlsConnector, String> {
+    let mut builder = TlsConnector::builder();
+    if let Some(pem) = settings.sslrootcert.as_deref() {
+        let cert = Certificate::from_pem(pem.as_bytes())
+            .map_err(|_| "failed: tls certificate parse".to_string())?;
+        builder.add_root_certificate(cert);
+    }
+
+    builder
+        .build()
+        .map(MakeTlsConnector::new)
+        .map_err(|_| "failed: tls connector build".to_string())
 }
 
 fn select_postgresql_port(service: &ServiceInfo) -> Option<u16> {
@@ -911,6 +1205,14 @@ mod tests {
             workload_monitoring_targets: vec!["angular".into(), "spring_boot".into()],
             postgresql_monitoring_enabled: false,
             postgresql_monitoring_namespaces: vec![],
+            postgresql_monitoring_secret_name: None,
+            postgresql_monitoring_host: None,
+            postgresql_monitoring_port: None,
+            postgresql_monitoring_user: None,
+            postgresql_monitoring_password: None,
+            postgresql_monitoring_database: None,
+            postgresql_monitoring_sslmode: None,
+            postgresql_monitoring_sslrootcert: None,
         }
     }
 
@@ -1212,6 +1514,7 @@ mod tests {
     async fn build_postgresql_returns_none_when_disabled() {
         let cfg = base_config(false, vec!["customer-app".into()]);
         let result = build_postgresql_monitoring(
+            None,
             &cfg,
             &Workloads::default(),
             &[],
@@ -1312,6 +1615,7 @@ mod tests {
         let pods = vec![postgres_pod("customer-db", "postgresql-0", "Pending")];
 
         let result = build_postgresql_monitoring(
+            None,
             &cfg,
             &workloads,
             &pods,
@@ -1364,6 +1668,7 @@ mod tests {
         };
 
         let result = build_postgresql_monitoring(
+            None,
             &cfg,
             &Workloads::default(),
             &[],
@@ -1440,6 +1745,7 @@ mod tests {
         cfg.postgresql_monitoring_namespaces = vec!["customer-db".into()];
 
         let result = build_postgresql_monitoring(
+            None,
             &cfg,
             &Workloads::default(),
             &[],

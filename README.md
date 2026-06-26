@@ -332,12 +332,20 @@ When enabled with a non-empty allowlist, the snapshot gains:
 
 ### PostgreSQL monitoring
 
-The PostgreSQL plugin is opt-in, namespace-scoped, and discovery-first. It derives a synthesized health status from Kubernetes evidence in the configured namespaces, and it adds an unauthenticated `SELECT 1` probe only when a Service clearly matches the PostgreSQL heuristics. The probe uses `NoTls`.
+The PostgreSQL plugin is opt-in, namespace-scoped, and discovery-first. It derives a synthesized health status from Kubernetes evidence in the configured namespaces, and it adds a `SELECT 1` probe only when a Service clearly matches the PostgreSQL heuristics. Probe settings are loaded from a Secret first and then from `POSTGRESQL_MONITORING_*` env vars.
 
 | Variable | Default | Notes |
 |---|---|---|
 | `POSTGRESQL_MONITORING_ENABLED` | `false` | Master switch. When `false`, the plugin block is omitted. |
 | `POSTGRESQL_MONITORING_NAMESPACES` | `[]` | YAML list allowlist. Empty disables the plugin regardless of `ENABLED`. |
+| `POSTGRESQL_MONITORING_SECRET_NAME` | empty | Optional Secret name to read in the discovered service namespace. |
+| `POSTGRESQL_MONITORING_HOST` | empty | Env fallback host override. Defaults to the discovered Service DNS name. |
+| `POSTGRESQL_MONITORING_PORT` | empty | Env fallback port override. Defaults to the discovered PostgreSQL port. |
+| `POSTGRESQL_MONITORING_USER` | empty | Env fallback user override. Defaults to `postgres`. |
+| `POSTGRESQL_MONITORING_DATABASE` | empty | Env fallback database override. Defaults to `postgres`. |
+| `POSTGRESQL_MONITORING_SSLMODE` | `disable` | Env fallback TLS mode. `disable` skips TLS; any other value enables TLS. |
+
+When a Secret is configured, the probe reads the following keys from it: `host`, `port`, `user`, `password`, `database`, `sslmode`, and `sslrootcert`. Env vars fill any missing values; explicit env vars still win over Secret values. The probe remains fail-soft if the Secret is absent or incomplete.
 
 When enabled with a non-empty allowlist, the snapshot gains:
 
