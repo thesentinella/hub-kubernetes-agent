@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.34.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.33.0...v0.34.0) (2026-06-26)
+
+
+### Features
+
+* refine postgres discovery heuristics ([#133](https://github.com/thesentinella/hub-kubernetes-agent/issues/133)) ([4fec2cf](https://github.com/thesentinella/hub-kubernetes-agent/commit/4fec2cf5bd7bdbad089e6ca8829ed01894c7aadd))
+
 ## [0.33.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.32.0...v0.33.0) (2026-06-26)
 
 
