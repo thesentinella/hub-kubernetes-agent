@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.36.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.35.0...v0.36.0) (2026-06-27)
+
+
+### Features
+
+* add read-only postgres diagnostics ([#137](https://github.com/thesentinella/hub-kubernetes-agent/issues/137)) ([60f5662](https://github.com/thesentinella/hub-kubernetes-agent/commit/60f56624a727ab38cb7cb7d23c2c7d4b4a26b953))
+
 ## [0.35.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.34.0...v0.35.0) (2026-06-26)
 
 
