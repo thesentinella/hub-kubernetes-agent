@@ -20,6 +20,7 @@ pub const AGENT_CONFIG_ENV_ALLOWLIST: &[&str] = &[
     "LEASE_NAME",
     "LEASE_TTL_SECS",
     "POLL_WAIT_SECS",
+    "READONLY_COMMANDS_ENABLED",
     "POSTGRESQL_MONITORING_DATABASE",
     "POSTGRESQL_MONITORING_ENABLED",
     "POSTGRESQL_MONITORING_HOST",
@@ -57,6 +58,9 @@ pub struct Config {
 
     /// Master switch for action execution. Read-only when false.
     pub actions_enabled: bool,
+
+    /// Master switch for read-only diagnostic commands.
+    pub readonly_commands_enabled: bool,
 
     /// Enables cluster-wide secret metadata/key-name collection.
     pub collect_secrets: bool,
@@ -175,6 +179,7 @@ impl Config {
             .ok()
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
+        let readonly_commands_enabled = env_flag("READONLY_COMMANDS_ENABLED");
         let collect_secrets = env_flag("COLLECT_SECRETS");
         let collect_dependencies_tetragon = env_flag("COLLECT_DEPENDENCIES_TETRAGON");
         let tetragon_required_for_readiness =
@@ -222,6 +227,7 @@ impl Config {
             collect_interval,
             poll_wait,
             actions_enabled,
+            readonly_commands_enabled,
             collect_secrets,
             collect_dependencies_tetragon,
             tetragon_required_for_readiness,
@@ -283,6 +289,7 @@ pub fn agent_configured_env(values: &BTreeMap<String, String>) -> Vec<KV> {
 fn runtime_env_value(cfg: &Config, key: &str) -> Option<String> {
     match key {
         "ACTIONS_ENABLED" => Some(bool_string(cfg.actions_enabled)),
+        "READONLY_COMMANDS_ENABLED" => Some(bool_string(cfg.readonly_commands_enabled)),
         "AGENT_HTTP_DEBUG" => Some(bool_string(cfg.http_debug)),
         "AGENT_HTTP_DEBUG_BODIES" => Some(bool_string(cfg.http_debug_bodies)),
         "AGENT_LOG" => Some(cfg.agent_log.clone()),
@@ -329,6 +336,7 @@ fn configured_env_value(key: &str, value: &str) -> Option<String> {
         | "COLLECT_DEPENDENCIES_TETRAGON"
         | "COLLECT_SECRETS"
         | "FULL_DEBUG"
+        | "READONLY_COMMANDS_ENABLED"
         | "POSTGRESQL_MONITORING_ENABLED"
         | "TECH_DETECT_PROCESS" => Some(bool_string(trimmed == "true" || trimmed == "1")),
         "AGENT_LOG" => Some(if trimmed.is_empty() {
@@ -671,6 +679,37 @@ mod tests {
     }
 
     #[test]
+    fn readonly_commands_enabled_true_values() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        unsafe {
+            reset_env();
+            set_required("https://hub.example.com", "cluster-1");
+            for val in ["true", "1"] {
+                env::set_var("READONLY_COMMANDS_ENABLED", val);
+                let cfg = Config::from_env().unwrap();
+                assert!(
+                    cfg.readonly_commands_enabled,
+                    "expected true for READONLY_COMMANDS_ENABLED={val}"
+                );
+            }
+            env::remove_var("READONLY_COMMANDS_ENABLED");
+            clear_required();
+        }
+    }
+
+    #[test]
+    fn readonly_commands_enabled_defaults_false() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        unsafe {
+            reset_env();
+            set_required("https://hub.example.com", "cluster-1");
+            let cfg = Config::from_env().unwrap();
+            assert!(!cfg.readonly_commands_enabled);
+            clear_required();
+        }
+    }
+
+    #[test]
     fn collect_secrets_true_values() {
         let _lock = ENV_LOCK.lock().unwrap();
         unsafe {
@@ -722,6 +761,7 @@ mod tests {
             collect_interval: Duration::from_secs(60),
             poll_wait: Duration::from_secs(30),
             actions_enabled: true,
+            readonly_commands_enabled: true,
             collect_secrets: false,
             collect_dependencies_tetragon: true,
             tetragon_required_for_readiness: true,
@@ -945,6 +985,7 @@ mod tests {
             collect_interval: Duration::from_secs(60),
             poll_wait: Duration::from_secs(30),
             actions_enabled: false,
+            readonly_commands_enabled: false,
             collect_secrets: false,
             collect_dependencies_tetragon: false,
             tetragon_required_for_readiness: true,
@@ -993,6 +1034,7 @@ mod tests {
             collect_interval: Duration::from_secs(60),
             poll_wait: Duration::from_secs(30),
             actions_enabled: false,
+            readonly_commands_enabled: false,
             collect_secrets: false,
             collect_dependencies_tetragon: false,
             tetragon_required_for_readiness: true,

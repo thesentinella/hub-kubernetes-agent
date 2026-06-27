@@ -593,6 +593,8 @@ pub struct CommandBatch {
 ///   Spec shape: [`SelfUpdateSpec`].
 /// - `update_agent` — updates the agent DaemonSet container image.
 ///   Spec shape: [`UpdateAgentSpec`].
+/// - `diagnose_postgresql` — read-only PostgreSQL diagnosis.
+///   Spec shape: [`PostgresqlDiagnosticSpec`].
 ///
 /// The two-command pattern (preview, then apply) is intentional:
 /// - Each artifact is a separate Hub record with its own id, timestamp, and
@@ -607,6 +609,22 @@ pub struct Command {
     pub kind: String,
     #[serde(default)]
     pub spec: serde_json::Value,
+}
+
+/// Spec payload for `diagnose_postgresql`.
+///
+/// `namespace` is required. The remaining fields are optional discovery hints
+/// that narrow the read-only PostgreSQL diagnosis.
+#[derive(Deserialize, Debug)]
+#[allow(dead_code)]
+pub struct PostgresqlDiagnosticSpec {
+    pub namespace: String,
+    #[serde(default)]
+    pub service_name: Option<String>,
+    #[serde(default)]
+    pub pod_selector: Option<String>,
+    #[serde(default)]
+    pub secret_name: Option<String>,
 }
 
 /// Spec payload for `preview_workload_resources` and `apply_workload_resources`.
@@ -722,6 +740,10 @@ pub struct CommandResult {
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub warnings: Vec<String>,
 
+    /// Structured diagnostic payload for read-only diagnostic commands.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<PostgresqlDiagnosticReport>,
+
     /// Internal control signal used by the runtime loop. When true on a
     /// successful command, the agent exits after ack attempt so Kubernetes can
     /// restart the pod.
@@ -743,9 +765,35 @@ impl CommandResult {
             observed_before: None,
             observed_after: None,
             warnings: Vec::new(),
+            diagnostic: None,
             restart_requested: None,
         }
     }
+}
+
+/// Structured report returned by `diagnose_postgresql`.
+#[derive(Serialize, Debug, Clone)]
+pub struct PostgresqlDiagnosticReport {
+    pub namespace: String,
+    pub status: String,
+    pub summary: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub findings: Vec<PostgresqlDiagnosticFinding>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<PostgresqlMonitoringEvidenceItem>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub missing_data: Vec<PostgresqlMonitoringMissingDataItem>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub recommended_actions: Vec<String>,
+}
+
+#[derive(Serialize, Debug, Clone)]
+pub struct PostgresqlDiagnosticFinding {
+    pub title: String,
+    pub severity: String,
+    pub description: String,
+    pub evidence: String,
+    pub recommendation: String,
 }
 
 fn now_ms() -> u128 {
@@ -799,6 +847,13 @@ mod tests {
     }
 
     #[test]
+    fn command_result_serialization_omits_diagnostic_when_none() {
+        let r = CommandResult::simple("cmd-5".into(), "ok", None);
+        let v: Value = serde_json::to_value(&r).unwrap();
+        assert!(!v.as_object().unwrap().contains_key("diagnostic"));
+    }
+
+    #[test]
     fn command_batch_deserializes_empty() {
         let json = r#"{}"#;
         let batch: CommandBatch = serde_json::from_str(json).unwrap();
@@ -816,6 +871,21 @@ mod tests {
         assert_eq!(batch.commands.len(), 1);
         assert_eq!(batch.commands[0].id, "c1");
         assert_eq!(batch.commands[0].kind, "preview_workload_resources");
+    }
+
+    #[test]
+    fn postgresql_diagnostic_spec_deserializes() {
+        let json = r#"{
+            "namespace": "customer-db",
+            "service_name": "postgresql",
+            "pod_selector": "postgres",
+            "secret_name": "postgresql-monitoring"
+        }"#;
+        let spec: PostgresqlDiagnosticSpec = serde_json::from_str(json).unwrap();
+        assert_eq!(spec.namespace, "customer-db");
+        assert_eq!(spec.service_name.as_deref(), Some("postgresql"));
+        assert_eq!(spec.pod_selector.as_deref(), Some("postgres"));
+        assert_eq!(spec.secret_name.as_deref(), Some("postgresql-monitoring"));
     }
 
     #[test]
