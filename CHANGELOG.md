@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.35.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.34.0...v0.35.0) (2026-06-26)
+
+
+### Features
+
+* add secret-backed postgres probe ([#135](https://github.com/thesentinella/hub-kubernetes-agent/issues/135)) ([bca9864](https://github.com/thesentinella/hub-kubernetes-agent/commit/bca98646f0fecaa870325f90995c9002ad655702))
+
 ## [0.34.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.33.0...v0.34.0) (2026-06-26)
 
 
