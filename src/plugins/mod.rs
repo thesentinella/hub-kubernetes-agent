@@ -15,6 +15,7 @@
 //!
 //! See `docs/adr/0001-workload-monitoring-plugin.md` for the full contract.
 
+use crate::collector;
 use crate::config::Config;
 use crate::model::*;
 
@@ -166,7 +167,494 @@ pub async fn build_postgresql_monitoring(
     .await
 }
 
+pub async fn diagnose_postgresql(
+    client: &Client,
+    cfg: &Config,
+    spec: &PostgresqlDiagnosticSpec,
+) -> PostgresqlDiagnosticReport {
+    let namespace = spec.namespace.trim().to_string();
+    if namespace.is_empty() {
+        return diagnostic_report_error(
+            namespace,
+            "namespace is required".to_string(),
+            Vec::new(),
+            Vec::new(),
+        );
+    }
+
+    let collected = match collector::collect(
+        client,
+        cfg.collect_secrets,
+        cfg.collect_dependencies_tetragon,
+        cfg.tech_detect_process,
+    )
+    .await
+    {
+        Ok(snapshot) => snapshot,
+        Err(err) => {
+            return diagnostic_report_error(
+                namespace,
+                format!("failed to collect cluster inventory: {err}"),
+                Vec::new(),
+                Vec::new(),
+            );
+        }
+    };
+
+    let (
+        _k8s_uid,
+        _cluster,
+        _namespaces,
+        workloads,
+        pods,
+        network,
+        _security,
+        _operational_maturity,
+        _dependencies,
+        _configuration,
+        storage,
+        events,
+        _metrics,
+        _snapshot_api,
+    ) = collected;
+
+    let scope =
+        scope_postgresql_diagnostic(&namespace, spec, workloads, pods, network, storage, events);
+
+    let mut probe_cfg = cfg.clone();
+    probe_cfg.postgresql_monitoring_enabled = true;
+    probe_cfg.postgresql_monitoring_namespaces = vec![namespace.clone()];
+    if let Some(secret_name) = spec
+        .secret_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        probe_cfg.postgresql_monitoring_secret_name = Some(secret_name.to_string());
+    }
+
+    let plugin = build_postgresql_monitoring(
+        Some(client),
+        &probe_cfg,
+        &scope.workloads,
+        &scope.pods,
+        &scope.network,
+        &scope.storage,
+        &scope.events,
+    )
+    .await;
+
+    match plugin {
+        Some(plugin) => diagnostic_report_from_plugin(
+            namespace,
+            plugin,
+            scope.hint_missing_data,
+            scope.hint_findings,
+        ),
+        None => diagnostic_report_unknown(
+            namespace,
+            "postgresql diagnosis unavailable".to_string(),
+            scope.hint_missing_data,
+            scope.hint_findings,
+        ),
+    }
+}
+
 type ProbeFuture<'a> = Pin<Box<dyn Future<Output = PostgresqlProbeResult> + Send + 'a>>;
+
+struct PostgresqlDiagnosticScope {
+    workloads: Workloads,
+    pods: Vec<PodInfo>,
+    network: NetworkInventory,
+    storage: StorageInventory,
+    events: Vec<EventInfo>,
+    hint_missing_data: Vec<PostgresqlMonitoringMissingDataItem>,
+    hint_findings: Vec<PostgresqlDiagnosticFinding>,
+}
+
+fn scope_postgresql_diagnostic(
+    namespace: &str,
+    spec: &PostgresqlDiagnosticSpec,
+    workloads: Workloads,
+    pods: Vec<PodInfo>,
+    network: NetworkInventory,
+    storage: StorageInventory,
+    events: Vec<EventInfo>,
+) -> PostgresqlDiagnosticScope {
+    let service_name = spec
+        .service_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let pod_selector = spec
+        .pod_selector
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    let workloads = Workloads {
+        deployments: workloads
+            .deployments
+            .into_iter()
+            .filter(|workload| workload.namespace == namespace)
+            .filter(|workload| {
+                pod_selector
+                    .map(|hint| postgres_hint_matches(&workload.name, hint))
+                    .unwrap_or(true)
+            })
+            .collect(),
+        statefulsets: workloads
+            .statefulsets
+            .into_iter()
+            .filter(|workload| workload.namespace == namespace)
+            .filter(|workload| {
+                pod_selector
+                    .map(|hint| postgres_hint_matches(&workload.name, hint))
+                    .unwrap_or(true)
+            })
+            .collect(),
+        daemonsets: workloads
+            .daemonsets
+            .into_iter()
+            .filter(|workload| workload.namespace == namespace)
+            .filter(|workload| {
+                pod_selector
+                    .map(|hint| postgres_hint_matches(&workload.name, hint))
+                    .unwrap_or(true)
+            })
+            .collect(),
+    };
+
+    let pods = pods
+        .into_iter()
+        .filter(|pod| pod.namespace == namespace)
+        .filter(|pod| {
+            pod_selector
+                .map(|hint| postgres_pod_matches(pod, hint))
+                .unwrap_or(true)
+        })
+        .collect::<Vec<_>>();
+
+    let mut services = network
+        .services
+        .into_iter()
+        .filter(|service| service.namespace == namespace)
+        .collect::<Vec<_>>();
+    if let Some(service_name) = service_name {
+        let matched = services
+            .iter()
+            .filter(|service| service.name == service_name)
+            .cloned()
+            .collect::<Vec<_>>();
+        if matched.is_empty() {
+            let hint_missing_data = vec![PostgresqlMonitoringMissingDataItem {
+                title: "service hint".to_string(),
+                value: format!(
+                    "no Service named `{}` matched namespace `{}`",
+                    service_name, namespace
+                ),
+            }];
+            let hint_findings = vec![PostgresqlDiagnosticFinding {
+                title: "Service hint not resolved".to_string(),
+                severity: "unknown".to_string(),
+                description: format!(
+                    "no Service named `{}` matched namespace `{}`",
+                    service_name, namespace
+                ),
+                evidence: "service hint did not match any namespace-local Service".to_string(),
+                recommendation:
+                    "double-check the service_name hint or omit it to use heuristic discovery"
+                        .to_string(),
+            }];
+            return PostgresqlDiagnosticScope {
+                workloads,
+                pods,
+                network: NetworkInventory {
+                    services: Vec::new(),
+                    ingresses: network
+                        .ingresses
+                        .into_iter()
+                        .filter(|ingress| ingress.namespace == namespace)
+                        .collect(),
+                },
+                storage: StorageInventory {
+                    storage_classes: storage.storage_classes,
+                    persistent_volumes: storage.persistent_volumes,
+                    persistent_volume_claims: storage
+                        .persistent_volume_claims
+                        .into_iter()
+                        .filter(|pvc| pvc.namespace == namespace)
+                        .collect(),
+                    volume_snapshot_classes: storage.volume_snapshot_classes,
+                    volume_snapshots: storage.volume_snapshots,
+                },
+                events: events
+                    .into_iter()
+                    .filter(|event| event.namespace == namespace)
+                    .filter(|event| {
+                        pod_selector
+                            .map(|hint| postgres_event_matches_hint(event, hint))
+                            .unwrap_or(true)
+                    })
+                    .collect(),
+                hint_missing_data,
+                hint_findings,
+            };
+        }
+        services = matched;
+    }
+
+    let hint_missing_data = if pod_selector.is_some() && pods.is_empty() {
+        vec![PostgresqlMonitoringMissingDataItem {
+            title: "pod selector hint".to_string(),
+            value: format!(
+                "no Pod or workload name matched `{}` in namespace `{}`",
+                pod_selector.unwrap_or_default(),
+                namespace
+            ),
+        }]
+    } else {
+        Vec::new()
+    };
+
+    let mut hint_findings = Vec::new();
+    if let Some(item) = hint_missing_data.first() {
+        hint_findings.push(PostgresqlDiagnosticFinding {
+            title: "Discovery hint not resolved".to_string(),
+            severity: "unknown".to_string(),
+            description: item.value.clone(),
+            evidence: "discovery hint filtered out all candidate pods/workloads".to_string(),
+            recommendation:
+                "double-check the pod_selector hint or omit it to use heuristic discovery"
+                    .to_string(),
+        });
+    }
+
+    PostgresqlDiagnosticScope {
+        workloads,
+        pods,
+        network: NetworkInventory {
+            services,
+            ingresses: network
+                .ingresses
+                .into_iter()
+                .filter(|ingress| ingress.namespace == namespace)
+                .collect(),
+        },
+        storage: StorageInventory {
+            storage_classes: storage.storage_classes,
+            persistent_volumes: storage.persistent_volumes,
+            persistent_volume_claims: storage
+                .persistent_volume_claims
+                .into_iter()
+                .filter(|pvc| pvc.namespace == namespace)
+                .collect(),
+            volume_snapshot_classes: storage.volume_snapshot_classes,
+            volume_snapshots: storage.volume_snapshots,
+        },
+        events: events
+            .into_iter()
+            .filter(|event| event.namespace == namespace)
+            .filter(|event| {
+                pod_selector
+                    .map(|hint| postgres_event_matches_hint(event, hint))
+                    .unwrap_or(true)
+            })
+            .collect(),
+        hint_missing_data,
+        hint_findings,
+    }
+}
+
+fn postgres_hint_matches(value: &str, hint: &str) -> bool {
+    value.to_lowercase().contains(&hint.to_lowercase())
+}
+
+fn postgres_pod_matches(pod: &PodInfo, hint: &str) -> bool {
+    postgres_hint_matches(&pod.name, hint)
+        || pod
+            .owner_name
+            .as_deref()
+            .map(|value| postgres_hint_matches(value, hint))
+            .unwrap_or(false)
+        || pod
+            .owner_kind
+            .as_deref()
+            .map(|value| postgres_hint_matches(value, hint))
+            .unwrap_or(false)
+        || pod.containers.iter().any(|container| {
+            postgres_hint_matches(&container.name, hint)
+                || postgres_hint_matches(&container.image, hint)
+        })
+}
+
+fn postgres_event_matches_hint(event: &EventInfo, hint: &str) -> bool {
+    postgres_hint_matches(&event.name, hint)
+        || event
+            .reason
+            .as_deref()
+            .map(|value| postgres_hint_matches(value, hint))
+            .unwrap_or(false)
+        || event
+            .message
+            .as_deref()
+            .map(|value| postgres_hint_matches(value, hint))
+            .unwrap_or(false)
+        || event
+            .involved_object
+            .name
+            .as_deref()
+            .map(|value| postgres_hint_matches(value, hint))
+            .unwrap_or(false)
+}
+
+fn diagnostic_report_error(
+    namespace: String,
+    message: String,
+    hint_missing_data: Vec<PostgresqlMonitoringMissingDataItem>,
+    hint_findings: Vec<PostgresqlDiagnosticFinding>,
+) -> PostgresqlDiagnosticReport {
+    let finding = PostgresqlDiagnosticFinding {
+        title: "PostgreSQL diagnosis failed".to_string(),
+        severity: "unknown".to_string(),
+        description: message.clone(),
+        evidence: message.clone(),
+        recommendation: "retry after the underlying collection or configuration issue is resolved"
+            .to_string(),
+    };
+    PostgresqlDiagnosticReport {
+        namespace,
+        status: "unknown".to_string(),
+        summary: message,
+        findings: hint_findings.into_iter().chain([finding]).collect(),
+        evidence: Vec::new(),
+        missing_data: hint_missing_data,
+        recommended_actions: vec![
+            "retry after resolving the underlying collection or configuration issue".to_string(),
+        ],
+    }
+}
+
+fn diagnostic_report_unknown(
+    namespace: String,
+    summary: String,
+    hint_missing_data: Vec<PostgresqlMonitoringMissingDataItem>,
+    hint_findings: Vec<PostgresqlDiagnosticFinding>,
+) -> PostgresqlDiagnosticReport {
+    let mut findings = hint_findings;
+    findings.push(PostgresqlDiagnosticFinding {
+        title: "PostgreSQL diagnosis".to_string(),
+        severity: "unknown".to_string(),
+        description: summary.clone(),
+        evidence: summary.clone(),
+        recommendation: "review the missing data and discovery hints, then retry".to_string(),
+    });
+    PostgresqlDiagnosticReport {
+        namespace,
+        status: "unknown".to_string(),
+        summary,
+        findings,
+        evidence: Vec::new(),
+        missing_data: hint_missing_data,
+        recommended_actions: vec![
+            "review the missing data and discovery hints, then retry".to_string(),
+        ],
+    }
+}
+
+fn diagnostic_report_from_plugin(
+    namespace: String,
+    plugin: PostgresqlMonitoringPlugin,
+    hint_missing_data: Vec<PostgresqlMonitoringMissingDataItem>,
+    hint_findings: Vec<PostgresqlDiagnosticFinding>,
+) -> PostgresqlDiagnosticReport {
+    let mut status = plugin.status.clone();
+    let mut summary = plugin.summary.clone();
+    let mut missing_data = plugin.missing_data.clone();
+    missing_data.extend(hint_missing_data);
+
+    if !missing_data.is_empty() {
+        status = "unknown".to_string();
+        summary = format!(
+            "{} Discovery hints or missing data prevented a fully resolved diagnosis.",
+            summary
+        );
+    }
+
+    let mut findings = Vec::new();
+    findings.push(PostgresqlDiagnosticFinding {
+        title: "PostgreSQL diagnosis".to_string(),
+        severity: diagnostic_severity(&status).to_string(),
+        description: summary.clone(),
+        evidence: plugin
+            .evidence
+            .iter()
+            .map(|item| format!("{}: {}", item.title, item.value))
+            .collect::<Vec<_>>()
+            .join("; "),
+        recommendation: diagnostic_recommendation(&status).to_string(),
+    });
+
+    findings.extend(plugin.detail.iter().map(|item| {
+        PostgresqlDiagnosticFinding {
+            title: item.title.clone(),
+            severity: diagnostic_severity(&status).to_string(),
+            description: item.value.clone(),
+            evidence: plugin
+                .evidence
+                .iter()
+                .map(|e| format!("{}: {}", e.title, e.value))
+                .collect::<Vec<_>>()
+                .join("; "),
+            recommendation: diagnostic_recommendation(&status).to_string(),
+        }
+    }));
+
+    findings.extend(hint_findings);
+
+    let recommended_actions = diagnostic_recommendations(&status, &findings);
+
+    PostgresqlDiagnosticReport {
+        namespace,
+        status,
+        summary,
+        findings,
+        evidence: plugin.evidence,
+        missing_data,
+        recommended_actions,
+    }
+}
+
+fn diagnostic_severity(status: &str) -> &'static str {
+    match status {
+        "healthy" => "info",
+        "warning" => "warning",
+        "critical" => "critical",
+        _ => "unknown",
+    }
+}
+
+fn diagnostic_recommendation(status: &str) -> &'static str {
+    match status {
+        "healthy" => "continue monitoring and re-run if symptoms change",
+        "warning" => "review the warnings and missing data, then re-run the diagnosis",
+        "critical" => "treat this as an active incident and inspect the identified evidence",
+        _ => "resolve the missing data or discovery issues, then re-run the diagnosis",
+    }
+}
+
+fn diagnostic_recommendations(
+    status: &str,
+    findings: &[PostgresqlDiagnosticFinding],
+) -> Vec<String> {
+    let mut recommendations = vec![diagnostic_recommendation(status).to_string()];
+    if findings.iter().any(|finding| finding.severity == "unknown") {
+        recommendations.push("double-check discovery hints and permissions".to_string());
+    }
+    recommendations.sort();
+    recommendations.dedup();
+    recommendations
+}
 
 async fn build_postgresql_monitoring_with_probe<F>(
     cfg: &Config,
@@ -1185,6 +1673,7 @@ mod tests {
             collect_interval: Duration::from_secs(60),
             poll_wait: Duration::from_secs(30),
             actions_enabled: false,
+            readonly_commands_enabled: false,
             collect_secrets: false,
             collect_dependencies_tetragon: false,
             tetragon_required_for_readiness: true,

@@ -5,7 +5,8 @@
 
 use crate::config::Config;
 use crate::model::{
-    Command, CommandResult, ResourceMap, SelfUpdateSpec, UpdateAgentSpec, WorkloadResourcesSpec,
+    Command, CommandResult, PostgresqlDiagnosticSpec, ResourceMap, SelfUpdateSpec, UpdateAgentSpec,
+    WorkloadResourcesSpec,
 };
 use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, StatefulSet};
 use k8s_openapi::api::autoscaling::v2::HorizontalPodAutoscaler;
@@ -38,37 +39,85 @@ impl Executor {
     }
 
     pub async fn execute(&self, cmd: &Command) -> CommandResult {
-        // Master switch: when actions are disabled the agent does not even
-        // attempt to parse the spec. This keeps the read-only release truly
-        // read-only.
-        if !self.cfg.actions_enabled {
-            warn!(command_id = %cmd.id, kind = %cmd.kind, "actions disabled; skipping");
-            return CommandResult::simple(
-                cmd.id.clone(),
-                "skipped",
-                Some("agent in read-only mode (ACTIONS_ENABLED=false)".into()),
-            );
-        }
-
-        // Dispatch by kind. Known kinds parse their spec and route to a
-        // handler; unknown kinds short-circuit with `unknown`.
         match cmd.kind.as_str() {
-            "preview_workload_resources" => match parse_spec::<WorkloadResourcesSpec>(cmd) {
-                Ok(spec) => self.preview_workload_resources(&cmd.id, spec).await,
-                Err(e) => spec_error(cmd, e),
-            },
-            "apply_workload_resources" => match parse_spec::<WorkloadResourcesSpec>(cmd) {
-                Ok(spec) => self.apply_workload_resources(&cmd.id, spec).await,
-                Err(e) => spec_error(cmd, e),
-            },
-            "self_update" => match parse_spec::<SelfUpdateSpec>(cmd) {
-                Ok(spec) => self.self_update(&cmd.id, spec).await,
-                Err(e) => spec_error(cmd, e),
-            },
-            "update_agent" => match parse_spec::<UpdateAgentSpec>(cmd) {
-                Ok(spec) => self.update_agent(&cmd.id, spec).await,
-                Err(e) => spec_error(cmd, e),
-            },
+            "diagnose_postgresql" => {
+                if !self.cfg.readonly_commands_enabled {
+                    warn!(command_id = %cmd.id, kind = %cmd.kind, "read-only commands disabled; skipping");
+                    return CommandResult::simple(
+                        cmd.id.clone(),
+                        "skipped",
+                        Some(
+                            "agent read-only commands disabled (READONLY_COMMANDS_ENABLED=false)"
+                                .into(),
+                        ),
+                    );
+                }
+
+                match parse_spec::<PostgresqlDiagnosticSpec>(cmd) {
+                    Ok(spec) => self.diagnose_postgresql(&cmd.id, spec).await,
+                    Err(e) => spec_error(cmd, e),
+                }
+            }
+            "preview_workload_resources" => {
+                if !self.cfg.actions_enabled {
+                    warn!(command_id = %cmd.id, kind = %cmd.kind, "actions disabled; skipping");
+                    return CommandResult::simple(
+                        cmd.id.clone(),
+                        "skipped",
+                        Some("agent in read-only mode (ACTIONS_ENABLED=false)".into()),
+                    );
+                }
+
+                match parse_spec::<WorkloadResourcesSpec>(cmd) {
+                    Ok(spec) => self.preview_workload_resources(&cmd.id, spec).await,
+                    Err(e) => spec_error(cmd, e),
+                }
+            }
+            "apply_workload_resources" => {
+                if !self.cfg.actions_enabled {
+                    warn!(command_id = %cmd.id, kind = %cmd.kind, "actions disabled; skipping");
+                    return CommandResult::simple(
+                        cmd.id.clone(),
+                        "skipped",
+                        Some("agent in read-only mode (ACTIONS_ENABLED=false)".into()),
+                    );
+                }
+
+                match parse_spec::<WorkloadResourcesSpec>(cmd) {
+                    Ok(spec) => self.apply_workload_resources(&cmd.id, spec).await,
+                    Err(e) => spec_error(cmd, e),
+                }
+            }
+            "self_update" => {
+                if !self.cfg.actions_enabled {
+                    warn!(command_id = %cmd.id, kind = %cmd.kind, "actions disabled; skipping");
+                    return CommandResult::simple(
+                        cmd.id.clone(),
+                        "skipped",
+                        Some("agent in read-only mode (ACTIONS_ENABLED=false)".into()),
+                    );
+                }
+
+                match parse_spec::<SelfUpdateSpec>(cmd) {
+                    Ok(spec) => self.self_update(&cmd.id, spec).await,
+                    Err(e) => spec_error(cmd, e),
+                }
+            }
+            "update_agent" => {
+                if !self.cfg.actions_enabled {
+                    warn!(command_id = %cmd.id, kind = %cmd.kind, "actions disabled; skipping");
+                    return CommandResult::simple(
+                        cmd.id.clone(),
+                        "skipped",
+                        Some("agent in read-only mode (ACTIONS_ENABLED=false)".into()),
+                    );
+                }
+
+                match parse_spec::<UpdateAgentSpec>(cmd) {
+                    Ok(spec) => self.update_agent(&cmd.id, spec).await,
+                    Err(e) => spec_error(cmd, e),
+                }
+            }
             other => {
                 info!(command_id = %cmd.id, kind = %other, "unknown command kind");
                 CommandResult::simple(
@@ -594,6 +643,18 @@ impl Executor {
         result.observed_before = Some(json!({"image": before_image}));
         result.observed_after = Some(json!({"image": after_image}));
         result.warnings = warnings;
+        result
+    }
+
+    async fn diagnose_postgresql(
+        &self,
+        command_id: &str,
+        spec: PostgresqlDiagnosticSpec,
+    ) -> CommandResult {
+        info!(command_id, namespace = %spec.namespace, "diagnose_postgresql: collecting read-only diagnostics");
+        let report = crate::plugins::diagnose_postgresql(&self.client, &self.cfg, &spec).await;
+        let mut result = CommandResult::simple(command_id.to_string(), "ok", None);
+        result.diagnostic = Some(report);
         result
     }
 }

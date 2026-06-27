@@ -38,6 +38,7 @@
 | `LEASE_TTL_SECS` | no | `30` | Lease validity window; renew interval is `ttl / 3`. |
 | `LEASE_NAME` | no | `sentinella-hub-k8s-agent-leader` | Lease object name. |
 | `ACTIONS_ENABLED` | no | `false` | Only `true` or `1` enables action dispatch. |
+| `READONLY_COMMANDS_ENABLED` | no | `false` | Enables read-only commands such as `diagnose_postgresql` without enabling mutating actions. |
 | `COLLECT_SECRETS` | no | `false` | When `true`, collect Secret metadata and key names only; requires separate `secrets` read RBAC. |
 | `COLLECT_DEPENDENCIES_TETRAGON` | no | `false` | When `true`, collect dependency edges from Tetragon gRPC. |
 | `TETRAGON_REQUIRED_FOR_READINESS` | no | `true` | When `true`, `/readyz` blocks until Tetragon connects; set `false` to relax readiness for dev or nodes without Tetragon. |
@@ -53,6 +54,7 @@
 - If configured, Secret keys are `host`, `port`, `user`, `password`, `database`, `sslmode`, and `sslrootcert`.
 - Missing probe values fall back to the discovered Service DNS name, discovered Service port, `postgres` user, `postgres` database, and `sslmode=disable`.
 - `sslmode=disable` uses `NoTls`; any other `sslmode` value enables TLS with `native-tls`.
+- `diagnose_postgresql` is a separate read-only command. It reuses the PostgreSQL discovery/probe path, returns a structured diagnostic payload, and only runs when `READONLY_COMMANDS_ENABLED=true`.
 
 ## Agent Endpoints
 
