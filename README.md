@@ -330,6 +330,8 @@ When enabled with a non-empty allowlist, the snapshot gains:
 
 `plugins.workload_monitoring.logs` is the current log-tail projection for pods in the allowlist. It reads current logs only (no `previous` logs), one container at a time, and marks a container as `truncated=true` when the configured tail limit is hit.
 
+Technology detection for workload monitoring comes from the Pod metadata and container image/process signals. Put app-stack metadata on `spec.template.metadata.labels` or `spec.template.metadata.annotations` in the Deployment/StatefulSet, not on ConfigMaps. The agent recognizes `app.kubernetes.io/component` or `app.kubernetes.io/runtime` values such as `spring-boot`, `angular`, `postgresql`, and `oracle-database`, plus `app.spring.io/version` and `angular.io/version` annotations.
+
 ### PostgreSQL monitoring
 
 The PostgreSQL plugin is opt-in, namespace-scoped, and discovery-first. It derives a synthesized health status from Kubernetes evidence in the configured namespaces, and it adds a `SELECT 1` probe only when a Service clearly matches the PostgreSQL heuristics. Probe settings are loaded from a Secret first and then from `POSTGRESQL_MONITORING_*` env vars.
@@ -382,7 +384,7 @@ When enabled with a non-empty allowlist, the snapshot gains:
 
 Detection rules (in order, first match wins):
 
-- **Labels / annotations** — `app.kubernetes.io/component={angular,spring-boot,oracle}`, `angular.io/version`, `app.spring.io/version`.
+- **Labels / annotations** — `app.kubernetes.io/component` or `app.kubernetes.io/runtime` with `angular`, `spring-boot`, `oracle`, or `postgresql`; `angular.io/version`; `app.spring.io/version`.
 - **Image name patterns** — `springboot`/`spring-boot` in the image name; `container-registry.oracle.com/database/...`, `gvenzl/oracle-*`, `oracle/database`; `angular-*` / `*-ng-*`.
 - **Container command/args** — `java -jar *spring*.jar`, `-Dspring.profiles.active=...` (Spring Boot subtype); `oracle`, `dbca`, `sqlplus` (Oracle subtype).
 

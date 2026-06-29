@@ -1412,9 +1412,14 @@ fn map_daemonset(d: DaemonSet) -> WorkloadRef {
 
 fn container_technology(
     container: &k8s_openapi::api::core::v1::Container,
+    pod_labels: &[(&str, &str)],
+    pod_annotations: &[(&str, &str)],
     tech_detect_process: bool,
 ) -> Technology {
     let image = container.image.as_deref().unwrap_or("");
+    if let Some(stack) = tech::detect_from_labels(pod_labels, pod_annotations) {
+        return stack;
+    }
     if !tech_detect_process {
         return refine_with_application_stack_image(tech::detect(image), image);
     }
@@ -1454,6 +1459,28 @@ fn map_pod(
     let namespace = p.metadata.namespace.clone().unwrap_or_default();
     let name = p.metadata.name.clone().unwrap_or_default();
     let usage = pod_usage.get(&(namespace.clone(), name.clone()));
+    let pod_labels = p
+        .metadata
+        .labels
+        .as_ref()
+        .map(|labels| {
+            labels
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.as_str()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let pod_annotations = p
+        .metadata
+        .annotations
+        .as_ref()
+        .map(|annotations| {
+            annotations
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.as_str()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
 
     let containers = p
         .spec
@@ -1465,7 +1492,12 @@ fn map_pod(
                     name: c.name.clone(),
                     image: c.image.clone().unwrap_or_default(),
                     image_pull_policy: c.image_pull_policy.clone(),
-                    technology: container_technology(c, tech_detect_process),
+                    technology: container_technology(
+                        c,
+                        &pod_labels,
+                        &pod_annotations,
+                        tech_detect_process,
+                    ),
                     resources: map_resources(c.resources.as_ref()),
                 })
                 .collect()
@@ -2615,6 +2647,48 @@ mod tests {
         let mapped = map_pod(pod, &usage, false);
         assert_eq!(mapped.usage_cpu.as_deref(), Some("125m"));
         assert_eq!(mapped.usage_memory.as_deref(), Some("256Mi"));
+    }
+
+    #[test]
+    fn map_pod_uses_labels_for_technology_detection() {
+        let pod: Pod = serde_json::from_value(json!({
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {
+                "namespace": "prod",
+                "name": "api-1",
+                "labels": {
+                    "app.kubernetes.io/component": "spring-boot",
+                    "app.kubernetes.io/name": "causas-backend"
+                },
+                "annotations": {
+                    "app.spring.io/version": "3.3.5"
+                }
+            },
+            "spec": {
+                "nodeName": "node-1",
+                "containers": [
+                    {
+                        "name": "app",
+                        "image": "causas-backend:latest",
+                        "resources": {}
+                    }
+                ]
+            },
+            "status": {
+                "phase": "Running"
+            }
+        }))
+        .unwrap();
+
+        let mapped = map_pod(pod, &BTreeMap::new(), false);
+        let technology = &mapped.containers[0].technology;
+
+        assert_eq!(technology.source, "labels");
+        assert_eq!(technology.product.as_deref(), Some("spring-boot"));
+        assert_eq!(technology.subtype.as_deref(), Some("spring_boot"));
+        assert_eq!(technology.language.as_deref(), Some("Java"));
+        assert_eq!(technology.version.as_deref(), Some("3.3.5"));
     }
 
     #[test]

@@ -914,77 +914,113 @@ pub fn detect_from_labels(
     labels: &[(&str, &str)],
     annotations: &[(&str, &str)],
 ) -> Option<Technology> {
+    let mut detected = None;
     for (key, value) in labels {
-        if *key != "app.kubernetes.io/component" {
+        if !matches_stack_label_key(key) {
             continue;
         }
         let v = value.to_lowercase();
-        if v == "postgres" || v == "postgresql" {
-            return Some(Technology {
+        detected = if v == "postgres" || v == "postgresql" {
+            Some(Technology {
                 vendor: Some("postgresql".to_string()),
                 product: Some("postgres".to_string()),
                 version: None,
                 language: Some("C".to_string()),
                 source: "labels",
                 subtype: Some("postgresql".to_string()),
-            });
-        }
-        if v == "angular" {
-            return Some(Technology {
+            })
+        } else if v == "angular" {
+            Some(Technology {
                 vendor: None,
                 product: Some("angular".to_string()),
                 version: None,
                 language: None,
                 source: "labels",
                 subtype: Some("angular".to_string()),
-            });
-        }
-        if v == "spring-boot" || v == "spring_boot" || v == "springboot" {
-            return Some(Technology {
+            })
+        } else if v == "spring-boot" || v == "spring_boot" || v == "springboot" {
+            Some(Technology {
                 vendor: None,
                 product: Some("spring-boot".to_string()),
                 version: None,
                 language: Some("Java".to_string()),
                 source: "labels",
                 subtype: Some("spring_boot".to_string()),
-            });
-        }
-        if v == "oracle" || v == "oracle-database" || v == "oracle_database" {
-            return Some(Technology {
+            })
+        } else if v == "oracle" || v == "oracle-database" || v == "oracle_database" {
+            Some(Technology {
                 vendor: Some("oracle".to_string()),
                 product: Some("oracle-database".to_string()),
                 version: None,
                 language: None,
                 source: "labels",
                 subtype: Some("oracle_database".to_string()),
-            });
+            })
+        } else {
+            None
+        };
+
+        if detected.is_some() {
+            break;
         }
     }
 
+    if detected.is_none() {
+        for (key, value) in annotations {
+            if *key == "angular.io/version" {
+                return Some(Technology {
+                    vendor: None,
+                    product: Some("angular".to_string()),
+                    version: Some(value.trim().to_string()),
+                    language: None,
+                    source: "labels",
+                    subtype: Some("angular".to_string()),
+                });
+            }
+            if *key == "app.spring.io/version" {
+                return Some(Technology {
+                    vendor: None,
+                    product: Some("spring-boot".to_string()),
+                    version: Some(value.trim().to_string()),
+                    language: Some("Java".to_string()),
+                    source: "labels",
+                    subtype: Some("spring_boot".to_string()),
+                });
+            }
+        }
+    }
+
+    let mut tech = detected?;
+    if tech.version.is_none() {
+        if let Some(version) = annotation_version_for_stack(&tech.subtype, annotations) {
+            tech.version = Some(version);
+        }
+    }
+
+    Some(tech)
+}
+
+fn annotation_version_for_stack(
+    subtype: &Option<String>,
+    annotations: &[(&str, &str)],
+) -> Option<String> {
+    let subtype = subtype.as_deref()?;
     for (key, value) in annotations {
-        if *key == "angular.io/version" {
-            return Some(Technology {
-                vendor: None,
-                product: Some("angular".to_string()),
-                version: Some(value.trim().to_string()),
-                language: None,
-                source: "labels",
-                subtype: Some("angular".to_string()),
-            });
-        }
-        if *key == "app.spring.io/version" {
-            return Some(Technology {
-                vendor: None,
-                product: Some("spring-boot".to_string()),
-                version: Some(value.trim().to_string()),
-                language: Some("Java".to_string()),
-                source: "labels",
-                subtype: Some("spring_boot".to_string()),
-            });
+        match subtype {
+            "angular" if *key == "angular.io/version" => {
+                return Some(value.trim().to_string());
+            }
+            "spring_boot" if *key == "app.spring.io/version" => {
+                return Some(value.trim().to_string());
+            }
+            _ => {}
         }
     }
-
     None
+}
+
+fn matches_stack_label_key(key: &str) -> bool {
+    key == "app.kubernetes.io/component" || key == "app.kubernetes.io/runtime"
 }
 
 #[cfg(test)]
@@ -1313,6 +1349,13 @@ mod tests {
     #[test]
     fn detect_from_labels_spring_boot_component() {
         let labels = [("app.kubernetes.io/component", "spring-boot")];
+        let t = detect_from_labels(&labels, &[]).unwrap();
+        assert_eq!(t.subtype.as_deref(), Some("spring_boot"));
+    }
+
+    #[test]
+    fn detect_from_labels_spring_boot_runtime() {
+        let labels = [("app.kubernetes.io/runtime", "spring-boot")];
         let t = detect_from_labels(&labels, &[]).unwrap();
         assert_eq!(t.subtype.as_deref(), Some("spring_boot"));
     }
