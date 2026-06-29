@@ -48,7 +48,8 @@ impl HubClient {
     }
 
     /// Ship the inventory snapshot. Bounded retries: 0s, 2s, 5s.
-    pub async fn send_snapshot(&self, snap: &InventorySnapshot) -> Result<()> {
+    /// Returns the Hub's ack body which may carry remote config updates.
+    pub async fn send_snapshot(&self, snap: &InventorySnapshot) -> Result<SnapshotCreated> {
         let urls = self.routes.inventory_urls(&self.cfg.cluster_id);
         if self.cfg.http_debug {
             let request_body = if self.cfg.http_debug_bodies {
@@ -110,7 +111,7 @@ impl HubClient {
                         }
 
                         if s.is_success() {
-                            if let Some(body_text) =
+                            let ack = if let Some(body_text) =
                                 body_text.as_deref().filter(|v| !v.trim().is_empty())
                             {
                                 let body: SnapshotCreated = serde_json::from_str(body_text).map_err(|e| {
@@ -128,9 +129,12 @@ impl HubClient {
                                         "cluster was already registered - possible duplicate re-registration"
                                     );
                                 }
-                            }
+                                body
+                            } else {
+                                SnapshotCreated::default()
+                            };
                             health::SNAPSHOT_SEND_SUCCESS.inc();
-                            return Ok(());
+                            return Ok(ack);
                         }
 
                         if s == StatusCode::NOT_FOUND && url_index + 1 < urls.len() {

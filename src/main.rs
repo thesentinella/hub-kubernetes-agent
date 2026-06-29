@@ -125,7 +125,7 @@ fn init_tracing() {
         .init();
 }
 
-async fn collector_loop(cfg: Config, kube: KubeClient, hub: Arc<HubClient>, leader: LeaderState) {
+async fn collector_loop(mut cfg: Config, kube: KubeClient, hub: Arc<HubClient>, leader: LeaderState) {
     let mut ticker = interval(cfg.collect_interval);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -139,9 +139,26 @@ async fn collector_loop(cfg: Config, kube: KubeClient, hub: Arc<HubClient>, lead
             continue;
         }
         match build_and_send(&cfg, &kube, &hub).await {
-            Ok(()) => {
+            Ok(ack) => {
                 health::SNAPSHOTS_SENT.with_label_values(&["ok"]).inc();
                 info!("snapshot sent");
+                // Apply remote workload monitoring config for next cycle
+                if let Some(wm) = ack.wm_config {
+                    if wm.enabled != cfg.workload_monitoring_enabled
+                        || wm.namespaces != cfg.workload_monitoring_namespaces
+                        || wm.targets != cfg.workload_monitoring_targets
+                    {
+                        info!(
+                            enabled = wm.enabled,
+                            namespaces = ?wm.namespaces,
+                            targets = ?wm.targets,
+                            "applying remote workload monitoring config"
+                        );
+                        cfg.workload_monitoring_enabled = wm.enabled;
+                        cfg.workload_monitoring_namespaces = wm.namespaces;
+                        cfg.workload_monitoring_targets = wm.targets;
+                    }
+                }
             }
             Err(e) => {
                 health::SNAPSHOTS_SENT.with_label_values(&["error"]).inc();
@@ -151,7 +168,7 @@ async fn collector_loop(cfg: Config, kube: KubeClient, hub: Arc<HubClient>, lead
     }
 }
 
-async fn build_and_send(cfg: &Config, kube: &KubeClient, hub: &HubClient) -> Result<()> {
+async fn build_and_send(cfg: &Config, kube: &KubeClient, hub: &HubClient) -> Result<SnapshotCreated> {
     let (
         k8s_uid,
         cluster,

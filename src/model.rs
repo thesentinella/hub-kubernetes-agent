@@ -141,6 +141,16 @@ pub struct WorkloadMonitoringContainerLogs {
 pub struct SnapshotCreated {
     #[serde(default)]
     pub already_existed: bool,
+    /// Remote workload monitoring config pushed by the Hub on every ack.
+    /// When present the agent applies it on the next collection cycle.
+    pub wm_config: Option<RemoteWmConfig>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct RemoteWmConfig {
+    pub enabled: bool,
+    pub namespaces: Vec<String>,
+    pub targets: Vec<String>,
 }
 
 #[derive(Deserialize, Debug, Default)]
