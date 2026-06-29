@@ -367,7 +367,7 @@ Compatibility note:
 - `product`: optional string.
 - `version`: optional string.
 - `language`: optional string.
-- `source`: provenance string. One of `image` (detected from the container image name), `process` (detected via `TECH_DETECT_PROCESS` from container `command`/`args`), `labels` (detected from pod or workload labels/annotations), or `config` (reserved for future Hub-pushed overrides).
+- `source`: provenance string. One of `image` (detected from the container image name), `process` (detected via `TECH_DETECT_PROCESS` from container `command`/`args`), `labels` (detected from pod or workload `app.kubernetes.io/component` or `app.kubernetes.io/runtime` labels, or stack annotations), or `config` (reserved for future Hub-pushed overrides).
 - `subtype`: optional string. Used to tag the application stack when the runtime product is generic. Example: `product=nginx, subtype=angular` for an Angular app served by nginx. Null when not applicable.
 
 `Plugins` fields:
