@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.36.3](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.36.2...v0.36.3) (2026-06-30)
+
+
+### Bug Fixes
+
+* harden agent health probes ([#143](https://github.com/thesentinella/hub-kubernetes-agent/issues/143)) ([b5900a9](https://github.com/thesentinella/hub-kubernetes-agent/commit/b5900a9b53d92c3f6277cc499a58ab7d11e60a2d))
+
 ## [0.36.2](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.36.1...v0.36.2) (2026-06-30)
 
 
