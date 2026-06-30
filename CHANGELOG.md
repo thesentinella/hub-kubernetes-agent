@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.36.1](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.36.0...v0.36.1) (2026-06-29)
+
+
+### Bug Fixes
+
+* detect workload tech from pod labels ([#139](https://github.com/thesentinella/hub-kubernetes-agent/issues/139)) ([951b3f4](https://github.com/thesentinella/hub-kubernetes-agent/commit/951b3f45a93a64a5b8e7ac720b508ffbdcd04a77))
+
 ## [0.36.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.35.0...v0.36.0) (2026-06-27)
 
 
