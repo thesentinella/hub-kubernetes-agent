@@ -330,6 +330,8 @@ When enabled with a non-empty allowlist, the snapshot gains:
 
 `plugins.workload_monitoring.logs` is the current log-tail projection for pods in the allowlist. It reads current logs only (no `previous` logs), one container at a time, and marks a container as `truncated=true` when the configured tail limit is hit.
 
+When `COLLECT_DEPENDENCIES_TETRAGON=true`, the agent discovers ready Tetragon gRPC endpoints from `tetragon/tetragon-grpc` via EndpointSlice and opens one stream per endpoint. If discovery is unavailable, it falls back to `TETRAGON_GRPC_ADDRESS`. That lets the cluster run Tetragon only on nodes that support it.
+
 Technology detection for workload monitoring comes from the Pod metadata and container image/process signals. Put app-stack metadata on `spec.template.metadata.labels` or `spec.template.metadata.annotations` in the Deployment/StatefulSet, not on ConfigMaps. The agent recognizes `app.kubernetes.io/component` or `app.kubernetes.io/runtime` values such as `spring-boot`, `angular`, `postgresql`, and `oracle-database`, plus `app.spring.io/version` and `angular.io/version` annotations.
 
 ### PostgreSQL monitoring

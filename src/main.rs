@@ -63,11 +63,7 @@ async fn main() -> Result<()> {
 
     startup_duplicate_cluster_check(&cfg, hub.as_ref()).await;
 
-    tetragon::init(
-        cfg.collect_dependencies_tetragon,
-        cfg.tetragon_required_for_readiness,
-        cfg.tetragon_grpc_address.clone(),
-    );
+    tetragon::init(kube_client.clone(), &cfg);
 
     // Health/metrics server
     tokio::spawn(async {
@@ -520,8 +516,12 @@ mod tests {
             readonly_commands_enabled: false,
             collect_secrets: false,
             collect_dependencies_tetragon: false,
+            tetragon_endpoint_discovery_enabled: true,
             tetragon_required_for_readiness: true,
             tetragon_grpc_address: tetragon::DEFAULT_GRPC_ADDRESS.into(),
+            tetragon_grpc_port: 54321,
+            tetragon_service_namespace: "tetragon".into(),
+            tetragon_service_name: "tetragon-grpc".into(),
             http_timeout: Duration::from_secs(20),
             http_debug: false,
             http_debug_bodies: false,

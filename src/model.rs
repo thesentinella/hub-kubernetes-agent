@@ -193,6 +193,9 @@ pub struct DependencyInventory {
     pub window_seconds: u64,
     pub truncated: bool,
     pub dropped_edges: u64,
+    pub observed_endpoints: usize,
+    pub connected_endpoints: usize,
+    pub unavailable_endpoints: usize,
 }
 
 #[derive(Serialize, Debug, Clone)]

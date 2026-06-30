@@ -41,8 +41,12 @@
 | `READONLY_COMMANDS_ENABLED` | no | `false` | Enables read-only commands such as `diagnose_postgresql` without enabling mutating actions. |
 | `COLLECT_SECRETS` | no | `false` | When `true`, collect Secret metadata and key names only; requires separate `secrets` read RBAC. |
 | `COLLECT_DEPENDENCIES_TETRAGON` | no | `false` | When `true`, collect dependency edges from Tetragon gRPC. |
+| `TETRAGON_ENDPOINT_DISCOVERY_ENABLED` | no | `true` | When `true`, discover ready Tetragon endpoints from `tetragon/tetragon-grpc` via EndpointSlice and stream each endpoint independently. |
 | `TETRAGON_REQUIRED_FOR_READINESS` | no | `true` | When `true`, `/readyz` blocks until Tetragon connects; set `false` to relax readiness for dev or nodes without Tetragon. |
 | `TETRAGON_GRPC_ADDRESS` | no | when `COLLECT_DEPENDENCIES_TETRAGON=true`, `tetragon-grpc.tetragon.svc.cluster.local:54321` | Tetragon gRPC server address used for dependency collection. |
+| `TETRAGON_GRPC_PORT` | no | `54321` | Port used when discovering Tetragon endpoints. |
+| `TETRAGON_SERVICE_NAMESPACE` | no | `tetragon` | Namespace used to discover the Tetragon Service. |
+| `TETRAGON_SERVICE_NAME` | no | `tetragon-grpc` | Service name used to discover the Tetragon endpoints. |
 | `AGENT_LOG` | no | `info` | Primary log filter variable for JSON tracing output. |
 | `RUST_LOG` | no | none | Optional legacy alias if `AGENT_LOG` is not set. |
 | `POD_NAME` | no | `unknown` | Usually set by downward API. |
@@ -640,10 +644,11 @@ The agent probes `VolumeSnapshotClass` as the canonical signal; if it returns 40
 - Process-level/runtime technology inspection is out of scope for this release and tracked as a separate follow-up.
 - Unknown images are still reported with `vendor: null`, `product: <image-name>`, `version: <tag>`, `source: "image"`.
 - Dependency collection from Tetragon gRPC is opt-in (`COLLECT_DEPENDENCIES_TETRAGON=true`) and fail-soft.
-- When dependency collection is enabled, the agent readiness probe blocks the pod from becoming Ready until it has connected to Tetragon, unless `TETRAGON_REQUIRED_FOR_READINESS=false`.
+- When dependency collection is enabled, the agent first discovers ready Tetragon endpoints via EndpointSlice; if discovery fails, it falls back to `TETRAGON_GRPC_ADDRESS`.
+- When dependency collection is enabled, the agent readiness probe blocks the pod from becoming Ready until it has connected to at least one Tetragon stream, unless `TETRAGON_REQUIRED_FOR_READINESS=false`.
 - Dependency output is bounded by internal caps (max edges and max fanout per source). Truncation sets `dependencies.truncated=true` and increments `dependencies.dropped_edges`.
 - Unknown endpoint mappings are included as `kind: "unknown"` edges and still include `ip` when known.
-- Dependency source is `tetragon_grpc`; the agent consumes Tetragon gRPC directly and manages its own node-local tracing policy.
+- Dependency source is `tetragon_grpc`; the agent consumes Tetragon gRPC directly and manages its own tracing policy.
 
 ## Command Schema
 
@@ -792,7 +797,9 @@ Secret/config values are intentionally excluded from the snapshot payload.
 EBP is reported inside `InventorySnapshot.dependencies` and is opt-in via
 `COLLECT_DEPENDENCIES_TETRAGON=true`.
 
-- Source is `tetragon_grpc` from `TETRAGON_GRPC_ADDRESS`.
+- Source is `tetragon_grpc`.
+- The agent first discovers ready Tetragon gRPC endpoints via EndpointSlice,
+  then falls back to `TETRAGON_GRPC_ADDRESS` if discovery is unavailable.
 - Collection is fail-soft: if Tetragon gRPC is unavailable, snapshots
   still succeed and `dependencies.edges` is empty.
 
@@ -805,6 +812,9 @@ EBP is reported inside `InventorySnapshot.dependencies` and is opt-in via
 | `window_seconds` | `u64` | Aggregation window length in seconds. Phase-1 value is `60`. |
 | `truncated` | `bool` | `true` when internal edge/fanout caps dropped data in this snapshot. |
 | `dropped_edges` | `u64` | Number of edges dropped due to cap enforcement. |
+| `observed_endpoints` | `usize` | Number of Tetragon endpoints the agent is currently tracking for this snapshot. |
+| `connected_endpoints` | `usize` | Number of Tetragon endpoints currently streaming successfully. |
+| `unavailable_endpoints` | `usize` | Number of tracked endpoints that are not currently connected. |
 
 ### DependencyEdge schema
 

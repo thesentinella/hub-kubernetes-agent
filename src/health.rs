@@ -247,10 +247,6 @@ pub fn set_dependency_ready(ready: bool) {
     DEPENDENCY_READY.store(ready, Ordering::Relaxed);
 }
 
-pub fn dependency_ready() -> bool {
-    DEPENDENCY_READY.load(Ordering::Relaxed)
-}
-
 pub async fn run() -> Result<()> {
     // Force lazy init so /metrics shows the families even before first use.
     let _ = &*SNAPSHOTS_SENT;

@@ -1,8 +1,15 @@
 use crate::health;
+use k8s_openapi::api::discovery::v1::EndpointSlice;
+use kube::api::ListParams;
+use kube::{Api, Client};
 use once_cell::sync::{Lazy, OnceCell};
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::net::IpAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::task::JoinHandle;
+use tokio::time::interval;
 use tokio::time::sleep;
 use tonic::transport::{Channel, Endpoint};
 use tonic::{Code, Status};
@@ -11,6 +18,10 @@ use tracing::{info, warn};
 pub const DEFAULT_GRPC_ADDRESS: &str = "tetragon-grpc.tetragon.svc.cluster.local:54321";
 const DEP_WINDOW_SECONDS: u64 = 60;
 const MAX_BUFFERED_EVENTS: usize = 20_000;
+const MAX_DISCOVERED_ENDPOINTS: usize = 16;
+const DISCOVERY_INTERVAL_SECS: u64 = 30;
+const STREAM_RECONNECT_DELAY_SECS: u64 = 5;
+const FALLBACK_STREAM_KEY: &str = "__fallback__";
 const POLICY_NAME: &str = "sentinella-tcp-connect";
 const POLICY_YAML: &str = r#"apiVersion: cilium.io/v1alpha1
 kind: TracingPolicy
@@ -42,27 +53,175 @@ struct BufferedLine {
     recorded_at_ms: u128,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StreamSource {
+    Discovered,
+    Fallback,
+}
+
+struct StreamEntry {
+    source: StreamSource,
+    connected: bool,
+    active: Arc<AtomicBool>,
+    handle: JoinHandle<()>,
+}
+
+struct ManagerState {
+    streams: HashMap<String, StreamEntry>,
+}
+
 struct State {
     lines: Mutex<VecDeque<BufferedLine>>,
+    manager: Mutex<ManagerState>,
+    dependency_required: bool,
+}
+
+struct TetragonRuntime {
+    client: Client,
+    discovery_enabled: bool,
+    discovery_namespace: String,
+    discovery_service_name: String,
+    grpc_port: u16,
+    fallback_address: String,
+    state: Arc<State>,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct CoverageSnapshot {
+    pub observed_endpoints: usize,
+    pub connected_endpoints: usize,
+    pub unavailable_endpoints: usize,
 }
 
 static STATE: OnceCell<Arc<State>> = OnceCell::new();
 static STARTED: Lazy<Mutex<bool>> = Lazy::new(|| Mutex::new(false));
 
-pub fn init(enabled: bool, required_for_readiness: bool, address: String) {
-    let dependency_required = enabled && required_for_readiness;
+impl State {
+    fn new(dependency_required: bool) -> Self {
+        Self {
+            lines: Mutex::new(VecDeque::new()),
+            manager: Mutex::new(ManagerState {
+                streams: HashMap::new(),
+            }),
+            dependency_required,
+        }
+    }
+
+    fn coverage_snapshot(&self) -> CoverageSnapshot {
+        let manager = self
+            .manager
+            .lock()
+            .expect("tetragon manager mutex poisoned");
+        let observed_endpoints = manager.streams.len();
+        let connected_endpoints = manager
+            .streams
+            .values()
+            .filter(|entry| entry.connected)
+            .count();
+        CoverageSnapshot {
+            observed_endpoints,
+            connected_endpoints,
+            unavailable_endpoints: observed_endpoints.saturating_sub(connected_endpoints),
+        }
+    }
+
+    fn refresh_health(&self) {
+        let connected = self.coverage_snapshot().connected_endpoints;
+        health::TETRAGON_CONNECTED.set(connected as i64);
+        health::set_dependency_ready(!self.dependency_required || connected > 0);
+    }
+
+    fn stream_exists(&self, key: &str) -> bool {
+        let manager = self
+            .manager
+            .lock()
+            .expect("tetragon manager mutex poisoned");
+        manager.streams.contains_key(key)
+    }
+
+    fn register_stream(&self, key: String, entry: StreamEntry) {
+        let mut manager = self
+            .manager
+            .lock()
+            .expect("tetragon manager mutex poisoned");
+        manager.streams.insert(key, entry);
+        drop(manager);
+        self.refresh_health();
+    }
+
+    fn set_stream_connected(&self, key: &str, connected: bool) -> bool {
+        let mut manager = self
+            .manager
+            .lock()
+            .expect("tetragon manager mutex poisoned");
+        let Some(entry) = manager.streams.get_mut(key) else {
+            return false;
+        };
+        let was_connected = entry.connected;
+        entry.connected = connected;
+        drop(manager);
+        self.refresh_health();
+        was_connected
+    }
+
+    fn remove_stream(&self, key: &str) -> Option<StreamEntry> {
+        let mut manager = self
+            .manager
+            .lock()
+            .expect("tetragon manager mutex poisoned");
+        let entry = manager.streams.remove(key);
+        drop(manager);
+        if entry.is_some() {
+            self.refresh_health();
+        }
+        entry
+    }
+
+    fn discovered_keys(&self) -> BTreeSet<String> {
+        let manager = self
+            .manager
+            .lock()
+            .expect("tetragon manager mutex poisoned");
+        manager
+            .streams
+            .iter()
+            .filter(|(_, entry)| matches!(entry.source, StreamSource::Discovered))
+            .map(|(key, _)| key.clone())
+            .collect()
+    }
+
+    fn has_fallback_stream(&self) -> bool {
+        let manager = self
+            .manager
+            .lock()
+            .expect("tetragon manager mutex poisoned");
+        manager
+            .streams
+            .get(FALLBACK_STREAM_KEY)
+            .map(|entry| matches!(entry.source, StreamSource::Fallback))
+            .unwrap_or(false)
+    }
+
+    fn no_streams(&self) -> bool {
+        let manager = self
+            .manager
+            .lock()
+            .expect("tetragon manager mutex poisoned");
+        manager.streams.is_empty()
+    }
+}
+
+pub fn init(client: Client, cfg: &crate::config::Config) {
+    let dependency_required =
+        cfg.collect_dependencies_tetragon && cfg.tetragon_required_for_readiness;
     health::set_dependency_required(dependency_required);
     health::TETRAGON_CONNECTED.set(0);
-    if !enabled {
+    if !cfg.collect_dependencies_tetragon {
         health::set_dependency_ready(true);
         return;
     }
 
-    if dependency_required {
-        health::set_dependency_ready(false);
-    } else {
-        health::set_dependency_ready(true);
-    }
+    health::set_dependency_ready(!dependency_required);
 
     let mut started = STARTED.lock().expect("tetragon start mutex poisoned");
     if *started {
@@ -70,11 +229,19 @@ pub fn init(enabled: bool, required_for_readiness: bool, address: String) {
     }
     *started = true;
 
-    let state = Arc::new(State {
-        lines: Mutex::new(VecDeque::new()),
-    });
+    let state = Arc::new(State::new(dependency_required));
     let _ = STATE.set(state.clone());
-    tokio::spawn(run_loop(address, state));
+
+    let runtime = Arc::new(TetragonRuntime {
+        client,
+        discovery_enabled: cfg.tetragon_endpoint_discovery_enabled,
+        discovery_namespace: cfg.tetragon_service_namespace.clone(),
+        discovery_service_name: cfg.tetragon_service_name.clone(),
+        grpc_port: cfg.tetragon_grpc_port,
+        fallback_address: cfg.tetragon_grpc_address.clone(),
+        state,
+    });
+    tokio::spawn(run_manager(runtime));
 }
 
 pub fn snapshot_ndjson() -> String {
@@ -91,37 +258,174 @@ pub fn snapshot_ndjson() -> String {
     body
 }
 
-async fn run_loop(address: String, state: Arc<State>) {
+pub fn coverage_snapshot() -> CoverageSnapshot {
+    let Some(state) = STATE.get() else {
+        return CoverageSnapshot::default();
+    };
+    state.coverage_snapshot()
+}
+
+async fn run_manager(runtime: Arc<TetragonRuntime>) {
+    if !runtime.discovery_enabled {
+        ensure_fallback_stream(runtime.clone()).await;
+        return;
+    }
+
+    if let Err(error) = discover_and_reconcile(&runtime).await {
+        warn!(error = %error, "tetragon endpoint discovery failed; falling back to configured address");
+        ensure_fallback_stream(runtime.clone()).await;
+    }
+
+    let mut ticker = interval(Duration::from_secs(DISCOVERY_INTERVAL_SECS));
     loop {
-        match connect_and_stream(&address, state.clone()).await {
+        ticker.tick().await;
+        if let Err(error) = discover_and_reconcile(&runtime).await {
+            warn!(error = %error, "tetragon endpoint discovery failed; continuing with existing streams");
+            if runtime.state.no_streams() {
+                ensure_fallback_stream(runtime.clone()).await;
+            }
+        }
+    }
+}
+
+async fn discover_and_reconcile(runtime: &Arc<TetragonRuntime>) -> anyhow::Result<()> {
+    let endpoints = discover_tetragon_endpoints(runtime).await?;
+    if endpoints.is_empty() {
+        if runtime.state.no_streams() {
+            ensure_fallback_stream(runtime.clone()).await;
+        }
+        return Ok(());
+    }
+
+    let discovered_keys = runtime.state.discovered_keys();
+    for key in discovered_keys
+        .into_iter()
+        .filter(|key| !endpoints.contains(key))
+        .collect::<Vec<_>>()
+    {
+        if let Some(entry) = runtime.state.remove_stream(&key) {
+            entry.active.store(false, Ordering::Relaxed);
+            entry.handle.abort();
+        }
+    }
+
+    if runtime.state.has_fallback_stream() {
+        if let Some(entry) = runtime.state.remove_stream(FALLBACK_STREAM_KEY) {
+            entry.active.store(false, Ordering::Relaxed);
+            entry.handle.abort();
+        }
+    }
+
+    for address in endpoints {
+        if runtime.state.stream_exists(&address) {
+            continue;
+        }
+        spawn_stream(
+            runtime.clone(),
+            address.clone(),
+            address,
+            StreamSource::Discovered,
+        );
+    }
+
+    Ok(())
+}
+
+async fn ensure_fallback_stream(runtime: Arc<TetragonRuntime>) {
+    if runtime.state.stream_exists(FALLBACK_STREAM_KEY) {
+        return;
+    }
+    let address = runtime.fallback_address.clone();
+    spawn_stream(
+        runtime,
+        FALLBACK_STREAM_KEY.to_string(),
+        address,
+        StreamSource::Fallback,
+    );
+}
+
+fn spawn_stream(runtime: Arc<TetragonRuntime>, key: String, address: String, source: StreamSource) {
+    if runtime.state.stream_exists(&key) {
+        return;
+    }
+
+    let active = Arc::new(AtomicBool::new(true));
+    let task_active = active.clone();
+    let state = runtime.state.clone();
+    let task_key = key.clone();
+    let task_address = address.clone();
+    let task_source = source;
+    let handle = tokio::spawn(async move {
+        run_stream(task_key, task_address, task_source, state, task_active).await;
+    });
+
+    runtime.state.register_stream(
+        key,
+        StreamEntry {
+            source,
+            connected: false,
+            active,
+            handle,
+        },
+    );
+}
+
+async fn run_stream(
+    key: String,
+    address: String,
+    source: StreamSource,
+    state: Arc<State>,
+    active: Arc<AtomicBool>,
+) {
+    loop {
+        if !active.load(Ordering::Relaxed) {
+            break;
+        }
+
+        match connect_and_stream(&address, state.clone(), &key).await {
             Ok(()) => {
-                health::TETRAGON_CONNECTED.set(0);
-                health::set_dependency_ready(false);
-                health::TETRAGON_RECONNECTS.inc();
-                warn!(address = %address, "tetragon stream ended; reconnecting");
+                let was_connected = state.set_stream_connected(&key, false);
+                if !active.load(Ordering::Relaxed) {
+                    break;
+                }
+                if was_connected {
+                    health::TETRAGON_RECONNECTS.inc();
+                    warn!(address = %address, source = ?source, "tetragon stream ended; reconnecting");
+                } else {
+                    health::TETRAGON_CONNECTION_FAILURES.inc();
+                    warn!(address = %address, source = ?source, "tetragon stream unavailable");
+                }
             }
             Err(error) => {
-                let was_ready = health::dependency_ready();
-                health::TETRAGON_CONNECTED.set(0);
-                health::set_dependency_ready(false);
-                if was_ready {
+                let was_connected = state.set_stream_connected(&key, false);
+                if !active.load(Ordering::Relaxed) {
+                    break;
+                }
+                if was_connected {
                     health::TETRAGON_RECONNECTS.inc();
                     warn!(
                         address = %address,
+                        source = ?source,
                         error = %error,
                         "tetragon stream lost; reconnecting"
                     );
                 } else {
                     health::TETRAGON_CONNECTION_FAILURES.inc();
-                    warn!(address = %address, error = %error, "tetragon stream unavailable");
+                    warn!(
+                        address = %address,
+                        source = ?source,
+                        error = %error,
+                        "tetragon stream unavailable"
+                    );
                 }
             }
         }
-        sleep(Duration::from_secs(5)).await;
+
+        sleep(Duration::from_secs(STREAM_RECONNECT_DELAY_SECS)).await;
     }
 }
 
-async fn connect_and_stream(address: &str, state: Arc<State>) -> anyhow::Result<()> {
+async fn connect_and_stream(address: &str, state: Arc<State>, key: &str) -> anyhow::Result<()> {
     let channel = grpc_channel(address).await?;
     let mut client = proto::fine_guidance_sensors_client::FineGuidanceSensorsClient::new(channel);
 
@@ -133,8 +437,7 @@ async fn connect_and_stream(address: &str, state: Arc<State>) -> anyhow::Result<
         }],
     };
     let mut stream = client.get_events(request).await?.into_inner();
-    health::TETRAGON_CONNECTED.set(1);
-    health::set_dependency_ready(true);
+    let _ = state.set_stream_connected(key, true);
     info!(address = %address, "connected to tetragon gRPC");
 
     while let Some(response) = stream.message().await? {
@@ -152,6 +455,75 @@ async fn connect_and_stream(address: &str, state: Arc<State>) -> anyhow::Result<
     }
 
     Ok(())
+}
+
+async fn discover_tetragon_endpoints(
+    runtime: &TetragonRuntime,
+) -> anyhow::Result<BTreeSet<String>> {
+    let api: Api<EndpointSlice> =
+        Api::namespaced(runtime.client.clone(), &runtime.discovery_namespace);
+    let lp = ListParams::default().labels(&format!(
+        "kubernetes.io/service-name={}",
+        runtime.discovery_service_name
+    ));
+    let slices = api.list(&lp).await?;
+    let mut addresses = BTreeSet::new();
+
+    for slice in slices {
+        let port = slice
+            .ports
+            .as_ref()
+            .and_then(|ports| ports.iter().find_map(|port| port.port))
+            .map(|port| port as u16)
+            .unwrap_or(runtime.grpc_port);
+
+        for endpoint in slice.endpoints {
+            if endpoint
+                .conditions
+                .as_ref()
+                .and_then(|conditions| conditions.ready)
+                == Some(false)
+            {
+                continue;
+            }
+
+            if let Some(target_ref) = endpoint.target_ref.as_ref() {
+                if target_ref.kind.as_deref() != Some("Pod") {
+                    continue;
+                }
+            }
+
+            for address in endpoint.addresses {
+                if addresses.len() >= MAX_DISCOVERED_ENDPOINTS {
+                    warn!(
+                        max_endpoints = MAX_DISCOVERED_ENDPOINTS,
+                        service_namespace = %runtime.discovery_namespace,
+                        service_name = %runtime.discovery_service_name,
+                        "tetragon endpoint discovery hit stream cap; skipping remaining endpoints"
+                    );
+                    return Ok(addresses);
+                }
+
+                let Some(address) = normalize_discovered_address(&address) else {
+                    warn!(
+                        address = %address,
+                        service_namespace = %runtime.discovery_namespace,
+                        service_name = %runtime.discovery_service_name,
+                        "skipping non-IP tetragon endpoint address"
+                    );
+                    continue;
+                };
+
+                addresses.insert(format!("{address}:{port}"));
+            }
+        }
+    }
+
+    Ok(addresses)
+}
+
+fn normalize_discovered_address(address: &str) -> Option<String> {
+    address.parse::<IpAddr>().ok().map(|ip| ip.to_string())
 }
 
 async fn grpc_channel(address: &str) -> anyhow::Result<Channel> {
@@ -268,4 +640,22 @@ fn now_unix_ms() -> u128 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_discovered_address;
+
+    #[test]
+    fn normalize_discovered_address_accepts_ip_literals() {
+        assert_eq!(
+            normalize_discovered_address("10.1.2.3"),
+            Some("10.1.2.3".to_string())
+        );
+    }
+
+    #[test]
+    fn normalize_discovered_address_rejects_dns_names() {
+        assert_eq!(normalize_discovered_address("tetragon-0"), None);
+    }
 }
