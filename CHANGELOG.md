@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.36.2](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.36.1...v0.36.2) (2026-06-30)
+
+
+### Bug Fixes
+
+* pod label tech detection ([#141](https://github.com/thesentinella/hub-kubernetes-agent/issues/141)) ([f8277ef](https://github.com/thesentinella/hub-kubernetes-agent/commit/f8277efef4272bf0f2699cddc3a08041f9c15531))
+
 ## [0.36.1](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.36.0...v0.36.1) (2026-06-29)
 
 
