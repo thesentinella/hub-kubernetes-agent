@@ -279,13 +279,21 @@ On successful inventory ingest, when the Hub responds with `{"already_existed":t
 
 ### Plugins
 
-The agent ships a plugin-style capability for namespace-scoped workload monitoring. The plugin is opt-in and disabled by default; when disabled, the `plugins` field is omitted from the snapshot payload entirely.
+Workload monitoring is opt-in; when disabled, `plugins` is omitted.
+
+When enabled, workload monitoring can also scrape app metrics from annotated Services in the allowlisted namespaces. Discovery uses `prometheus.io/*` or `sentinella.io/app-metrics*`, and metric names are allowlisted.
 
 | Variable | Default | Notes |
 |---|---|---|
 | `WORKLOAD_MONITORING_ENABLED` | `false` | Master switch. When `false`, the plugin block is omitted. |
 | `WORKLOAD_MONITORING_NAMESPACES` | `[]` | YAML list allowlist. Empty disables the plugin regardless of `ENABLED`. |
 | `WORKLOAD_MONITORING_TARGETS` | `angular,spring_boot,oracle_database` | Tech detection targets enabled for the plugin. |
+| `APP_METRICS_ENABLED` | `false` | Master switch for app metrics. |
+| `APP_METRICS_DISCOVERY_ENABLED` | `true` | Service annotation discovery. |
+| `APP_METRICS_NAMESPACES` | `[]` | YAML allowlist for discovery. |
+| `APP_METRICS_ALLOWLIST` | demo + Spring/JVM/Hikari/Tomcat allowlist | Metric name allowlist. |
+| `APP_METRICS_TIMEOUT_SECS` | `3` | Per-target scrape timeout. |
+| `APP_METRICS_MAX_SAMPLES` | `500` | Max samples per target. |
 | `POSTGRESQL_MONITORING_ENABLED` | `false` | Master switch. When `false`, the plugin block is omitted. |
 | `POSTGRESQL_MONITORING_NAMESPACES` | `[]` | YAML list allowlist. Empty disables the plugin regardless of `ENABLED`. |
 
@@ -301,42 +309,25 @@ When enabled with a non-empty allowlist, the snapshot gains:
       "schema_version": 1,
       "generated_at_ms": 1748523600000,
       "signals": {
-        "workloads": [ /* WorkloadRef, filtered */ ],
-        "pods":      [ /* PodInfo, filtered */ ],
-        "services":  [ /* ServiceInfo, filtered */ ],
-        "ingresses": [ /* IngressInfo, filtered */ ],
-        "events":    [ /* EventInfo, filtered */ ],
-        "dependencies": { /* DependencyInventory or null when tetragon off */ }
+        "app_metrics": { "targets": [] }
       },
-      "logs": {
-        "pods": [
-          {
-            "namespace": "customer-app",
-            "name": "api-1",
-            "containers": [
-              {
-                "name": "api",
-                "truncated": false,
-                "lines": ["Starting server...", "Ready"]
-              }
-            ]
-          }
-        ]
-      }
+      "logs": { "pods": [] }
     }
   }
 }
 ```
 
-`plugins.workload_monitoring.logs` is the current log-tail projection for pods in the allowlist. It reads current logs only (no `previous` logs), one container at a time, and marks a container as `truncated=true` when the configured tail limit is hit.
+`plugins.workload_monitoring.logs` is current pod log tail data for the allowlist.
 
-When `COLLECT_DEPENDENCIES_TETRAGON=true`, the agent discovers ready Tetragon gRPC endpoints from `tetragon/tetragon-grpc` via EndpointSlice and opens one stream per endpoint. If discovery is unavailable, it falls back to `TETRAGON_GRPC_ADDRESS`. That lets the cluster run Tetragon only on nodes that support it.
+`plugins.workload_monitoring.signals.app_metrics` holds scrape results for allowlisted Services: namespace/name, path/port, status, and bounded samples.
 
-Technology detection for workload monitoring comes from the Pod metadata and container image/process signals. Put app-stack metadata on `spec.template.metadata.labels` or `spec.template.metadata.annotations` in the Deployment/StatefulSet, not on ConfigMaps. The agent recognizes `app.kubernetes.io/component` or `app.kubernetes.io/runtime` values such as `spring-boot`, `angular`, `postgresql`, and `oracle-database`, plus `app.spring.io/version` and `angular.io/version` annotations.
+When `COLLECT_DEPENDENCIES_TETRAGON=true`, the agent discovers Tetragon endpoints from `EndpointSlice` and falls back to `TETRAGON_GRPC_ADDRESS`.
+
+Technology detection comes from Pod metadata and container image/process signals. Put app-stack metadata on `spec.template.metadata.labels` or `spec.template.metadata.annotations`.
 
 ### PostgreSQL monitoring
 
-The PostgreSQL plugin is opt-in, namespace-scoped, and discovery-first. It derives a synthesized health status from Kubernetes evidence in the configured namespaces, and it adds a `SELECT 1` probe only when a Service clearly matches the PostgreSQL heuristics. Probe settings are loaded from a Secret first and then from `POSTGRESQL_MONITORING_*` env vars.
+The PostgreSQL plugin is opt-in, namespace-scoped, and discovery-first. It derives health from Kubernetes evidence and only runs `SELECT 1` when a Service clearly matches PostgreSQL heuristics.
 
 | Variable | Default | Notes |
 |---|---|---|
@@ -350,9 +341,9 @@ The PostgreSQL plugin is opt-in, namespace-scoped, and discovery-first. It deriv
 | `POSTGRESQL_MONITORING_SSLMODE` | `disable` | Env fallback TLS mode. `disable` skips TLS; any other value enables TLS. |
 | `READONLY_COMMANDS_ENABLED` | `false` | Enables read-only Hub commands such as `diagnose_postgresql` without enabling mutating actions. |
 
-When a Secret is configured, the probe reads the following keys from it: `host`, `port`, `user`, `password`, `database`, `sslmode`, and `sslrootcert`. Env vars fill any missing values; explicit env vars still win over Secret values. The probe remains fail-soft if the Secret is absent or incomplete.
+When a Secret is configured, the probe reads `host`, `port`, `user`, `password`, `database`, `sslmode`, and `sslrootcert`. Env vars fill gaps.
 
-`diagnose_postgresql` uses the same discovery and probe path as the monitoring plugin, but it returns a command result payload instead of the snapshot plugin envelope. It stays read-only and only runs when `READONLY_COMMANDS_ENABLED=true`.
+`diagnose_postgresql` reuses the same path and stays read-only.
 
 When enabled with a non-empty allowlist, the snapshot gains:
 
@@ -486,6 +477,12 @@ Recommended `HUB_URL` is `https://api.hub.sentinel.la`.
 | `WORKLOAD_MONITORING_ENABLED` | ConfigMap | `false` |
 | `WORKLOAD_MONITORING_NAMESPACES` | ConfigMap | empty YAML list (`[]`) |
 | `WORKLOAD_MONITORING_TARGETS` | ConfigMap | `angular,spring_boot,oracle_database` |
+| `APP_METRICS_ENABLED` | ConfigMap | `false` |
+| `APP_METRICS_DISCOVERY_ENABLED` | ConfigMap | `true` |
+| `APP_METRICS_NAMESPACES` | ConfigMap | empty YAML list (`[]`) |
+| `APP_METRICS_ALLOWLIST` | ConfigMap | `process_.*` |
+| `APP_METRICS_TIMEOUT_SECS` | ConfigMap | `3` |
+| `APP_METRICS_MAX_SAMPLES` | ConfigMap | `500` |
 | `POSTGRESQL_MONITORING_ENABLED` | ConfigMap | `false` |
 | `POSTGRESQL_MONITORING_NAMESPACES` | ConfigMap | empty YAML list (`[]`) |
 | `FULL_DEBUG` | ConfigMap | `false` |

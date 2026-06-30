@@ -117,6 +117,8 @@ pub struct WorkloadMonitoringSignals {
     pub events: Vec<EventInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dependencies: Option<DependencyInventory>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app_metrics: Option<AppMetricsInventory>,
 }
 
 /// Current pod/container log tails for the workload monitoring allowlist.
@@ -137,6 +139,33 @@ pub struct WorkloadMonitoringContainerLogs {
     pub name: String,
     pub truncated: bool,
     pub lines: Vec<String>,
+}
+
+/// Application-level metrics scraped from annotated services or explicit targets.
+#[derive(Serialize, Debug, Default)]
+pub struct AppMetricsInventory {
+    pub targets: Vec<AppMetricsTarget>,
+}
+
+#[derive(Serialize, Debug, Clone)]
+pub struct AppMetricsTarget {
+    pub namespace: String,
+    pub service: String,
+    pub port: u16,
+    pub path: String,
+    pub source: String,
+    pub status: String,
+    pub summary: String,
+    pub metrics_count: usize,
+    pub truncated: bool,
+    pub samples: Vec<AppMetricSample>,
+}
+
+#[derive(Serialize, Debug, Clone)]
+pub struct AppMetricSample {
+    pub name: String,
+    pub labels: Vec<KV>,
+    pub value: f64,
 }
 
 /// Discovery-only PostgreSQL monitoring plugin block.

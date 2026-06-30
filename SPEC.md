@@ -41,6 +41,12 @@
 | `READONLY_COMMANDS_ENABLED` | no | `false` | Enables read-only commands such as `diagnose_postgresql` without enabling mutating actions. |
 | `COLLECT_SECRETS` | no | `false` | When `true`, collect Secret metadata and key names only; requires separate `secrets` read RBAC. |
 | `COLLECT_DEPENDENCIES_TETRAGON` | no | `false` | When `true`, collect dependency edges from Tetragon gRPC. |
+| `APP_METRICS_ENABLED` | no | `false` | Collect app Prometheus samples from annotated Services. |
+| `APP_METRICS_DISCOVERY_ENABLED` | no | `true` | Discover targets from Service annotations. |
+| `APP_METRICS_NAMESPACES` | no | `[]` | YAML allowlist for discovery. |
+| `APP_METRICS_ALLOWLIST` | no | bundled demo + Spring/JVM/Hikari/Tomcat allowlist | Metric name allowlist. |
+| `APP_METRICS_TIMEOUT_SECS` | no | `3` | Per-target scrape timeout. |
+| `APP_METRICS_MAX_SAMPLES` | no | `500` | Max samples per target. |
 | `TETRAGON_ENDPOINT_DISCOVERY_ENABLED` | no | `true` | When `true`, discover ready Tetragon endpoints from `tetragon/tetragon-grpc` via EndpointSlice and stream each endpoint independently. |
 | `TETRAGON_REQUIRED_FOR_READINESS` | no | `true` | When `true`, `/readyz` blocks until Tetragon connects; set `false` to relax readiness for dev or nodes without Tetragon. |
 | `TETRAGON_GRPC_ADDRESS` | no | when `COLLECT_DEPENDENCIES_TETRAGON=true`, `tetragon-grpc.tetragon.svc.cluster.local:54321` | Tetragon gRPC server address used for dependency collection. |
@@ -391,12 +397,36 @@ Compatibility note:
 
 `WorkloadMonitoringSignals` fields:
 
-- `workloads`: array of `WorkloadRef` (deployments, statefulsets, daemonsets merged) filtered to the allowlist. Omitted when empty.
-- `pods`: array of `PodInfo` filtered to the allowlist. Omitted when empty.
-- `services`: array of `ServiceInfo` filtered to the allowlist. Omitted when empty.
-- `ingresses`: array of `IngressInfo` filtered to the allowlist. Omitted when empty.
-- `events`: array of `EventInfo` filtered to the allowlist. Omitted when empty.
-- `dependencies`: optional `DependencyInventory`. Omitted when dependency collection is disabled or when the filtered inventory is empty.
+- `workloads`: filtered `WorkloadRef` list.
+- `pods`: filtered `PodInfo` list.
+- `services`: filtered `ServiceInfo` list.
+- `ingresses`: filtered `IngressInfo` list.
+- `events`: filtered `EventInfo` list.
+- `dependencies`: optional `DependencyInventory`; omitted when empty or disabled.
+- `app_metrics`: optional `AppMetricsInventory`; omitted when disabled.
+
+`AppMetricsInventory` fields:
+
+- `targets`: array of `AppMetricsTarget`.
+
+`AppMetricsTarget` fields:
+
+- `namespace`: string.
+- `service`: string.
+- `port`: scrape port.
+- `path`: scrape path.
+- `source`: discovery source.
+- `status`: scrape state.
+- `summary`: short status text.
+- `metrics_count`: sample count after filtering.
+- `truncated`: `true` when capped.
+- `samples`: array of `AppMetricSample`.
+
+`AppMetricSample` fields:
+
+- `name`: metric name.
+- `labels`: `{key, value}` pairs.
+- `value`: numeric sample value.
 
 `WorkloadMonitoringLogs` fields:
 
@@ -439,59 +469,14 @@ Example payload:
       "technology_targets": ["angular", "spring_boot", "oracle_database"],
       "schema_version": 1,
       "generated_at_ms": 1748523600000,
-      "signals": {
-        "workloads": [
-          {
-            "namespace": "customer-app",
-            "name": "api",
-            "replicas_desired": 3,
-            "replicas_ready": 2
-          }
-        ],
-        "pods": [
-          {
-            "namespace": "customer-app",
-            "name": "api-1",
-            "phase": "Running",
-            "containers": [
-              {
-                "name": "api",
-                "image": "nginx:1.27",
-                "technology": {
-                  "product": "nginx",
-                  "subtype": "angular",
-                  "source": "image"
-                },
-                "resources": {
-                  "requests_cpu": "100m",
-                  "requests_memory": "128Mi"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "logs": {
-        "pods": [
-          {
-            "namespace": "customer-app",
-            "name": "api-1",
-            "containers": [
-              {
-                "name": "api",
-                "truncated": false,
-                "lines": ["Starting server...", "Ready"]
-              }
-            ]
-          }
-        ]
-      }
+      "signals": { "app_metrics": { "targets": [] } },
+      "logs": { "pods": [] }
     }
   }
 }
 ```
 
-The example omits empty signal arrays and omits `dependencies` because the field is not serialized when dependency collection is disabled or the filtered inventory is empty. `logs.pods` may be empty when no pod logs could be read.
+The example omits empty signal arrays and omits `dependencies` because the field is not serialized when dependency collection is disabled or the filtered inventory is empty. `app_metrics` is omitted when app metrics are disabled. `logs.pods` may be empty when no pod logs could be read.
 
 ### Backend
 

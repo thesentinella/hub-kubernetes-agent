@@ -29,6 +29,12 @@ pub const AGENT_CONFIG_ENV_ALLOWLIST: &[&str] = &[
     "POSTGRESQL_MONITORING_NAMESPACES",
     "POSTGRESQL_MONITORING_SSLMODE",
     "POSTGRESQL_MONITORING_USER",
+    "APP_METRICS_ENABLED",
+    "APP_METRICS_DISCOVERY_ENABLED",
+    "APP_METRICS_NAMESPACES",
+    "APP_METRICS_ALLOWLIST",
+    "APP_METRICS_TIMEOUT_SECS",
+    "APP_METRICS_MAX_SAMPLES",
     "TETRAGON_ENDPOINT_DISCOVERY_ENABLED",
     "TETRAGON_GRPC_ADDRESS",
     "TETRAGON_GRPC_PORT",
@@ -167,6 +173,24 @@ pub struct Config {
 
     /// Optional PEM-encoded root certificate override for the PostgreSQL probe.
     pub postgresql_monitoring_sslrootcert: Option<String>,
+
+    /// Master switch for application metrics scraping from annotated services.
+    pub app_metrics_enabled: bool,
+
+    /// Enables annotation-based discovery of app metrics targets.
+    pub app_metrics_discovery_enabled: bool,
+
+    /// Allowlist of namespaces to inspect for app metrics targets.
+    pub app_metrics_namespaces: Vec<String>,
+
+    /// Allowlist of metric names or prefixes to include in the payload.
+    pub app_metrics_allowlist: Vec<String>,
+
+    /// Per-target HTTP timeout when scraping app metrics endpoints.
+    pub app_metrics_timeout: Duration,
+
+    /// Maximum number of metric samples retained per target.
+    pub app_metrics_max_samples: usize,
 }
 
 impl Config {
@@ -241,6 +265,33 @@ impl Config {
         let postgresql_monitoring_sslmode = parse_non_empty_env("POSTGRESQL_MONITORING_SSLMODE");
         let postgresql_monitoring_sslrootcert =
             parse_non_empty_env("POSTGRESQL_MONITORING_SSLROOTCERT");
+        let app_metrics_enabled = env_flag("APP_METRICS_ENABLED");
+        let app_metrics_discovery_enabled =
+            env_flag_with_default("APP_METRICS_DISCOVERY_ENABLED", true);
+        let app_metrics_namespaces = parse_yaml_list_env("APP_METRICS_NAMESPACES");
+        let app_metrics_allowlist = parse_csv_env_or(
+            "APP_METRICS_ALLOWLIST",
+            vec![
+                "demo_usuarios_activos".to_string(),
+                "demo_cola_tramites_pendientes".to_string(),
+                "demo_operaciones_negocio_total".to_string(),
+                "demo_lecturas_bd_total".to_string(),
+                "demo_escrituras_bd_total".to_string(),
+                "http_server_requests_seconds_*".to_string(),
+                "jvm_memory_used_bytes".to_string(),
+                "jvm_gc_pause_seconds_*".to_string(),
+                "process_cpu_usage".to_string(),
+                "system_cpu_usage".to_string(),
+                "hikaricp_connections_*".to_string(),
+                "jdbc_connections_*".to_string(),
+                "tomcat_threads_*".to_string(),
+                "tomcat_sessions_active_current".to_string(),
+            ],
+        );
+        let app_metrics_timeout =
+            Duration::from_secs(parse_u64_env("APP_METRICS_TIMEOUT_SECS").unwrap_or(3));
+        let app_metrics_max_samples =
+            parse_u64_env("APP_METRICS_MAX_SAMPLES").unwrap_or(500) as usize;
 
         Ok(Self {
             hub_url: hub_url.trim_end_matches('/').to_string(),
@@ -283,6 +334,12 @@ impl Config {
             postgresql_monitoring_database,
             postgresql_monitoring_sslmode,
             postgresql_monitoring_sslrootcert,
+            app_metrics_enabled,
+            app_metrics_discovery_enabled,
+            app_metrics_namespaces,
+            app_metrics_allowlist,
+            app_metrics_timeout,
+            app_metrics_max_samples,
         })
     }
 }
@@ -351,6 +408,12 @@ fn runtime_env_value(cfg: &Config, key: &str) -> Option<String> {
         }
         "POSTGRESQL_MONITORING_SSLMODE" => cfg.postgresql_monitoring_sslmode.clone(),
         "POSTGRESQL_MONITORING_USER" => cfg.postgresql_monitoring_user.clone(),
+        "APP_METRICS_ENABLED" => Some(bool_string(cfg.app_metrics_enabled)),
+        "APP_METRICS_DISCOVERY_ENABLED" => Some(bool_string(cfg.app_metrics_discovery_enabled)),
+        "APP_METRICS_NAMESPACES" => Some(yaml_list_string(&cfg.app_metrics_namespaces)),
+        "APP_METRICS_ALLOWLIST" => Some(cfg.app_metrics_allowlist.join(",")),
+        "APP_METRICS_TIMEOUT_SECS" => Some(cfg.app_metrics_timeout.as_secs().to_string()),
+        "APP_METRICS_MAX_SAMPLES" => Some(cfg.app_metrics_max_samples.to_string()),
         "WORKLOAD_MONITORING_ENABLED" => Some(bool_string(cfg.workload_monitoring_enabled)),
         "WORKLOAD_MONITORING_NAMESPACES" => {
             Some(yaml_list_string(&cfg.workload_monitoring_namespaces))
@@ -372,6 +435,8 @@ fn configured_env_value(key: &str, value: &str) -> Option<String> {
         | "FULL_DEBUG"
         | "READONLY_COMMANDS_ENABLED"
         | "POSTGRESQL_MONITORING_ENABLED"
+        | "APP_METRICS_ENABLED"
+        | "APP_METRICS_DISCOVERY_ENABLED"
         | "TECH_DETECT_PROCESS" => Some(bool_string(trimmed == "true" || trimmed == "1")),
         "AGENT_LOG" => Some(if trimmed.is_empty() {
             "info".to_string()
@@ -385,6 +450,11 @@ fn configured_env_value(key: &str, value: &str) -> Option<String> {
         | "POLL_WAIT_SECS"
         | "TETRAGON_GRPC_PORT" => trimmed
             .parse::<u16>()
+            .map(|value| value.to_string())
+            .ok()
+            .or_else(|| Some(trimmed.to_string())),
+        "APP_METRICS_TIMEOUT_SECS" | "APP_METRICS_MAX_SAMPLES" => trimmed
+            .parse::<u64>()
             .map(|value| value.to_string())
             .ok()
             .or_else(|| Some(trimmed.to_string())),
@@ -481,6 +551,10 @@ fn parse_csv_env_or(var: &str, default: Vec<String>) -> Vec<String> {
 
 fn parse_u16_env(var: &str) -> Option<u16> {
     env::var(var).ok()?.trim().parse::<u16>().ok()
+}
+
+fn parse_u64_env(var: &str) -> Option<u64> {
+    env::var(var).ok()?.trim().parse::<u64>().ok()
 }
 
 fn env_flag_with_default(var: &str, default: bool) -> bool {
@@ -824,6 +898,12 @@ mod tests {
             workload_monitoring_enabled: false,
             workload_monitoring_namespaces: Vec::new(),
             workload_monitoring_targets: vec!["angular".into(), "spring_boot".into()],
+            app_metrics_enabled: false,
+            app_metrics_discovery_enabled: true,
+            app_metrics_namespaces: Vec::new(),
+            app_metrics_allowlist: Vec::new(),
+            app_metrics_timeout: Duration::from_secs(3),
+            app_metrics_max_samples: 500,
             postgresql_monitoring_enabled: false,
             postgresql_monitoring_namespaces: Vec::new(),
             postgresql_monitoring_secret_name: Some("postgresql-monitoring".into()),
@@ -1052,6 +1132,12 @@ mod tests {
             workload_monitoring_enabled: true,
             workload_monitoring_namespaces: vec!["customer-app".into(), "customer-db".into()],
             workload_monitoring_targets: vec!["angular".into(), "spring_boot".into()],
+            app_metrics_enabled: false,
+            app_metrics_discovery_enabled: true,
+            app_metrics_namespaces: Vec::new(),
+            app_metrics_allowlist: Vec::new(),
+            app_metrics_timeout: Duration::from_secs(3),
+            app_metrics_max_samples: 500,
             postgresql_monitoring_enabled: false,
             postgresql_monitoring_namespaces: Vec::new(),
             postgresql_monitoring_secret_name: None,
@@ -1105,6 +1191,12 @@ mod tests {
             workload_monitoring_enabled: false,
             workload_monitoring_namespaces: Vec::new(),
             workload_monitoring_targets: vec!["angular".into(), "spring_boot".into()],
+            app_metrics_enabled: false,
+            app_metrics_discovery_enabled: true,
+            app_metrics_namespaces: Vec::new(),
+            app_metrics_allowlist: Vec::new(),
+            app_metrics_timeout: Duration::from_secs(3),
+            app_metrics_max_samples: 500,
             postgresql_monitoring_enabled: true,
             postgresql_monitoring_namespaces: vec!["customer-db".into(), "analytics".into()],
             postgresql_monitoring_secret_name: None,
