@@ -112,6 +112,9 @@ pub fn build_workload_monitoring(
             window_seconds: dependencies.window_seconds,
             truncated: dependencies.truncated,
             dropped_edges: dependencies.dropped_edges,
+            observed_endpoints: dependencies.observed_endpoints,
+            connected_endpoints: dependencies.connected_endpoints,
+            unavailable_endpoints: dependencies.unavailable_endpoints,
         })
     } else {
         None
@@ -1676,8 +1679,12 @@ mod tests {
             readonly_commands_enabled: false,
             collect_secrets: false,
             collect_dependencies_tetragon: false,
+            tetragon_endpoint_discovery_enabled: true,
             tetragon_required_for_readiness: true,
             tetragon_grpc_address: "tetragon:54321".into(),
+            tetragon_grpc_port: 54321,
+            tetragon_service_namespace: "tetragon".into(),
+            tetragon_service_name: "tetragon-grpc".into(),
             http_timeout: Duration::from_secs(20),
             http_debug: false,
             http_debug_bodies: false,
@@ -1939,6 +1946,9 @@ mod tests {
             window_seconds: 60,
             truncated: false,
             dropped_edges: 0,
+            observed_endpoints: 3,
+            connected_endpoints: 2,
+            unavailable_endpoints: 1,
         };
         let result = build_workload_monitoring(
             &cfg,

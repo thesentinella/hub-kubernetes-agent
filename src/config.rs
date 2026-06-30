@@ -29,7 +29,11 @@ pub const AGENT_CONFIG_ENV_ALLOWLIST: &[&str] = &[
     "POSTGRESQL_MONITORING_NAMESPACES",
     "POSTGRESQL_MONITORING_SSLMODE",
     "POSTGRESQL_MONITORING_USER",
+    "TETRAGON_ENDPOINT_DISCOVERY_ENABLED",
     "TETRAGON_GRPC_ADDRESS",
+    "TETRAGON_GRPC_PORT",
+    "TETRAGON_SERVICE_NAME",
+    "TETRAGON_SERVICE_NAMESPACE",
     "TECH_DETECT_PROCESS",
     "WORKLOAD_MONITORING_ENABLED",
     "WORKLOAD_MONITORING_NAMESPACES",
@@ -68,11 +72,23 @@ pub struct Config {
     /// Enables Tetragon-based dependency collection over gRPC.
     pub collect_dependencies_tetragon: bool,
 
+    /// Enables discovery of Tetragon gRPC endpoints via EndpointSlice.
+    pub tetragon_endpoint_discovery_enabled: bool,
+
     /// Controls whether Tetragon connectivity is required for readiness.
     pub tetragon_required_for_readiness: bool,
 
     /// Tetragon gRPC server address for dependency collection.
     pub tetragon_grpc_address: String,
+
+    /// Port used when discovering Tetragon gRPC endpoints.
+    pub tetragon_grpc_port: u16,
+
+    /// Namespace containing the Tetragon Service used for discovery.
+    pub tetragon_service_namespace: String,
+
+    /// Service name used for Tetragon endpoint discovery.
+    pub tetragon_service_name: String,
 
     /// HTTP request timeout to the Hub.
     pub http_timeout: Duration,
@@ -182,10 +198,17 @@ impl Config {
         let readonly_commands_enabled = env_flag("READONLY_COMMANDS_ENABLED");
         let collect_secrets = env_flag("COLLECT_SECRETS");
         let collect_dependencies_tetragon = env_flag("COLLECT_DEPENDENCIES_TETRAGON");
+        let tetragon_endpoint_discovery_enabled =
+            env_flag_with_default("TETRAGON_ENDPOINT_DISCOVERY_ENABLED", true);
         let tetragon_required_for_readiness =
             env_flag_with_default("TETRAGON_REQUIRED_FOR_READINESS", true);
         let tetragon_grpc_address = env::var("TETRAGON_GRPC_ADDRESS")
             .unwrap_or_else(|_| crate::tetragon::DEFAULT_GRPC_ADDRESS.to_string());
+        let tetragon_grpc_port = parse_u16_env("TETRAGON_GRPC_PORT").unwrap_or(54321);
+        let tetragon_service_namespace =
+            env::var("TETRAGON_SERVICE_NAMESPACE").unwrap_or_else(|_| "tetragon".to_string());
+        let tetragon_service_name =
+            env::var("TETRAGON_SERVICE_NAME").unwrap_or_else(|_| "tetragon-grpc".to_string());
         let tech_detect_process = env_flag("TECH_DETECT_PROCESS");
 
         let pod_name = env::var("POD_NAME").unwrap_or_else(|_| "unknown".to_string());
@@ -230,8 +253,12 @@ impl Config {
             readonly_commands_enabled,
             collect_secrets,
             collect_dependencies_tetragon,
+            tetragon_endpoint_discovery_enabled,
             tetragon_required_for_readiness,
             tetragon_grpc_address,
+            tetragon_grpc_port,
+            tetragon_service_namespace,
+            tetragon_service_name,
             http_timeout,
             http_debug,
             http_debug_bodies,
@@ -296,6 +323,9 @@ fn runtime_env_value(cfg: &Config, key: &str) -> Option<String> {
         "AGENT_VERSION_OVERRIDE" => cfg.agent_version_override.clone(),
         "CLUSTER_ID" => Some(cfg.cluster_id.clone()),
         "COLLECT_DEPENDENCIES_TETRAGON" => Some(bool_string(cfg.collect_dependencies_tetragon)),
+        "TETRAGON_ENDPOINT_DISCOVERY_ENABLED" => {
+            Some(bool_string(cfg.tetragon_endpoint_discovery_enabled))
+        }
         "COLLECT_INTERVAL_SECS" => Some(cfg.collect_interval.as_secs().to_string()),
         "COLLECT_SECRETS" => Some(bool_string(cfg.collect_secrets)),
         "FULL_DEBUG" => Some(bool_string(cfg.full_debug)),
@@ -306,6 +336,9 @@ fn runtime_env_value(cfg: &Config, key: &str) -> Option<String> {
         "POLL_WAIT_SECS" => Some(cfg.poll_wait.as_secs().to_string()),
         "POSTGRESQL_MONITORING_DATABASE" => cfg.postgresql_monitoring_database.clone(),
         "TETRAGON_GRPC_ADDRESS" => Some(cfg.tetragon_grpc_address.clone()),
+        "TETRAGON_GRPC_PORT" => Some(cfg.tetragon_grpc_port.to_string()),
+        "TETRAGON_SERVICE_NAME" => Some(cfg.tetragon_service_name.clone()),
+        "TETRAGON_SERVICE_NAMESPACE" => Some(cfg.tetragon_service_namespace.clone()),
         "TECH_DETECT_PROCESS" => Some(bool_string(cfg.tech_detect_process)),
         "POSTGRESQL_MONITORING_HOST" => cfg.postgresql_monitoring_host.clone(),
         "POSTGRESQL_MONITORING_PORT" => cfg
@@ -334,6 +367,7 @@ fn configured_env_value(key: &str, value: &str) -> Option<String> {
         | "AGENT_HTTP_DEBUG"
         | "AGENT_HTTP_DEBUG_BODIES"
         | "COLLECT_DEPENDENCIES_TETRAGON"
+        | "TETRAGON_ENDPOINT_DISCOVERY_ENABLED"
         | "COLLECT_SECRETS"
         | "FULL_DEBUG"
         | "READONLY_COMMANDS_ENABLED"
@@ -345,13 +379,15 @@ fn configured_env_value(key: &str, value: &str) -> Option<String> {
             trimmed.to_string()
         }),
         "AGENT_VERSION_OVERRIDE" => parse_non_empty_value(trimmed),
-        "COLLECT_INTERVAL_SECS" | "HTTP_TIMEOUT_SECS" | "LEASE_TTL_SECS" | "POLL_WAIT_SECS" => {
-            trimmed
-                .parse::<u64>()
-                .map(|value| value.to_string())
-                .ok()
-                .or_else(|| Some(trimmed.to_string()))
-        }
+        "COLLECT_INTERVAL_SECS"
+        | "HTTP_TIMEOUT_SECS"
+        | "LEASE_TTL_SECS"
+        | "POLL_WAIT_SECS"
+        | "TETRAGON_GRPC_PORT" => trimmed
+            .parse::<u16>()
+            .map(|value| value.to_string())
+            .ok()
+            .or_else(|| Some(trimmed.to_string())),
         "POSTGRESQL_MONITORING_PORT" => trimmed
             .parse::<u16>()
             .map(|value| value.to_string())
@@ -742,11 +778,15 @@ mod tests {
             );
             let cfg = Config::from_env().unwrap();
             assert!(cfg.collect_dependencies_tetragon);
+            assert!(cfg.tetragon_endpoint_discovery_enabled);
             assert!(!cfg.tetragon_required_for_readiness);
             assert_eq!(
                 cfg.tetragon_grpc_address,
                 "tetragon-grpc.tetragon.svc.cluster.local:54321"
             );
+            assert_eq!(cfg.tetragon_grpc_port, 54321);
+            assert_eq!(cfg.tetragon_service_namespace, "tetragon");
+            assert_eq!(cfg.tetragon_service_name, "tetragon-grpc");
             clear_required();
         }
     }
@@ -764,8 +804,12 @@ mod tests {
             readonly_commands_enabled: true,
             collect_secrets: false,
             collect_dependencies_tetragon: true,
+            tetragon_endpoint_discovery_enabled: true,
             tetragon_required_for_readiness: true,
             tetragon_grpc_address: "tetragon:54321".into(),
+            tetragon_grpc_port: 54321,
+            tetragon_service_namespace: "tetragon".into(),
+            tetragon_service_name: "tetragon-grpc".into(),
             http_timeout: Duration::from_secs(20),
             http_debug: true,
             http_debug_bodies: false,
@@ -988,8 +1032,12 @@ mod tests {
             readonly_commands_enabled: false,
             collect_secrets: false,
             collect_dependencies_tetragon: false,
+            tetragon_endpoint_discovery_enabled: true,
             tetragon_required_for_readiness: true,
             tetragon_grpc_address: "tetragon:54321".into(),
+            tetragon_grpc_port: 54321,
+            tetragon_service_namespace: "tetragon".into(),
+            tetragon_service_name: "tetragon-grpc".into(),
             http_timeout: Duration::from_secs(20),
             http_debug: false,
             http_debug_bodies: false,
@@ -1037,8 +1085,12 @@ mod tests {
             readonly_commands_enabled: false,
             collect_secrets: false,
             collect_dependencies_tetragon: false,
+            tetragon_endpoint_discovery_enabled: true,
             tetragon_required_for_readiness: true,
             tetragon_grpc_address: "tetragon:54321".into(),
+            tetragon_grpc_port: 54321,
+            tetragon_service_namespace: "tetragon".into(),
+            tetragon_service_name: "tetragon-grpc".into(),
             http_timeout: Duration::from_secs(20),
             http_debug: false,
             http_debug_bodies: false,

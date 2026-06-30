@@ -547,12 +547,16 @@ async fn collect_dependency_inventory(
             "dependency collection reduced observed tetragon events"
         );
     }
+    let coverage = tetragon::coverage_snapshot();
     DependencyInventory {
         edges,
         source: "tetragon_grpc",
         window_seconds: DEP_WINDOW_SECONDS,
         truncated,
         dropped_edges: dropped_total,
+        observed_endpoints: coverage.observed_endpoints,
+        connected_endpoints: coverage.connected_endpoints,
+        unavailable_endpoints: coverage.unavailable_endpoints,
     }
 }
 

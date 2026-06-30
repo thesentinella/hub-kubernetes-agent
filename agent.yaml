@@ -65,6 +65,10 @@ rules:
       - ingresses
       - networkpolicies
     verbs: ["get", "list", "watch"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources:
+      - endpointslices
+    verbs: ["get", "list", "watch"]
   - apiGroups: ["storage.k8s.io"]
     resources:
       - storageclasses
@@ -131,8 +135,12 @@ data:
   READONLY_COMMANDS_ENABLED: "false"  # opt-in; enables read-only diagnostic commands
   COLLECT_SECRETS: "false"           # requires separate secrets-reader RBAC when true
   COLLECT_DEPENDENCIES_TETRAGON: "false"  # opt-in; requires Tetragon with gRPC enabled
+  TETRAGON_ENDPOINT_DISCOVERY_ENABLED: "true"  # default-on; falls back to TETRAGON_GRPC_ADDRESS if discovery fails
   TETRAGON_REQUIRED_FOR_READINESS: "true" # set false in dev if Tetragon is unavailable on a node
   TETRAGON_GRPC_ADDRESS: "tetragon-grpc.tetragon.svc.cluster.local:54321"
+  TETRAGON_GRPC_PORT: "54321"
+  TETRAGON_SERVICE_NAMESPACE: "tetragon"
+  TETRAGON_SERVICE_NAME: "tetragon-grpc"
   FULL_DEBUG: "false"                 # last resort only; emits full payloads and bodies
   AGENT_HTTP_DEBUG: "false"
   AGENT_HTTP_DEBUG_BODIES: "false"
