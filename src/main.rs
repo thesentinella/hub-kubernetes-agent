@@ -158,18 +158,13 @@ async fn build_and_send(cfg: &Config, kube: &KubeClient, hub: &HubClient) -> Res
         security,
         operational_maturity,
         dependencies,
+        app_metrics,
         mut configuration,
         storage,
         events,
         metrics,
         snapshot_api,
-    ) = collector::collect(
-        kube,
-        cfg.collect_secrets,
-        cfg.collect_dependencies_tetragon,
-        cfg.tech_detect_process,
-    )
-    .await?;
+    ) = collector::collect(kube, &cfg).await?;
     warn_metrics_status_change(&metrics);
     warn_snapshot_api_status_change(&snapshot_api);
     configuration.agent_runtime_env = config::agent_runtime_env(cfg);
@@ -182,6 +177,7 @@ async fn build_and_send(cfg: &Config, kube: &KubeClient, hub: &HubClient) -> Res
         &network,
         &events,
         &dependencies,
+        app_metrics,
         workload_monitoring_logs,
     );
     let postgresql_monitoring = plugins::build_postgresql_monitoring(
@@ -536,6 +532,12 @@ mod tests {
             workload_monitoring_enabled: false,
             workload_monitoring_namespaces: Vec::new(),
             workload_monitoring_targets: vec!["angular".into(), "spring_boot".into()],
+            app_metrics_enabled: false,
+            app_metrics_discovery_enabled: true,
+            app_metrics_namespaces: Vec::new(),
+            app_metrics_allowlist: Vec::new(),
+            app_metrics_timeout: Duration::from_secs(3),
+            app_metrics_max_samples: 500,
             postgresql_monitoring_enabled: false,
             postgresql_monitoring_namespaces: Vec::new(),
             postgresql_monitoring_secret_name: None,

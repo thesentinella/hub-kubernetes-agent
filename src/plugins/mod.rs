@@ -41,6 +41,7 @@ pub fn build_workload_monitoring(
     network: &NetworkInventory,
     events: &[EventInfo],
     dependencies: &DependencyInventory,
+    app_metrics: AppMetricsInventory,
     logs: WorkloadMonitoringLogs,
 ) -> Option<WorkloadMonitoringPlugin> {
     if !cfg.workload_monitoring_enabled {
@@ -133,6 +134,11 @@ pub fn build_workload_monitoring(
             ingresses: filtered_ingresses,
             events: filtered_events,
             dependencies: filtered_dependencies,
+            app_metrics: if cfg.app_metrics_enabled {
+                Some(app_metrics)
+            } else {
+                None
+            },
         },
         logs,
     })
@@ -185,14 +191,7 @@ pub async fn diagnose_postgresql(
         );
     }
 
-    let collected = match collector::collect(
-        client,
-        cfg.collect_secrets,
-        cfg.collect_dependencies_tetragon,
-        cfg.tech_detect_process,
-    )
-    .await
-    {
+    let collected = match collector::collect(client, cfg).await {
         Ok(snapshot) => snapshot,
         Err(err) => {
             return diagnostic_report_error(
@@ -214,6 +213,7 @@ pub async fn diagnose_postgresql(
         _security,
         _operational_maturity,
         _dependencies,
+        _app_metrics,
         _configuration,
         storage,
         events,
@@ -1699,6 +1699,12 @@ mod tests {
             workload_monitoring_enabled: enabled,
             workload_monitoring_namespaces: namespaces,
             workload_monitoring_targets: vec!["angular".into(), "spring_boot".into()],
+            app_metrics_enabled: false,
+            app_metrics_discovery_enabled: true,
+            app_metrics_namespaces: Vec::new(),
+            app_metrics_allowlist: Vec::new(),
+            app_metrics_timeout: Duration::from_secs(3),
+            app_metrics_max_samples: 500,
             postgresql_monitoring_enabled: false,
             postgresql_monitoring_namespaces: vec![],
             postgresql_monitoring_secret_name: None,
@@ -1819,6 +1825,7 @@ mod tests {
             &NetworkInventory::default(),
             &[],
             &DependencyInventory::default(),
+            AppMetricsInventory::default(),
             WorkloadMonitoringLogs::default(),
         );
         assert!(result.is_none());
@@ -1834,6 +1841,7 @@ mod tests {
             &NetworkInventory::default(),
             &[],
             &DependencyInventory::default(),
+            AppMetricsInventory::default(),
             WorkloadMonitoringLogs::default(),
         );
         assert!(result.is_none());
@@ -1856,6 +1864,7 @@ mod tests {
             &NetworkInventory::default(),
             &events,
             &DependencyInventory::default(),
+            AppMetricsInventory::default(),
             WorkloadMonitoringLogs::default(),
         )
         .unwrap();
@@ -1887,6 +1896,7 @@ mod tests {
             &NetworkInventory::default(),
             &[],
             &DependencyInventory::default(),
+            AppMetricsInventory::default(),
             logs,
         )
         .unwrap();
@@ -1905,6 +1915,7 @@ mod tests {
             &NetworkInventory::default(),
             &[],
             &DependencyInventory::default(),
+            AppMetricsInventory::default(),
             WorkloadMonitoringLogs::default(),
         )
         .unwrap();
@@ -1957,6 +1968,7 @@ mod tests {
             &NetworkInventory::default(),
             &[],
             &deps,
+            AppMetricsInventory::default(),
             WorkloadMonitoringLogs::default(),
         )
         .unwrap();

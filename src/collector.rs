@@ -20,9 +20,11 @@ use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kube::api::{ApiResource, DynamicObject, ListParams, LogParams};
 use kube::core::GroupVersionKind;
 use kube::{Api, Client, Error as KubeError};
+use reqwest::Client as HttpClient;
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Instant;
 use tokio::task::JoinSet;
 use tracing::warn;
 
@@ -32,6 +34,14 @@ const PSA_AUDIT_LABEL: &str = "pod-security.kubernetes.io/audit";
 const PSA_WARN_LABEL: &str = "pod-security.kubernetes.io/warn";
 const WORKLOAD_MONITORING_LOG_TAIL_LINES: i64 = 200;
 const WORKLOAD_MONITORING_LOG_LIMIT_BYTES: i64 = 65_536;
+const APP_METRICS_DEFAULT_PATH: &str = "/metrics";
+const APP_METRICS_MAX_RESPONSE_BYTES: u64 = 1_048_576;
+const APP_METRICS_PROMETHEUS_SCRAPE_ANNOTATION: &str = "prometheus.io/scrape";
+const APP_METRICS_PROMETHEUS_PATH_ANNOTATION: &str = "prometheus.io/path";
+const APP_METRICS_PROMETHEUS_PORT_ANNOTATION: &str = "prometheus.io/port";
+const APP_METRICS_SENTINELLA_SCRAPE_ANNOTATION: &str = "sentinella.io/app-metrics";
+const APP_METRICS_SENTINELLA_PATH_ANNOTATION: &str = "sentinella.io/app-metrics-path";
+const APP_METRICS_SENTINELLA_PORT_ANNOTATION: &str = "sentinella.io/app-metrics-port";
 
 #[derive(Default)]
 struct PodUsageTotals {
@@ -41,9 +51,7 @@ struct PodUsageTotals {
 
 pub async fn collect(
     client: &Client,
-    collect_secrets: bool,
-    collect_dependencies_tetragon: bool,
-    tech_detect_process: bool,
+    cfg: &config::Config,
 ) -> Result<(
     Option<String>,
     ClusterInfo,
@@ -54,6 +62,7 @@ pub async fn collect(
     SecurityInventory,
     OperationalMaturityInventory,
     DependencyInventory,
+    AppMetricsInventory,
     ConfigurationInventory,
     StorageInventory,
     Vec<EventInfo>,
@@ -76,7 +85,7 @@ pub async fn collect(
     let cluster_role_bindings_fut = list_all::<ClusterRoleBinding>(client, &lp);
     let configmaps_fut = list_all::<ConfigMap>(client, &lp);
     let secrets_fut = async {
-        if collect_secrets {
+        if cfg.collect_secrets {
             list_all::<Secret>(client, &lp).await
         } else {
             Ok(Vec::new())
@@ -177,11 +186,12 @@ pub async fn collect(
     sort_ingresses_for_snapshot(&mut ingresses);
     sort_network_policies_for_snapshot(&mut network_policies);
     let dependencies =
-        collect_dependency_inventory(collect_dependencies_tetragon, &pods, &services).await;
+        collect_dependency_inventory(cfg.collect_dependencies_tetragon, &pods, &services).await;
+    let app_metrics = collect_app_metrics(cfg, &services).await;
     let pod_usage = build_pod_usage_index(&pod_metrics);
     let pod_infos = pods
         .into_iter()
-        .map(|pod| map_pod(pod, &pod_usage, tech_detect_process))
+        .map(|pod| map_pod(pod, &pod_usage, cfg.tech_detect_process))
         .collect();
     let network = NetworkInventory {
         services: services.into_iter().map(map_service).collect(),
@@ -218,7 +228,11 @@ pub async fn collect(
     let agent_configured_env = collect_agent_configured_env(&configmaps);
     let configuration = ConfigurationInventory {
         configmaps: configmaps.into_iter().map(map_configmap).collect(),
-        secrets: secrets.into_iter().map(map_secret).collect(),
+        secrets: if cfg.collect_secrets {
+            secrets.into_iter().map(map_secret).collect()
+        } else {
+            Vec::new()
+        },
         agent_runtime_env: Vec::new(),
         agent_configured_env,
     };
@@ -249,6 +263,7 @@ pub async fn collect(
         security,
         operational_maturity,
         dependencies,
+        app_metrics,
         configuration,
         storage,
         event_infos,
@@ -307,6 +322,447 @@ pub async fn collect_workload_monitoring_logs(
     WorkloadMonitoringLogs {
         pods: pod_logs.into_iter().map(|(_, logs)| logs).collect(),
     }
+}
+
+pub async fn collect_app_metrics(
+    cfg: &config::Config,
+    services: &[Service],
+) -> AppMetricsInventory {
+    if !cfg.app_metrics_enabled
+        || !cfg.app_metrics_discovery_enabled
+        || cfg.app_metrics_namespaces.is_empty()
+    {
+        return AppMetricsInventory::default();
+    }
+
+    let http = match HttpClient::builder()
+        .timeout(cfg.app_metrics_timeout)
+        .build()
+    {
+        Ok(client) => client,
+        Err(err) => {
+            warn!(error = %err, "failed to build app metrics HTTP client");
+            return AppMetricsInventory::default();
+        }
+    };
+
+    let allow = cfg.app_metrics_namespaces.clone();
+    let mut tasks = JoinSet::new();
+
+    for service in services.iter() {
+        let namespace = service.metadata.namespace.clone().unwrap_or_default();
+        if !allow.iter().any(|allowed| allowed == &namespace) {
+            continue;
+        }
+
+        let Some(target) = discover_app_metrics_target(service) else {
+            continue;
+        };
+
+        let http = http.clone();
+        let allowlist = cfg.app_metrics_allowlist.clone();
+        let max_samples = cfg.app_metrics_max_samples;
+        tasks.spawn(async move {
+            scrape_app_metrics_target(http, target, allowlist, max_samples).await
+        });
+    }
+
+    let mut targets = Vec::new();
+    while let Some(joined) = tasks.join_next().await {
+        match joined {
+            Ok(target) => targets.push(target),
+            Err(err) => warn!(error = %err, "app metrics scrape task failed"),
+        }
+    }
+
+    targets.sort_by(|a, b| {
+        a.namespace
+            .cmp(&b.namespace)
+            .then_with(|| a.service.cmp(&b.service))
+            .then_with(|| a.port.cmp(&b.port))
+            .then_with(|| a.path.cmp(&b.path))
+    });
+
+    AppMetricsInventory { targets }
+}
+
+#[derive(Clone)]
+struct AppMetricsTargetSpec {
+    namespace: String,
+    service: String,
+    port: u16,
+    path: String,
+    source: String,
+    scheme: String,
+}
+
+fn discover_app_metrics_target(service: &Service) -> Option<AppMetricsTargetSpec> {
+    let namespace = service.metadata.namespace.clone().unwrap_or_default();
+    let service_name = service.metadata.name.clone().unwrap_or_default();
+    let annotations = service.metadata.annotations.as_ref()?;
+
+    if !annotation_is_true(
+        annotations,
+        &[
+            APP_METRICS_PROMETHEUS_SCRAPE_ANNOTATION,
+            APP_METRICS_SENTINELLA_SCRAPE_ANNOTATION,
+        ],
+    ) {
+        return None;
+    }
+
+    let path = annotation_string(
+        annotations,
+        &[
+            APP_METRICS_PROMETHEUS_PATH_ANNOTATION,
+            APP_METRICS_SENTINELLA_PATH_ANNOTATION,
+        ],
+    )
+    .unwrap_or_else(|| APP_METRICS_DEFAULT_PATH.to_string());
+    let Some(path) = sanitize_app_metrics_path(&path) else {
+        warn!(
+            namespace = %namespace,
+            service = %service_name,
+            path = %path,
+            "skipping app metrics target with unsafe path"
+        );
+        return None;
+    };
+    let scheme = sanitize_app_metrics_scheme(annotation_string(
+        annotations,
+        &["prometheus.io/scheme", "sentinella.io/app-metrics-scheme"],
+    ))?;
+
+    let port = annotation_string(
+        annotations,
+        &[
+            APP_METRICS_PROMETHEUS_PORT_ANNOTATION,
+            APP_METRICS_SENTINELLA_PORT_ANNOTATION,
+        ],
+    )
+    .and_then(|value| value.parse::<u16>().ok())
+    .or_else(|| {
+        service
+            .spec
+            .as_ref()
+            .and_then(|spec| spec.ports.as_ref())
+            .and_then(|ports| ports.first())
+            .map(|port| port.port as u16)
+    })?;
+
+    Some(AppMetricsTargetSpec {
+        namespace,
+        service: service_name,
+        port,
+        path,
+        source: if annotations.contains_key(APP_METRICS_SENTINELLA_SCRAPE_ANNOTATION) {
+            "sentinella-annotation".to_string()
+        } else {
+            "prometheus-annotation".to_string()
+        },
+        scheme,
+    })
+}
+
+async fn scrape_app_metrics_target(
+    http: HttpClient,
+    target: AppMetricsTargetSpec,
+    allowlist: Vec<String>,
+    max_samples: usize,
+) -> AppMetricsTarget {
+    let url = format!(
+        "{}://{}.{}.svc.cluster.local:{}{}",
+        target.scheme, target.service, target.namespace, target.port, target.path
+    );
+    let started_at = Instant::now();
+
+    match http.get(&url).send().await {
+        Ok(response) => {
+            let status = response.status();
+            if let Some(content_length) = response.content_length() {
+                if content_length > APP_METRICS_MAX_RESPONSE_BYTES {
+                    return AppMetricsTarget {
+                        namespace: target.namespace,
+                        service: target.service,
+                        port: target.port,
+                        path: target.path,
+                        source: target.source,
+                        status: "warning".to_string(),
+                        summary: format!(
+                            "app metrics response from {} exceeded {} bytes",
+                            url, APP_METRICS_MAX_RESPONSE_BYTES
+                        ),
+                        metrics_count: 0,
+                        truncated: false,
+                        samples: Vec::new(),
+                    };
+                }
+            }
+            match response.text().await {
+                Ok(body) => {
+                    let (samples, matched_count, truncated) =
+                        parse_prometheus_text(&body, &allowlist, max_samples);
+                    let result_status = if status.is_success() {
+                        if matched_count == 0 {
+                            "warning"
+                        } else if truncated {
+                            "warning"
+                        } else {
+                            "ok"
+                        }
+                    } else {
+                        "warning"
+                    };
+                    let summary = if status.is_success() {
+                        if matched_count == 0 {
+                            format!("scraped {} but found no allowlisted metrics", url)
+                        } else if truncated {
+                            format!(
+                                "scraped {} with {} matched samples (truncated)",
+                                url, matched_count
+                            )
+                        } else {
+                            format!(
+                                "scraped {} with {} matched samples in {} ms",
+                                url,
+                                matched_count,
+                                started_at.elapsed().as_millis()
+                            )
+                        }
+                    } else {
+                        format!("scrape returned HTTP {} from {}", status.as_u16(), url)
+                    };
+
+                    AppMetricsTarget {
+                        namespace: target.namespace,
+                        service: target.service,
+                        port: target.port,
+                        path: target.path,
+                        source: target.source,
+                        status: result_status.to_string(),
+                        summary,
+                        metrics_count: matched_count,
+                        truncated,
+                        samples,
+                    }
+                }
+                Err(err) => AppMetricsTarget {
+                    namespace: target.namespace,
+                    service: target.service,
+                    port: target.port,
+                    path: target.path,
+                    source: target.source,
+                    status: "warning".to_string(),
+                    summary: format!("failed to read app metrics response from {}: {}", url, err),
+                    metrics_count: 0,
+                    truncated: false,
+                    samples: Vec::new(),
+                },
+            }
+        }
+        Err(err) => AppMetricsTarget {
+            namespace: target.namespace,
+            service: target.service,
+            port: target.port,
+            path: target.path,
+            source: target.source,
+            status: "warning".to_string(),
+            summary: format!("failed to scrape {}: {}", url, err),
+            metrics_count: 0,
+            truncated: false,
+            samples: Vec::new(),
+        },
+    }
+}
+
+fn parse_prometheus_text(
+    body: &str,
+    allowlist: &[String],
+    max_samples: usize,
+) -> (Vec<AppMetricSample>, usize, bool) {
+    let mut samples = Vec::new();
+    let mut matched_count = 0usize;
+    let mut truncated = false;
+
+    for line in body.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        let mut parts = line.split_whitespace();
+        let Some(sample_expr) = parts.next() else {
+            continue;
+        };
+        let Some(value_str) = parts.next() else {
+            continue;
+        };
+
+        let (name, labels) = parse_prometheus_sample(sample_expr);
+        if !metric_allowed(&name, allowlist) {
+            continue;
+        }
+
+        let Some(value) = parse_prometheus_value(value_str) else {
+            continue;
+        };
+        matched_count = matched_count.saturating_add(1);
+
+        if samples.len() < max_samples {
+            samples.push(AppMetricSample {
+                name,
+                labels: sanitize_prometheus_labels(labels),
+                value,
+            });
+        } else {
+            truncated = true;
+        }
+    }
+
+    (samples, matched_count, truncated)
+}
+
+fn parse_prometheus_sample(sample_expr: &str) -> (String, Vec<KV>) {
+    if let Some(start) = sample_expr.find('{') {
+        let name = sample_expr[..start].to_string();
+        let end = sample_expr.rfind('}').unwrap_or(sample_expr.len());
+        let labels = sample_expr[start + 1..end]
+            .split(',')
+            .filter_map(parse_prometheus_label)
+            .collect::<Vec<_>>();
+        (name, labels)
+    } else {
+        (sample_expr.to_string(), Vec::new())
+    }
+}
+
+fn parse_prometheus_label(pair: &str) -> Option<KV> {
+    let (key, raw_value) = pair.split_once('=')?;
+    let key = key.trim();
+    let value = raw_value.trim();
+    if key.is_empty() || !value.starts_with('"') || !value.ends_with('"') {
+        return None;
+    }
+    Some(KV {
+        key: key.to_string(),
+        value: unescape_prometheus_string(&value[1..value.len().saturating_sub(1)]),
+    })
+}
+
+fn sanitize_prometheus_labels(labels: Vec<KV>) -> Vec<KV> {
+    labels
+        .into_iter()
+        .filter(|label| !is_sensitive_label_key(&label.key))
+        .collect()
+}
+
+fn is_sensitive_label_key(key: &str) -> bool {
+    let lower = key.to_ascii_lowercase();
+    [
+        "token",
+        "secret",
+        "password",
+        "passwd",
+        "credential",
+        "api_key",
+        "apikey",
+        "auth",
+        "session",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+fn sanitize_app_metrics_scheme(scheme: Option<String>) -> Option<String> {
+    let scheme = scheme.unwrap_or_else(|| "http".to_string());
+    match scheme.as_str() {
+        "http" | "https" => Some(scheme),
+        other => {
+            warn!(scheme = %other, "skipping app metrics target with unsupported scheme");
+            None
+        }
+    }
+}
+
+fn sanitize_app_metrics_path(path: &str) -> Option<String> {
+    if !path.starts_with('/')
+        || path.contains("..")
+        || path.contains("://")
+        || path.contains('?')
+        || path.contains('#')
+        || path.contains('\n')
+        || path.contains('\r')
+    {
+        return None;
+    }
+
+    Some(path.to_string())
+}
+
+fn unescape_prometheus_string(input: &str) -> String {
+    let mut out = String::new();
+    let mut chars = input.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            if let Some(next) = chars.next() {
+                out.push(match next {
+                    'n' => '\n',
+                    't' => '\t',
+                    'r' => '\r',
+                    '\\' => '\\',
+                    '"' => '"',
+                    other => other,
+                });
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn parse_prometheus_value(value: &str) -> Option<f64> {
+    let parsed = match value {
+        "+Inf" | "Inf" | "+Infinity" | "Infinity" => f64::INFINITY,
+        "-Inf" | "-Infinity" => f64::NEG_INFINITY,
+        "NaN" => return None,
+        _ => value.parse::<f64>().ok()?,
+    };
+    parsed.is_finite().then_some(parsed)
+}
+
+fn metric_allowed(name: &str, allowlist: &[String]) -> bool {
+    allowlist.iter().any(|entry| {
+        if let Some(prefix) = entry.strip_suffix('*') {
+            !prefix.is_empty() && name.starts_with(prefix)
+        } else {
+            name == entry
+        }
+    })
+}
+
+fn annotation_is_true(
+    annotations: &std::collections::BTreeMap<String, String>,
+    keys: &[&str],
+) -> bool {
+    keys.iter().any(|key| {
+        annotations
+            .get(*key)
+            .map(|value| value.trim().eq_ignore_ascii_case("true") || value.trim() == "1")
+            .unwrap_or(false)
+    })
+}
+
+fn annotation_string(
+    annotations: &std::collections::BTreeMap<String, String>,
+    keys: &[&str],
+) -> Option<String> {
+    keys.iter().find_map(|key| {
+        annotations
+            .get(*key)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    })
 }
 
 async fn collect_workload_monitoring_pod_logs(
