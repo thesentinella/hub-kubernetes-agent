@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.37.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.36.3...v0.37.0) (2026-06-30)
+
+
+### Features
+
+* add workload app metrics scraping ([#145](https://github.com/thesentinella/hub-kubernetes-agent/issues/145)) ([09d3b11](https://github.com/thesentinella/hub-kubernetes-agent/commit/09d3b11036006172f2cdcc0ce70b261dd7ee00c6))
+
 ## [0.36.3](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.36.2...v0.36.3) (2026-06-30)
 
 
