@@ -26,6 +26,7 @@ rules:
       - nodes
       - namespaces
       - pods
+      - pods/log
       - services
       - configmaps
       - persistentvolumeclaims
