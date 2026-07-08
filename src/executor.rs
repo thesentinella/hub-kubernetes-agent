@@ -1095,10 +1095,11 @@ impl Executor {
                 continue;
             }
 
-            if !status
-                .effective_namespaces
-                .iter()
-                .any(|candidate| candidate == namespace)
+            if !Self::namespace_is_effective_for_command(
+                namespace,
+                command_kind,
+                &status.effective_namespaces,
+            )
             {
                 continue;
             }
@@ -1129,6 +1130,15 @@ impl Executor {
                 reasons.join("; ")
             }
         ))
+    }
+
+    fn namespace_is_effective_for_command(
+        namespace: &str,
+        command_kind: &str,
+        effective_namespaces: &[String],
+    ) -> bool {
+        effective_namespaces.iter().any(|candidate| candidate == namespace)
+            || (command_kind == "update_agent" && namespace == UPDATE_AGENT_NAMESPACE)
     }
 
     async fn list_action_policies(&self) -> Result<Vec<SentinellaHubActionPolicy>, String> {
@@ -2440,6 +2450,25 @@ mod tests {
             reason,
             "policy workload-tuning status has no freshness timestamp"
         );
+    }
+
+    #[test]
+    fn namespace_is_effective_for_update_agent_allows_sentinella_bypass() {
+        assert!(Executor::namespace_is_effective_for_command(
+            "sentinella",
+            "update_agent",
+            &[]
+        ));
+        assert!(!Executor::namespace_is_effective_for_command(
+            "sentinella",
+            "scale",
+            &[]
+        ));
+        assert!(Executor::namespace_is_effective_for_command(
+            "app-prod",
+            "scale",
+            &["app-prod".into()]
+        ));
     }
 
     #[test]
