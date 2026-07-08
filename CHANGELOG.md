@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.2](https://github.com/thesentinella/hub-kubernetes-agent/compare/v1.0.1...v1.0.2) (2026-07-08)
+
+
+### Bug Fixes
+
+* action policy readiness and remote actions ([#153](https://github.com/thesentinella/hub-kubernetes-agent/issues/153)) ([1659f6c](https://github.com/thesentinella/hub-kubernetes-agent/commit/1659f6c71b8e92407cee6c9a47b4953d5f7158a6))
+
 ## [1.0.1](https://github.com/thesentinella/hub-kubernetes-agent/compare/v1.0.0...v1.0.1) (2026-07-08)
 
 
