@@ -573,6 +573,11 @@ mod tests {
     }
 
     #[test]
+    fn policy_status_is_stale_when_timestamp_missing() {
+        assert!(policy_status_is_stale(None, 1000, 150));
+    }
+
+    #[test]
     fn build_policy_conditions_marks_ready_when_all_gates_pass() {
         let conditions = ready_conditions(false, true, None);
 

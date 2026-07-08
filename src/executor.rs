@@ -834,16 +834,10 @@ impl Executor {
                 continue;
             };
 
-            let Some(last_reconciled_at_ms) = status.last_reconciled_at_ms else {
-                reasons.push(format!(
-                    "policy {} status has no freshness timestamp",
-                    policy_name
-                ));
-                continue;
-            };
-
-            if now.saturating_sub(last_reconciled_at_ms) > stale_after_ms {
-                reasons.push(format!("policy {} status is stale", policy_name));
+            if let Some(reason) =
+                Self::policy_status_rejection_reason(&policy_name, &status, now, stale_after_ms)
+            {
+                reasons.push(reason);
                 continue;
             }
 
@@ -899,6 +893,30 @@ impl Executor {
         }
 
         Ok(out)
+    }
+
+    fn policy_status_rejection_reason(
+        policy_name: &str,
+        status: &SentinellaHubActionPolicyStatus,
+        now_ms: u128,
+        stale_after_ms: u128,
+    ) -> Option<String> {
+        if status.stale {
+            return Some(format!("policy {} status is stale", policy_name));
+        }
+
+        let Some(last_reconciled_at_ms) = status.last_reconciled_at_ms else {
+            return Some(format!(
+                "policy {} status has no freshness timestamp",
+                policy_name
+            ));
+        };
+
+        if now_ms.saturating_sub(last_reconciled_at_ms) > stale_after_ms {
+            return Some(format!("policy {} status is stale", policy_name));
+        }
+
+        None
     }
 
     async fn apply_rollout_restart_patch(
@@ -1845,6 +1863,27 @@ mod tests {
         namespace
     }
 
+    fn policy_status(
+        stale: bool,
+        last_reconciled_at_ms: Option<u128>,
+        ready: bool,
+    ) -> SentinellaHubActionPolicyStatus {
+        SentinellaHubActionPolicyStatus {
+            effective_namespaces: vec!["app-prod".into()],
+            conditions: vec![SentinellaHubActionPolicyCondition {
+                type_: "Ready".into(),
+                status: if ready { "True".into() } else { "False".into() },
+                reason: None,
+                message: None,
+                observed_generation: Some(1),
+                last_transition_time_ms: Some(1234),
+            }],
+            observed_generation: Some(1),
+            last_reconciled_at_ms,
+            stale,
+        }
+    }
+
     #[test]
     fn build_workload_resources_patch_includes_named_container_only() {
         let spec = workload_spec(json!({
@@ -1890,6 +1929,29 @@ mod tests {
         let err = build_workload_resources_patch(&spec).unwrap_err();
 
         assert_eq!(err, "at least one of requests or limits must be provided");
+    }
+
+    #[test]
+    fn policy_status_rejection_reason_rejects_stale_even_when_ready() {
+        let status = policy_status(true, Some(1234), true);
+
+        let reason = Executor::policy_status_rejection_reason("workload-tuning", &status, 1300, 50)
+            .expect("expected stale status to be rejected");
+
+        assert_eq!(reason, "policy workload-tuning status is stale");
+    }
+
+    #[test]
+    fn policy_status_rejection_reason_rejects_missing_freshness_timestamp() {
+        let status = policy_status(false, None, true);
+
+        let reason = Executor::policy_status_rejection_reason("workload-tuning", &status, 1300, 50)
+            .expect("expected missing timestamp to be rejected");
+
+        assert_eq!(
+            reason,
+            "policy workload-tuning status has no freshness timestamp"
+        );
     }
 
     #[test]
