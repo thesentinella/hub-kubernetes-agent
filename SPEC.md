@@ -741,45 +741,19 @@ Known command kinds:
 ### 7.1 `rollout_restart`
 
 - Purpose: supports the Restart workload runbook.
-- Spec:
-
-```json
-{
-  "execution": { "mode": "apply" },
-  "target": {
-    "kind": "Deployment",
-    "namespace": "default",
-    "name": "my-app"
-  }
-}
-```
-
+- Spec: `{ "kind": "deployment|statefulset|daemonset", "name": "my-app", "namespace": "default" }`
 - Behavioral equivalent: `kubectl rollout restart {kind}/{name} -n {namespace}`
 - Implementation behavior: patch `spec.template.metadata.annotations["kubectl.kubernetes.io/restartedAt"]` with a current RFC3339 timestamp.
-- Required fields: `execution`, `target.kind`, `target.namespace`, `target.name`.
-- Validation: `target.kind` must be `Deployment`, `StatefulSet`, or `DaemonSet`.
+- Supported kinds: `deployment`, `statefulset`, `daemonset`.
 - Required permissions: `get`, `patch` on `apps/deployments`, `apps/statefulsets`, `apps/daemonsets`.
 
 ### 7.2 `scale`
 
 - Purpose: supports the Scale deployment runbook.
-- Spec:
-
-```json
-{
-  "execution": { "mode": "apply" },
-  "target": {
-    "kind": "Deployment",
-    "namespace": "default",
-    "name": "my-app"
-  },
-  "replicas": 5
-}
-```
-
-- UI/engine MUST enforce a practical upper bound before dispatch.
-- Required fields: `execution`, `target.kind`, `target.namespace`, `target.name`, `replicas`.
-- Validation: `replicas >= 0`; `target.kind` must be `Deployment`.
+- Spec: `{ "kind": "deployment", "name": "my-app", "namespace": "default", "replicas": 5 }`
+- Validation: `replicas >= 0`.
+- Hub-side policy or UI should enforce a practical upper bound before dispatch.
+- Initial implementation scope: `kind=deployment` only.
 - Behavioral equivalent: `kubectl scale {kind}/{name} -n {namespace} --replicas={replicas}`
 - Success criterion: the desired replica count is accepted by the API server; synchronous readiness is not required.
 - Required permissions: `get`, `patch` on `apps/deployments`.
@@ -820,170 +794,25 @@ Known command kinds:
 - Safety requirement: this command should require an explicit destructive-action opt-in beyond `ACTIONS_ENABLED=true` before it is enabled in the Hub.
 - Required permissions: `get`, `list`, `watch` on `core/pods`; `get`, `patch` on `core/nodes`; `create` on `core/pods/eviction`.
 
-### 7.7 `apply_manifest` (pending)
+### 7.7 `apply_manifest`
 
-- Purpose: planned contract for Update workload resources and Expand PVC.
+- Purpose: supports Update workload resources and Expand PVC.
 - Spec shape: constrained patch operation, not an arbitrary manifest execution channel.
-- Workload example: `Deployment|StatefulSet|DaemonSet` with strategic patch to `spec.template.spec.containers` resources.
+- Workload example: `deployment|statefulset|daemonset` with strategic patch to `spec.template.spec.containers` resources.
 - PVC example: `pvc` with merge patch to `spec.resources.requests.storage`.
-- Supported kinds: `Deployment`, `StatefulSet`, `DaemonSet`, `PVC`.
+- Supported kinds: `deployment`, `statefulset`, `daemonset`, `pvc`.
 - Supported patch types: `merge`, `strategic`.
 - Security constraints: reject unsupported kinds, unsupported API groups, status subresources, RBAC resources, Secrets, ServiceAccounts, admission configuration, and CRDs unless explicitly supported in a future spec.
-- Current UI/engine calls must continue to use `apply_workload_resources` until this command is implemented.
-- Planned permissions: `get`, `patch` on `apps/deployments`, `apps/statefulsets`, `apps/daemonsets`; `get`, `patch` on `core/persistentvolumeclaims`.
+- Contract note: the UI/engine contract name is `apply_manifest`; until the implementation is renamed, dispatch may still use the internal `apply_workload_resources` command name.
+- Required permissions: `get`, `patch` on `apps/deployments`, `apps/statefulsets`, `apps/daemonsets`; `get`, `patch` on `core/persistentvolumeclaims`.
 
 ### 7.8 `rollout_undo`
 
 - Purpose: supports the Rollback deployment runbook.
-- Spec: `{ "kind": "Deployment", "name": "my-app", "namespace": "default", "revision": null|4 }`
+- Spec: `{ "kind": "deployment", "name": "my-app", "namespace": "default", "revision": null|4 }`
 - Behavioral equivalent: `kubectl rollout undo deployment/my-app -n default [--to-revision=4]`
 - Implementation note: rollback semantics must use Kubernetes API/controller revision history, not shelling out to `kubectl`.
-- Recommended initial scope: `kind=Deployment` only.
-- Planned permissions: `get`, `patch` on `apps/deployments`; revision history access may also be required.
-
-## UI/Engine Command Contract
-
-This is the contract the UI and engine should use when constructing commands for the agent today. The command envelope is always:
-
-```json
-{
-  "id": "cmd-123",
-  "type": "<command-kind>",
-  "spec": { }
-}
-```
-
-### Implemented Commands
-
-#### `preview_workload_resources`
-
-- Purpose: preview a workload resources change without applying it.
-- Spec:
-
-```json
-{
-  "workload_kind": "Deployment",
-  "namespace": "default",
-  "name": "my-app",
-  "container": "my-app",
-  "requests": { "cpu": "100m", "memory": "128Mi" },
-  "limits": { "cpu": "500m", "memory": "512Mi" }
-}
-```
-
-- Required fields: `workload_kind`, `namespace`, `name`, `container`.
-- Validation: `workload_kind` must be `Deployment`, `StatefulSet`, or `DaemonSet`; at least one of `requests` or `limits` must be present.
-- Result: `dry_run: true`, `status: ok` on success, plus `applied_patch`, `observed_before`, `observed_after`, and warnings.
-
-#### `apply_workload_resources`
-
-- Purpose: apply a constrained workload resources patch.
-- Spec: same shape as `preview_workload_resources`.
-- Required fields: `workload_kind`, `namespace`, `name`, `container`.
-- Validation: same as `preview_workload_resources`.
-- Result: `dry_run: false`, `status: ok` on success, plus `applied_patch`, `observed_before`, `observed_after`, and warnings.
-
-#### `get_resource_yaml`
-
-- Purpose: fetch a manifest-like YAML view of an allowlisted Kubernetes object.
-- Spec:
-
-```json
-{
-  "api_version": "v1",
-  "kind": "ConfigMap",
-  "namespace": "default",
-  "name": "my-config"
-}
-```
-
-- Required fields: `api_version`, `kind`, `name`; `namespace` is required for namespaced kinds.
-- Validation: `Secret` is rejected.
-- Result: `status: ok` with `resource_yaml` in the command result.
-
-#### `rollout_restart`
-
-- Purpose: restart a workload by patching the pod template timestamp annotation.
-- Spec:
-
-```json
-{
-  "execution": { "mode": "apply" },
-  "target": {
-    "kind": "Deployment",
-    "namespace": "default",
-    "name": "my-app"
-  }
-}
-```
-
-- Required fields: `execution`, `target.kind`, `target.namespace`, `target.name`.
-- Validation: `target.kind` must be `Deployment`, `StatefulSet`, or `DaemonSet`.
-- Result: `status: ok` on success, `applied_patch`, `observed_before`, `observed_after`, and verification state.
-
-#### `scale`
-
-- Purpose: scale a deployment.
-- Spec:
-
-```json
-{
-  "execution": { "mode": "apply" },
-  "target": {
-    "kind": "Deployment",
-    "namespace": "default",
-    "name": "my-app"
-  },
-  "replicas": 5
-}
-```
-
-- Required fields: `execution`, `target.kind`, `target.namespace`, `target.name`, `replicas`.
-- Validation: `replicas >= 0`; current implementation only accepts `target.kind = Deployment`.
-- Result: `status: ok` on success, `observed_before`, `observed_after`, and verification state.
-
-#### `self_update`
-
-- Purpose: restart the pod to pick up a new agent image/version.
-- Spec:
-
-```json
-{
-  "target_version": "1.2.0",
-  "reason": "roll forward",
-  "strategy": "restart_pod"
-}
-```
-
-- Required fields: none.
-- Validation: optional fields must be well-formed if provided.
-- Result: `status: ok` on success and `restart_requested: true`.
-
-#### `update_agent`
-
-- Purpose: patch the DaemonSet image for the agent.
-- Spec:
-
-```json
-{
-  "image": "us-east1-docker.pkg.dev/sentinella-hub/kubernetes-agent/sentinella-hub-k8s-agent:v1.2.0"
-}
-```
-
-- Required fields: `image`.
-- Validation: image must use the allowed registry prefix and include either a tag or a digest.
-- Result: `status: ok` on success, `applied_patch`, `observed_before`, `observed_after`, and warnings when applicable.
-
-### Pending Commands
-
-The following command kinds are documented for roadmap/reference only and are not yet callable by the UI/engine until implemented:
-
-- `apply_manifest`
-- `delete_pod`
-- `cordon_node`
-- `uncordon_node`
-- `drain_node`
-- `rollout_undo`
+- Recommended initial scope: `kind=deployment` only.
 
 ## Deployment Manifest
 
