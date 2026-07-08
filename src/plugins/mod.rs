@@ -1676,6 +1676,8 @@ mod tests {
             collect_interval: Duration::from_secs(60),
             poll_wait: Duration::from_secs(30),
             actions_enabled: false,
+            action_operator_enabled: false,
+            action_operator_poll_interval: Duration::from_secs(60),
             readonly_commands_enabled: false,
             collect_secrets: false,
             collect_dependencies_tetragon: false,

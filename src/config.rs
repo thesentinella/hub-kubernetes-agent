@@ -6,6 +6,8 @@ use std::time::Duration;
 
 pub const AGENT_CONFIG_ENV_ALLOWLIST: &[&str] = &[
     "ACTIONS_ENABLED",
+    "ACTION_OPERATOR_ENABLED",
+    "ACTION_OPERATOR_POLL_INTERVAL_SECS",
     "AGENT_HTTP_DEBUG",
     "AGENT_HTTP_DEBUG_BODIES",
     "AGENT_LOG",
@@ -68,6 +70,12 @@ pub struct Config {
 
     /// Master switch for action execution. Read-only when false.
     pub actions_enabled: bool,
+
+    /// Master switch for the action-mode namespace RoleBinding reconciler.
+    pub action_operator_enabled: bool,
+
+    /// How often the action-mode RoleBinding reconciler runs.
+    pub action_operator_poll_interval: Duration,
 
     /// Master switch for read-only diagnostic commands.
     pub readonly_commands_enabled: bool,
@@ -219,6 +227,8 @@ impl Config {
             .ok()
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
+        let action_operator_enabled = env_flag("ACTION_OPERATOR_ENABLED");
+        let action_operator_poll_interval = parse_secs("ACTION_OPERATOR_POLL_INTERVAL_SECS", 60);
         let readonly_commands_enabled = env_flag("READONLY_COMMANDS_ENABLED");
         let collect_secrets = env_flag("COLLECT_SECRETS");
         let collect_dependencies_tetragon = env_flag("COLLECT_DEPENDENCIES_TETRAGON");
@@ -301,6 +311,8 @@ impl Config {
             collect_interval,
             poll_wait,
             actions_enabled,
+            action_operator_enabled,
+            action_operator_poll_interval,
             readonly_commands_enabled,
             collect_secrets,
             collect_dependencies_tetragon,
@@ -373,6 +385,10 @@ pub fn agent_configured_env(values: &BTreeMap<String, String>) -> Vec<KV> {
 fn runtime_env_value(cfg: &Config, key: &str) -> Option<String> {
     match key {
         "ACTIONS_ENABLED" => Some(bool_string(cfg.actions_enabled)),
+        "ACTION_OPERATOR_ENABLED" => Some(bool_string(cfg.action_operator_enabled)),
+        "ACTION_OPERATOR_POLL_INTERVAL_SECS" => {
+            Some(cfg.action_operator_poll_interval.as_secs().to_string())
+        }
         "READONLY_COMMANDS_ENABLED" => Some(bool_string(cfg.readonly_commands_enabled)),
         "AGENT_HTTP_DEBUG" => Some(bool_string(cfg.http_debug)),
         "AGENT_HTTP_DEBUG_BODIES" => Some(bool_string(cfg.http_debug_bodies)),
@@ -427,6 +443,7 @@ fn configured_env_value(key: &str, value: &str) -> Option<String> {
     let trimmed = value.trim();
     match key {
         "ACTIONS_ENABLED"
+        | "ACTION_OPERATOR_ENABLED"
         | "AGENT_HTTP_DEBUG"
         | "AGENT_HTTP_DEBUG_BODIES"
         | "COLLECT_DEPENDENCIES_TETRAGON"
@@ -445,6 +462,7 @@ fn configured_env_value(key: &str, value: &str) -> Option<String> {
         }),
         "AGENT_VERSION_OVERRIDE" => parse_non_empty_value(trimmed),
         "COLLECT_INTERVAL_SECS"
+        | "ACTION_OPERATOR_POLL_INTERVAL_SECS"
         | "HTTP_TIMEOUT_SECS"
         | "LEASE_TTL_SECS"
         | "POLL_WAIT_SECS"
@@ -875,6 +893,8 @@ mod tests {
             collect_interval: Duration::from_secs(60),
             poll_wait: Duration::from_secs(30),
             actions_enabled: true,
+            action_operator_enabled: false,
+            action_operator_poll_interval: Duration::from_secs(60),
             readonly_commands_enabled: true,
             collect_secrets: false,
             collect_dependencies_tetragon: true,
@@ -1109,6 +1129,8 @@ mod tests {
             collect_interval: Duration::from_secs(60),
             poll_wait: Duration::from_secs(30),
             actions_enabled: false,
+            action_operator_enabled: false,
+            action_operator_poll_interval: Duration::from_secs(60),
             readonly_commands_enabled: false,
             collect_secrets: false,
             collect_dependencies_tetragon: false,
@@ -1168,6 +1190,8 @@ mod tests {
             collect_interval: Duration::from_secs(60),
             poll_wait: Duration::from_secs(30),
             actions_enabled: false,
+            action_operator_enabled: false,
+            action_operator_poll_interval: Duration::from_secs(60),
             readonly_commands_enabled: false,
             collect_secrets: false,
             collect_dependencies_tetragon: false,

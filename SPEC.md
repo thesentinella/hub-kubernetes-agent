@@ -698,6 +698,9 @@ Known command kinds:
 - In read-only mode the executor returns `status: "skipped"` before parsing `spec`.
 - Unknown command kinds return `status: "unknown"` when actions are enabled.
 - Recognized command kinds are `preview_workload_resources`, `apply_workload_resources`, `self_update`, and `update_agent`.
+- Workload resource commands require the target namespace to carry label `sentinella.io/action-mode=enabled`; otherwise the executor returns `status: "error"` before patching.
+- The Phase 3 operator path is opt-in via `ACTION_OPERATOR_ENABLED=true`; when enabled, it reconciles namespace-scoped `RoleBinding`s only for namespaces that are both labeled `sentinella.io/action-mode=enabled` and matched by at least one cluster-scoped `SentinellaActionPolicy`.
+- `SentinellaActionPolicy.namespaceSelector` is the only enforced policy field in the current operator scaffold. `allowedActions`, `allowedResources`, and `limits` are reserved for future enforcement and should be treated as non-authoritative for now.
 - Resource commands target workload controllers, not Pods.
 - Resource patch implementation must use strategic-merge semantics for `spec.template.spec.containers[name=<container>].resources`; JSON merge would clobber the whole `containers` array.
 - `preview_workload_resources` performs a Kubernetes strategic-merge dry-run patch with `dryRun=All` for `Deployment`, `StatefulSet`, and `DaemonSet` when actions are enabled.
@@ -722,6 +725,8 @@ Known command kinds:
 ## Deployment Manifest
 
 - The deploy manifest is root `agent.yaml`.
+- Action Mode eligibility is namespace-label driven: labeled namespaces (`sentinella.io/action-mode=enabled`) are the runtime gate for workload patch commands.
+- `ACTION_OPERATOR_ENABLED` controls the opt-in RoleBinding reconciler loop; `ACTION_OPERATOR_POLL_INTERVAL_SECS` sets its poll interval.
 - The `agent` container image is `us-east1-docker.pkg.dev/sentinella-hub/kubernetes-agent/sentinella-hub-k8s-agent:<tag>`.
 - `agent.yaml` stores runtime config in ConfigMap `sentinella-hub-k8s-agent-config` and auth in Secret `sentinella-hub-k8s-agent-auth` key `api-key`.
 - The DaemonSet injects `HUB_API_KEY` from Secret key `api-key`, optionally.

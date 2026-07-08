@@ -5,6 +5,7 @@ mod health;
 mod hub;
 mod leader;
 mod model;
+mod operator;
 mod plugins;
 mod tech;
 mod tetragon;
@@ -84,6 +85,15 @@ async fn main() -> Result<()> {
         leader_state.clone(),
     ));
 
+    let operator_handle = if cfg.action_operator_enabled {
+        Some(tokio::spawn(operator::run_action_operator(
+            cfg.clone(),
+            kube_client.clone(),
+        )))
+    } else {
+        None
+    };
+
     // Collector loop — only sends when this pod is the leader.
     let collect_handle = tokio::spawn(collector_loop(
         cfg.clone(),
@@ -99,6 +109,9 @@ async fn main() -> Result<()> {
     wait_for_shutdown().await;
     info!("shutdown signal received; aborting workers");
     leader_handle.abort();
+    if let Some(handle) = operator_handle {
+        handle.abort();
+    }
     collect_handle.abort();
     poll_handle.abort();
     Ok(())
@@ -509,6 +522,8 @@ mod tests {
             collect_interval: Duration::from_secs(60),
             poll_wait: Duration::from_secs(30),
             actions_enabled: false,
+            action_operator_enabled: false,
+            action_operator_poll_interval: Duration::from_secs(60),
             readonly_commands_enabled: false,
             collect_secrets: false,
             collect_dependencies_tetragon: false,

@@ -1,5 +1,6 @@
 //! DTOs sent to the Sentinella Hub. Keep field names stable — the Hub depends on them.
 
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
 use serde::{Deserialize, Serialize};
 
 /// Top-level inventory snapshot.
@@ -696,6 +697,58 @@ pub struct ResourceMap {
     pub cpu: Option<String>,
     #[serde(default)]
     pub memory: Option<String>,
+}
+
+/// Cluster-scoped policy that controls which namespaces may receive managed
+/// Sentinella action RBAC.
+#[derive(Deserialize, Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
+pub struct SentinellaActionPolicy {
+    #[serde(default)]
+    pub metadata: ObjectMeta,
+    #[serde(default)]
+    pub spec: SentinellaActionPolicySpec,
+    #[serde(default)]
+    pub status: Option<SentinellaActionPolicyStatus>,
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
+pub struct SentinellaActionPolicySpec {
+    #[serde(default)]
+    pub namespace_selector: Option<LabelSelector>,
+    #[serde(default)]
+    pub allowed_actions: Vec<String>,
+    #[serde(default)]
+    pub allowed_resources: Vec<String>,
+    #[serde(default)]
+    pub approval_required: bool,
+    #[serde(default)]
+    pub limits: Option<SentinellaActionPolicyLimits>,
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
+pub struct SentinellaActionPolicyLimits {
+    #[serde(default)]
+    pub max_cpu_limit: Option<String>,
+    #[serde(default)]
+    pub max_memory_limit: Option<String>,
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
+pub struct SentinellaActionPolicyStatus {
+    #[serde(default)]
+    pub effective_namespaces: Vec<String>,
+    #[serde(default)]
+    pub conditions: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub observed_generation: Option<i64>,
 }
 
 /// Spec payload for `self_update`.
