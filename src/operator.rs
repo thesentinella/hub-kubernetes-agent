@@ -16,6 +16,7 @@ use kube::core::GroupVersionKind;
 use kube::{Api, Client};
 use serde_json::json;
 use std::collections::{BTreeMap, HashSet};
+use std::future::Future;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::time::{MissedTickBehavior, interval};
 use tracing::{debug, info, warn};
@@ -221,6 +222,27 @@ async fn reconcile_action_role_bindings(
     namespaces: &[Namespace],
     policies: &[SentinellaHubActionPolicy],
 ) -> Result<BindingReconcileOutcome> {
+    reconcile_action_role_bindings_with(
+        namespaces,
+        policies,
+        |namespace| ensure_action_role_binding(client, namespace),
+        |namespace| remove_action_role_binding(client, namespace),
+    )
+    .await
+}
+
+async fn reconcile_action_role_bindings_with<Ensure, Remove, EnsureFuture, RemoveFuture>(
+    namespaces: &[Namespace],
+    policies: &[SentinellaHubActionPolicy],
+    ensure: Ensure,
+    remove: Remove,
+) -> Result<BindingReconcileOutcome>
+where
+    Ensure: Fn(String) -> EnsureFuture,
+    EnsureFuture: Future<Output = Result<()>>,
+    Remove: Fn(String) -> RemoveFuture,
+    RemoveFuture: Future<Output = Result<()>>,
+{
     let mut eligible_union = HashSet::new();
 
     for policy in policies {
@@ -234,12 +256,13 @@ async fn reconcile_action_role_bindings(
         let Some(name) = namespace.metadata.name.as_deref() else {
             continue;
         };
+        let name = name.to_string();
 
-        if eligible_union.contains(name) {
-            if let Err(err) = ensure_action_role_binding(client, name).await {
+        if eligible_union.contains(&name) {
+            if let Err(err) = ensure(name).await {
                 errors.push(err.to_string());
             }
-        } else if let Err(err) = remove_action_role_binding(client, name).await {
+        } else if let Err(err) = remove(name).await {
             errors.push(err.to_string());
         }
     }
@@ -254,9 +277,9 @@ async fn reconcile_action_role_bindings(
     })
 }
 
-async fn ensure_action_role_binding(client: &Client, namespace: &str) -> Result<()> {
-    let api: Api<RoleBinding> = Api::namespaced(client.clone(), namespace);
-    let desired = desired_action_role_binding(namespace)?;
+async fn ensure_action_role_binding(client: &Client, namespace: String) -> Result<()> {
+    let api: Api<RoleBinding> = Api::namespaced(client.clone(), &namespace);
+    let desired = desired_action_role_binding(&namespace)?;
 
     let existing = api.get_opt(ACTION_ROLE_BINDING_NAME).await?;
     let desired_value = serde_json::to_value(&desired).context("serialize action RoleBinding")?;
@@ -281,8 +304,8 @@ async fn ensure_action_role_binding(client: &Client, namespace: &str) -> Result<
     Ok(())
 }
 
-async fn remove_action_role_binding(client: &Client, namespace: &str) -> Result<()> {
-    let api: Api<RoleBinding> = Api::namespaced(client.clone(), namespace);
+async fn remove_action_role_binding(client: &Client, namespace: String) -> Result<()> {
+    let api: Api<RoleBinding> = Api::namespaced(client.clone(), &namespace);
     if api.get_opt(ACTION_ROLE_BINDING_NAME).await?.is_some() {
         api.delete(ACTION_ROLE_BINDING_NAME, &DeleteParams::default())
             .await
@@ -462,6 +485,7 @@ fn now_ms() -> u128 {
 mod tests {
     use super::*;
     use serde_json::{Value, json};
+    use std::sync::{Arc, Mutex};
 
     fn namespace(labels: Option<Value>) -> Namespace {
         let mut ns: Namespace = serde_json::from_value(json!({
@@ -516,6 +540,75 @@ mod tests {
             .find(|condition| condition.type_ == name)
             .map(|condition| condition.status.clone())
             .unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn reconcile_action_role_bindings_reports_partial_failure() {
+        let namespaces = vec![
+            namespace(Some(json!({
+                ACTION_MODE_NAMESPACE_LABEL: ACTION_MODE_NAMESPACE_LABEL_ENABLED,
+                "environment": "prod"
+            }))),
+            {
+                let mut namespace = namespace(Some(json!({
+                    "environment": "qa"
+                })));
+                namespace.metadata.name = Some("app-qa".into());
+                namespace
+            },
+        ];
+        let policies = vec![policy(json!({
+            "matchLabels": {"environment": "prod"}
+        }))];
+
+        let ensure_calls = Arc::new(Mutex::new(Vec::new()));
+        let remove_calls = Arc::new(Mutex::new(Vec::new()));
+
+        let ensure_calls_cloned = Arc::clone(&ensure_calls);
+        let ensure = move |namespace: String| {
+            let ensure_calls = Arc::clone(&ensure_calls_cloned);
+            async move {
+                ensure_calls
+                    .lock()
+                    .expect("ensure_calls lock")
+                    .push(namespace.clone());
+                if namespace == "app-prod" {
+                    Err(anyhow::anyhow!("cannot reconcile app-prod"))
+                } else {
+                    Ok(())
+                }
+            }
+        };
+
+        let remove_calls_cloned = Arc::clone(&remove_calls);
+        let remove = move |namespace: String| {
+            let remove_calls = Arc::clone(&remove_calls_cloned);
+            async move {
+                remove_calls
+                    .lock()
+                    .expect("remove_calls lock")
+                    .push(namespace);
+                Ok(())
+            }
+        };
+
+        let outcome = reconcile_action_role_bindings_with(&namespaces, &policies, ensure, remove)
+            .await
+            .expect("binding reconciliation should complete");
+
+        assert!(!outcome.permission_granted);
+        assert_eq!(
+            outcome.reconciliation_error.as_deref(),
+            Some("cannot reconcile app-prod")
+        );
+        assert_eq!(
+            ensure_calls.lock().expect("ensure_calls lock").as_slice(),
+            &["app-prod".to_string()]
+        );
+        assert_eq!(
+            remove_calls.lock().expect("remove_calls lock").as_slice(),
+            &["app-qa".to_string()]
+        );
     }
 
     #[test]
