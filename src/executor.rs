@@ -5,8 +5,10 @@
 
 use crate::config::Config;
 use crate::model::{
-    Command, CommandResult, PostgresqlDiagnosticSpec, ResourceMap, SelfUpdateSpec, UpdateAgentSpec,
-    WorkloadResourcesSpec,
+    ActionVerification, Command, CommandResult, ExecutionMode, PostgresqlDiagnosticSpec,
+    ResourceMap, RolloutRestartSpec, ScaleSpec, SelfUpdateSpec, SentinellaHubActionPolicy,
+    SentinellaHubActionPolicyCondition, SentinellaHubActionPolicyStatus, UpdateAgentSpec,
+    WorkloadResourcesSpec, WorkloadTargetRef,
 };
 use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, StatefulSet};
 use k8s_openapi::api::autoscaling::v2::HorizontalPodAutoscaler;
@@ -19,8 +21,14 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector;
 use kube::api::{ApiResource, DynamicObject, ListParams, Patch, PatchParams};
 use kube::core::GroupVersionKind;
 use kube::{Api, Client};
+use once_cell::sync::Lazy;
 use serde_json::{Map, Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Mutex;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
+use tokio::time::sleep;
 use tracing::{info, warn};
 
 const UPDATE_AGENT_ALLOWED_PREFIX: &str =
@@ -28,20 +36,49 @@ const UPDATE_AGENT_ALLOWED_PREFIX: &str =
 const UPDATE_AGENT_NAMESPACE: &str = "sentinella";
 const UPDATE_AGENT_DAEMONSET: &str = "sentinella-hub-k8s-agent";
 const UPDATE_AGENT_CONTAINER: &str = "agent";
+const ACTION_POLICY_GROUP: &str = "sentinella.io";
+const ACTION_POLICY_VERSION: &str = "v1alpha1";
+const ACTION_POLICY_KIND: &str = "SentinellaHubActionPolicy";
 pub(crate) const ACTION_MODE_NAMESPACE_LABEL: &str = "sentinella.io/action-mode";
 pub(crate) const ACTION_MODE_NAMESPACE_LABEL_ENABLED: &str = "enabled";
+
+#[derive(Default)]
+struct CommandDedupState {
+    completed: HashMap<String, CommandResult>,
+    running: HashSet<String>,
+}
+
+static COMMAND_DEDUP: Lazy<Mutex<CommandDedupState>> =
+    Lazy::new(|| Mutex::new(CommandDedupState::default()));
+
+#[allow(dead_code)]
+struct EffectivePolicy {
+    name: String,
+    status: SentinellaHubActionPolicyStatus,
+}
 
 pub struct Executor {
     cfg: Config,
     client: Client,
 }
 
+#[allow(dead_code)]
 impl Executor {
     pub fn new(cfg: Config, client: Client) -> Self {
         Self { cfg, client }
     }
 
     pub async fn execute(&self, cmd: &Command) -> CommandResult {
+        if let Some(result) = dedup_begin(cmd) {
+            return result;
+        }
+
+        let result = self.execute_inner(cmd).await;
+        dedup_finish(&result);
+        result
+    }
+
+    async fn execute_inner(&self, cmd: &Command) -> CommandResult {
         match cmd.kind.as_str() {
             "diagnose_postgresql" => {
                 if !self.cfg.readonly_commands_enabled {
@@ -88,6 +125,36 @@ impl Executor {
 
                 match parse_spec::<WorkloadResourcesSpec>(cmd) {
                     Ok(spec) => self.apply_workload_resources(&cmd.id, spec).await,
+                    Err(e) => spec_error(cmd, e),
+                }
+            }
+            "rollout_restart" => {
+                if !self.cfg.actions_enabled {
+                    warn!(command_id = %cmd.id, kind = %cmd.kind, "actions disabled; skipping");
+                    return CommandResult::simple(
+                        cmd.id.clone(),
+                        "skipped",
+                        Some("agent in read-only mode (ACTIONS_ENABLED=false)".into()),
+                    );
+                }
+
+                match parse_spec::<RolloutRestartSpec>(cmd) {
+                    Ok(spec) => self.rollout_restart(&cmd.id, spec).await,
+                    Err(e) => spec_error(cmd, e),
+                }
+            }
+            "scale" => {
+                if !self.cfg.actions_enabled {
+                    warn!(command_id = %cmd.id, kind = %cmd.kind, "actions disabled; skipping");
+                    return CommandResult::simple(
+                        cmd.id.clone(),
+                        "skipped",
+                        Some("agent in read-only mode (ACTIONS_ENABLED=false)".into()),
+                    );
+                }
+
+                match parse_spec::<ScaleSpec>(cmd) {
+                    Ok(spec) => self.scale_workload(&cmd.id, spec).await,
                     Err(e) => spec_error(cmd, e),
                 }
             }
@@ -207,8 +274,7 @@ impl Executor {
         spec: &WorkloadResourcesSpec,
         dry_run: bool,
     ) -> Result<ResourcePreview, String> {
-        self.ensure_namespace_action_mode_enabled(&spec.namespace)
-            .await?;
+        self.ensure_effective_policy_ready(&spec.namespace).await?;
 
         let patch = build_workload_resources_patch(spec)?;
         let pp = if dry_run {
@@ -522,6 +588,1056 @@ impl Executor {
                 r
             }
         }
+    }
+
+    async fn rollout_restart(&self, command_id: &str, spec: RolloutRestartSpec) -> CommandResult {
+        if let Err(message) = self
+            .ensure_effective_policy_ready(&spec.target.namespace)
+            .await
+        {
+            return command_error(command_id, spec.execution.mode, message);
+        }
+
+        let restart_at = now_rfc3339();
+        let patch = rollout_restart_patch(&spec.target, &restart_at);
+
+        let mut result = CommandResult::simple(command_id.to_string(), "ok", None);
+        result.requested_state = Some(json!({
+            "execution": {"mode": spec.execution.mode},
+            "target": {
+                "kind": spec.target.kind,
+                "namespace": spec.target.namespace,
+                "name": spec.target.name,
+            },
+            "restartedAt": restart_at,
+        }));
+
+        let workload = spec.target.kind.as_str();
+        let dry_run = self
+            .apply_rollout_restart_patch(
+                workload,
+                &spec.target.namespace,
+                &spec.target.name,
+                &patch,
+                true,
+            )
+            .await;
+        let observed_before = match dry_run {
+            Ok(before) => before,
+            Err(message) => return command_error(command_id, spec.execution.mode, message),
+        };
+
+        result.dry_run = Some(true);
+        result.applied_patch = Some(patch.clone());
+        result.observed_before = Some(observed_before.clone());
+        result.observed_after = Some(observed_before.clone());
+
+        if matches!(spec.execution.mode, ExecutionMode::Preview) {
+            return result;
+        }
+
+        let applied = match self
+            .apply_rollout_restart_patch(
+                workload,
+                &spec.target.namespace,
+                &spec.target.name,
+                &patch,
+                false,
+            )
+            .await
+        {
+            Ok(after) => after,
+            Err(message) => return command_error(command_id, spec.execution.mode, message),
+        };
+
+        result.dry_run = Some(false);
+        result.observed_after = Some(applied.clone());
+
+        match self
+            .wait_for_rollout_completion(workload, &spec.target.namespace, &spec.target.name)
+            .await
+        {
+            Ok(verification) => {
+                result.verification = Some(verification);
+                result
+            }
+            Err(message) => {
+                result.status = "error";
+                result.message = Some(message);
+                result.verification = Some(ActionVerification {
+                    status: "failed".into(),
+                    message: Some("rollout verification failed".into()),
+                    observed_state: None,
+                });
+                result
+            }
+        }
+    }
+
+    async fn scale_workload(&self, command_id: &str, spec: ScaleSpec) -> CommandResult {
+        if let Err(message) = self
+            .ensure_effective_policy_ready(&spec.target.namespace)
+            .await
+        {
+            return command_error(command_id, spec.execution.mode, message);
+        }
+
+        if spec.replicas < 0 {
+            return command_error(
+                command_id,
+                spec.execution.mode,
+                "scale replicas must be greater than or equal to 0".into(),
+            );
+        }
+
+        if spec.target.kind != "Deployment" {
+            return command_error(
+                command_id,
+                spec.execution.mode,
+                format!(
+                    "unsupported scale target kind {}; expected Deployment",
+                    spec.target.kind
+                ),
+            );
+        }
+
+        let api: Api<Deployment> = Api::namespaced(self.client.clone(), &spec.target.namespace);
+        let before = match api.get(&spec.target.name).await {
+            Ok(workload) => workload,
+            Err(e) => {
+                return command_error(
+                    command_id,
+                    spec.execution.mode,
+                    format!("failed to get Deployment {}: {}", spec.target.name, e),
+                );
+            }
+        };
+        let before_scale = match api.get_scale(&spec.target.name).await {
+            Ok(scale) => scale,
+            Err(e) => {
+                return command_error(
+                    command_id,
+                    spec.execution.mode,
+                    format!(
+                        "failed to get scale for Deployment {}: {}",
+                        spec.target.name, e
+                    ),
+                );
+            }
+        };
+
+        let mut result = CommandResult::simple(command_id.to_string(), "ok", None);
+        result.requested_state = Some(json!({
+            "execution": {"mode": spec.execution.mode},
+            "target": {
+                "kind": spec.target.kind,
+                "namespace": spec.target.namespace,
+                "name": spec.target.name,
+            },
+            "replicas": spec.replicas,
+        }));
+        result.dry_run = Some(matches!(spec.execution.mode, ExecutionMode::Preview));
+        result.observed_before = Some(json!({
+            "replicas": before_scale.spec.as_ref().map(|s| s.replicas).unwrap_or_default(),
+            "ready_replicas": before.status.as_ref().map(|s| s.ready_replicas).unwrap_or_default(),
+            "available_replicas": before.status.as_ref().map(|s| s.available_replicas).unwrap_or_default(),
+        }));
+
+        let patch = json!({"spec": {"replicas": spec.replicas}});
+        let dry_run = match api
+            .patch_scale(
+                &spec.target.name,
+                &PatchParams::default().dry_run(),
+                &Patch::Merge(&patch),
+            )
+            .await
+        {
+            Ok(scale) => scale,
+            Err(e) => {
+                return command_error(
+                    command_id,
+                    spec.execution.mode,
+                    format!(
+                        "scale dry-run failed for Deployment {}: {}",
+                        spec.target.name, e
+                    ),
+                );
+            }
+        };
+        result.applied_patch = Some(json!({"spec": {"replicas": spec.replicas}}));
+        result.observed_after = Some(json!({
+            "desired_replicas": dry_run.spec.as_ref().and_then(|s| s.replicas).unwrap_or_default(),
+            "current_replicas": dry_run.status.as_ref().map(|s| s.replicas).unwrap_or_default(),
+        }));
+
+        if matches!(spec.execution.mode, ExecutionMode::Preview) {
+            return result;
+        }
+
+        let applied = match api
+            .patch_scale(
+                &spec.target.name,
+                &PatchParams::default(),
+                &Patch::Merge(&patch),
+            )
+            .await
+        {
+            Ok(scale) => scale,
+            Err(e) => {
+                return command_error(
+                    command_id,
+                    spec.execution.mode,
+                    format!(
+                        "scale apply failed for Deployment {}: {}",
+                        spec.target.name, e
+                    ),
+                );
+            }
+        };
+
+        result.dry_run = Some(false);
+        result.observed_after = Some(json!({
+            "desired_replicas": applied.spec.as_ref().and_then(|s| s.replicas).unwrap_or_default(),
+            "current_replicas": applied.status.as_ref().map(|s| s.replicas).unwrap_or_default(),
+        }));
+        result.verification = Some(ActionVerification {
+            status: "accepted".into(),
+            message: Some("scale request applied; stabilization is tracked separately".into()),
+            observed_state: Some(json!({
+                "desired_replicas": applied.spec.as_ref().and_then(|s| s.replicas).unwrap_or_default(),
+                "current_replicas": applied.status.as_ref().map(|s| s.replicas).unwrap_or_default(),
+            })),
+        });
+        result
+    }
+
+    async fn ensure_effective_policy_ready_dup(
+        &self,
+        namespace: &str,
+    ) -> Result<EffectivePolicy, String> {
+        let policies = self.list_action_policies().await?;
+        let stale_after = self
+            .cfg
+            .action_operator_poll_interval
+            .checked_mul(3)
+            .unwrap_or(self.cfg.action_operator_poll_interval);
+        let stale_after_ms = stale_after.as_millis();
+        let now = now_ms();
+
+        let mut reasons = Vec::new();
+        for policy in policies {
+            let Some(policy_name) = policy.metadata.name.clone() else {
+                continue;
+            };
+            let Some(status) = policy.status.clone() else {
+                reasons.push(format!("policy {} has no status", policy_name));
+                continue;
+            };
+
+            let Some(last_reconciled_at_ms) = status.last_reconciled_at_ms else {
+                reasons.push(format!(
+                    "policy {} status has no freshness timestamp",
+                    policy_name
+                ));
+                continue;
+            };
+
+            if now.saturating_sub(last_reconciled_at_ms) > stale_after_ms {
+                reasons.push(format!("policy {} status is stale", policy_name));
+                continue;
+            }
+
+            if !condition_true(&status.conditions, "Ready") {
+                reasons.push(format!("policy {} is not Ready", policy_name));
+                continue;
+            }
+
+            if !status
+                .effective_namespaces
+                .iter()
+                .any(|candidate| candidate == namespace)
+            {
+                continue;
+            }
+
+            return Ok(EffectivePolicy {
+                name: policy_name,
+                status,
+            });
+        }
+
+        Err(format!(
+            "namespace {} is not eligible for action: {}",
+            namespace,
+            if reasons.is_empty() {
+                "no Ready policy matched the namespace".into()
+            } else {
+                reasons.join("; ")
+            }
+        ))
+    }
+
+    async fn list_action_policies_dup(&self) -> Result<Vec<SentinellaHubActionPolicy>, String> {
+        let gvk = GroupVersionKind::gvk(
+            ACTION_POLICY_GROUP,
+            ACTION_POLICY_VERSION,
+            ACTION_POLICY_KIND,
+        );
+        let ar = ApiResource::from_gvk(&gvk);
+        let api: Api<DynamicObject> = Api::all_with(self.client.clone(), &ar);
+        let list = api
+            .list(&ListParams::default())
+            .await
+            .map_err(|e| format!("failed to list {}: {}", ACTION_POLICY_KIND, e))?;
+
+        let mut out = Vec::new();
+        for policy in list {
+            let value = serde_json::to_value(&policy).map_err(|e| e.to_string())?;
+            let policy: SentinellaHubActionPolicy = serde_json::from_value(value)
+                .map_err(|e| format!("failed to deserialize {}: {}", ACTION_POLICY_KIND, e))?;
+            out.push(policy);
+        }
+
+        Ok(out)
+    }
+
+    async fn apply_rollout_restart_patch_dup(
+        &self,
+        kind: &str,
+        namespace: &str,
+        name: &str,
+        patch: &Value,
+        dry_run: bool,
+    ) -> Result<Value, String> {
+        let pp = if dry_run {
+            PatchParams::default().dry_run()
+        } else {
+            PatchParams::default()
+        };
+
+        match kind {
+            "Deployment" => {
+                let api: Api<Deployment> = Api::namespaced(self.client.clone(), namespace);
+                let before = api
+                    .get(name)
+                    .await
+                    .map_err(|e| format!("failed to get Deployment {}: {}", name, e))?;
+                let observed_before = json!({
+                    "restartedAt": before
+                        .spec
+                        .as_ref()
+                        .and_then(|s| s.template.metadata.as_ref())
+                        .and_then(|m| m.annotations.as_ref())
+                        .and_then(|ann| ann.get("kubectl.kubernetes.io/restartedAt"))
+                        .cloned(),
+                });
+                let _ = api
+                    .patch(name, &pp, &Patch::Strategic(patch))
+                    .await
+                    .map_err(|e| {
+                        format!(
+                            "{} patch failed for Deployment {}: {}",
+                            if dry_run { "dry-run" } else { "apply" },
+                            name,
+                            e
+                        )
+                    })?;
+                Ok(observed_before)
+            }
+            "StatefulSet" => {
+                let api: Api<StatefulSet> = Api::namespaced(self.client.clone(), namespace);
+                let before = api
+                    .get(name)
+                    .await
+                    .map_err(|e| format!("failed to get StatefulSet {}: {}", name, e))?;
+                let observed_before = json!({
+                    "restartedAt": before
+                        .spec
+                        .as_ref()
+                        .and_then(|s| s.template.metadata.as_ref())
+                        .and_then(|m| m.annotations.as_ref())
+                        .and_then(|ann| ann.get("kubectl.kubernetes.io/restartedAt"))
+                        .cloned(),
+                });
+                let _ = api
+                    .patch(name, &pp, &Patch::Strategic(patch))
+                    .await
+                    .map_err(|e| {
+                        format!(
+                            "{} patch failed for StatefulSet {}: {}",
+                            if dry_run { "dry-run" } else { "apply" },
+                            name,
+                            e
+                        )
+                    })?;
+                Ok(observed_before)
+            }
+            "DaemonSet" => {
+                let api: Api<DaemonSet> = Api::namespaced(self.client.clone(), namespace);
+                let before = api
+                    .get(name)
+                    .await
+                    .map_err(|e| format!("failed to get DaemonSet {}: {}", name, e))?;
+                let observed_before = json!({
+                    "restartedAt": before
+                        .spec
+                        .as_ref()
+                        .and_then(|s| s.template.metadata.as_ref())
+                        .and_then(|m| m.annotations.as_ref())
+                        .and_then(|ann| ann.get("kubectl.kubernetes.io/restartedAt"))
+                        .cloned(),
+                });
+                let _ = api
+                    .patch(name, &pp, &Patch::Strategic(patch))
+                    .await
+                    .map_err(|e| {
+                        format!(
+                            "{} patch failed for DaemonSet {}: {}",
+                            if dry_run { "dry-run" } else { "apply" },
+                            name,
+                            e
+                        )
+                    })?;
+                Ok(observed_before)
+            }
+            other => Err(format!(
+                "unsupported rollout_restart target kind {}; expected Deployment, StatefulSet, or DaemonSet",
+                other
+            )),
+        }
+    }
+
+    async fn wait_for_rollout_completion_dup(
+        &self,
+        kind: &str,
+        namespace: &str,
+        name: &str,
+    ) -> Result<ActionVerification, String> {
+        let timeout = Duration::from_secs(120);
+        let deadline = SystemTime::now()
+            .checked_add(timeout)
+            .ok_or_else(|| "failed to compute rollout deadline".to_string())?;
+
+        loop {
+            if SystemTime::now() > deadline {
+                return Err(format!(
+                    "rollout verification timed out for {}/{} {}",
+                    namespace, kind, name
+                ));
+            }
+
+            let observed = match kind {
+                "Deployment" => self.verify_deployment_rollout(namespace, name).await?,
+                "StatefulSet" => self.verify_statefulset_rollout(namespace, name).await?,
+                "DaemonSet" => self.verify_daemonset_rollout(namespace, name).await?,
+                other => {
+                    return Err(format!(
+                        "unsupported rollout verification target kind {}; expected Deployment, StatefulSet, or DaemonSet",
+                        other
+                    ));
+                }
+            };
+
+            if observed["ready"].as_bool().unwrap_or(false) {
+                return Ok(ActionVerification {
+                    status: "ready".into(),
+                    message: Some("workload rollout completed successfully".into()),
+                    observed_state: Some(observed),
+                });
+            }
+
+            sleep(Duration::from_secs(2)).await;
+        }
+    }
+
+    async fn verify_deployment_rollout_dup(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> Result<Value, String> {
+        let api: Api<Deployment> = Api::namespaced(self.client.clone(), namespace);
+        let workload = api.get(name).await.map_err(|e| {
+            format!(
+                "failed to read Deployment {} for rollout verification: {}",
+                name, e
+            )
+        })?;
+        let spec_replicas = workload.spec.as_ref().and_then(|s| s.replicas).unwrap_or(1);
+        let status = workload.status.as_ref();
+        let ready = status.and_then(|s| s.updated_replicas).unwrap_or_default() >= spec_replicas
+            && status
+                .and_then(|s| s.available_replicas)
+                .unwrap_or_default()
+                >= spec_replicas
+            && status
+                .and_then(|s| s.observed_generation)
+                .unwrap_or_default()
+                >= workload.metadata.generation.unwrap_or_default();
+
+        Ok(json!({
+            "ready": ready,
+            "replicas": status.map(|s| s.replicas).unwrap_or_default(),
+            "updated_replicas": status.map(|s| s.updated_replicas).unwrap_or_default(),
+            "available_replicas": status.map(|s| s.available_replicas).unwrap_or_default(),
+            "ready_replicas": status.map(|s| s.ready_replicas).unwrap_or_default(),
+            "observed_generation": status.map(|s| s.observed_generation).unwrap_or_default(),
+        }))
+    }
+
+    async fn verify_statefulset_rollout_dup(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> Result<Value, String> {
+        let api: Api<StatefulSet> = Api::namespaced(self.client.clone(), namespace);
+        let workload = api.get(name).await.map_err(|e| {
+            format!(
+                "failed to read StatefulSet {} for rollout verification: {}",
+                name, e
+            )
+        })?;
+        let spec_replicas = workload.spec.as_ref().and_then(|s| s.replicas).unwrap_or(1);
+        let status = workload.status.as_ref();
+        let ready = status.and_then(|s| s.updated_replicas).unwrap_or_default() >= spec_replicas
+            && status.and_then(|s| s.ready_replicas).unwrap_or_default() >= spec_replicas
+            && status
+                .and_then(|s| s.observed_generation)
+                .unwrap_or_default()
+                >= workload.metadata.generation.unwrap_or_default();
+
+        Ok(json!({
+            "ready": ready,
+            "replicas": status.map(|s| s.replicas).unwrap_or_default(),
+            "updated_replicas": status.map(|s| s.updated_replicas).unwrap_or_default(),
+            "ready_replicas": status.map(|s| s.ready_replicas).unwrap_or_default(),
+            "current_replicas": status.map(|s| s.current_replicas).unwrap_or_default(),
+            "observed_generation": status.map(|s| s.observed_generation).unwrap_or_default(),
+        }))
+    }
+
+    async fn verify_daemonset_rollout_dup(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> Result<Value, String> {
+        let api: Api<DaemonSet> = Api::namespaced(self.client.clone(), namespace);
+        let workload = api.get(name).await.map_err(|e| {
+            format!(
+                "failed to read DaemonSet {} for rollout verification: {}",
+                name, e
+            )
+        })?;
+        let status = workload.status.as_ref();
+        let ready = status
+            .map(|s| s.desired_number_scheduled)
+            .unwrap_or_default()
+            > 0
+            && status
+                .and_then(|s| s.updated_number_scheduled)
+                .unwrap_or_default()
+                >= status
+                    .map(|s| s.desired_number_scheduled)
+                    .unwrap_or_default()
+            && status.and_then(|s| s.number_available).unwrap_or_default()
+                >= status
+                    .map(|s| s.desired_number_scheduled)
+                    .unwrap_or_default()
+            && status
+                .and_then(|s| s.observed_generation)
+                .unwrap_or_default()
+                >= workload.metadata.generation.unwrap_or_default();
+
+        Ok(json!({
+            "ready": ready,
+            "desired_number_scheduled": status.map(|s| s.desired_number_scheduled).unwrap_or_default(),
+            "current_number_scheduled": status.map(|s| s.current_number_scheduled).unwrap_or_default(),
+            "number_ready": status.map(|s| s.number_ready).unwrap_or_default(),
+            "updated_number_scheduled": status.map(|s| s.updated_number_scheduled).unwrap_or_default(),
+            "number_available": status.map(|s| s.number_available).unwrap_or_default(),
+            "observed_generation": status.map(|s| s.observed_generation).unwrap_or_default(),
+        }))
+    }
+
+    async fn ensure_effective_policy_ready(
+        &self,
+        namespace: &str,
+    ) -> Result<EffectivePolicy, String> {
+        let policies = self.list_action_policies().await?;
+        let stale_after = self
+            .cfg
+            .action_operator_poll_interval
+            .checked_mul(3)
+            .unwrap_or(self.cfg.action_operator_poll_interval);
+        let stale_after_ms = stale_after.as_millis();
+        let now = now_ms();
+
+        let mut reasons = Vec::new();
+        for policy in policies {
+            let Some(policy_name) = policy.metadata.name.clone() else {
+                continue;
+            };
+            let Some(status) = policy.status.clone() else {
+                reasons.push(format!("policy {} has no status", policy_name));
+                continue;
+            };
+
+            let Some(last_reconciled_at_ms) = status.last_reconciled_at_ms else {
+                reasons.push(format!(
+                    "policy {} status has no freshness timestamp",
+                    policy_name
+                ));
+                continue;
+            };
+
+            if now.saturating_sub(last_reconciled_at_ms) > stale_after_ms {
+                reasons.push(format!("policy {} status is stale", policy_name));
+                continue;
+            }
+
+            if !condition_true(&status.conditions, "Ready") {
+                reasons.push(format!("policy {} is not Ready", policy_name));
+                continue;
+            }
+
+            if !status
+                .effective_namespaces
+                .iter()
+                .any(|candidate| candidate == namespace)
+            {
+                continue;
+            }
+
+            return Ok(EffectivePolicy {
+                name: policy_name,
+                status,
+            });
+        }
+
+        Err(format!(
+            "namespace {} is not eligible for action: {}",
+            namespace,
+            if reasons.is_empty() {
+                "no Ready policy matched the namespace".into()
+            } else {
+                reasons.join("; ")
+            }
+        ))
+    }
+
+    async fn list_action_policies(&self) -> Result<Vec<SentinellaHubActionPolicy>, String> {
+        let gvk = GroupVersionKind::gvk(
+            ACTION_POLICY_GROUP,
+            ACTION_POLICY_VERSION,
+            ACTION_POLICY_KIND,
+        );
+        let ar = ApiResource::from_gvk(&gvk);
+        let api: Api<DynamicObject> = Api::all_with(self.client.clone(), &ar);
+        let list = api
+            .list(&ListParams::default())
+            .await
+            .map_err(|e| format!("failed to list {}: {}", ACTION_POLICY_KIND, e))?;
+
+        let mut out = Vec::new();
+        for policy in list {
+            let value = serde_json::to_value(&policy).map_err(|e| e.to_string())?;
+            let policy: SentinellaHubActionPolicy = serde_json::from_value(value)
+                .map_err(|e| format!("failed to deserialize {}: {}", ACTION_POLICY_KIND, e))?;
+            out.push(policy);
+        }
+
+        Ok(out)
+    }
+
+    async fn apply_rollout_restart_patch(
+        &self,
+        kind: &str,
+        namespace: &str,
+        name: &str,
+        patch: &Value,
+        dry_run: bool,
+    ) -> Result<Value, String> {
+        let pp = if dry_run {
+            PatchParams::default().dry_run()
+        } else {
+            PatchParams::default()
+        };
+
+        match kind {
+            "Deployment" => {
+                let api: Api<Deployment> = Api::namespaced(self.client.clone(), namespace);
+                let before = api
+                    .get(name)
+                    .await
+                    .map_err(|e| format!("failed to get Deployment {}: {}", name, e))?;
+                let observed_before = json!({
+                    "restartedAt": before
+                        .spec
+                        .as_ref()
+                        .and_then(|s| s.template.metadata.as_ref())
+                        .and_then(|m| m.annotations.as_ref())
+                        .and_then(|ann| ann.get("kubectl.kubernetes.io/restartedAt"))
+                        .cloned(),
+                });
+                let _ = api
+                    .patch(name, &pp, &Patch::Strategic(patch))
+                    .await
+                    .map_err(|e| {
+                        format!(
+                            "{} patch failed for Deployment {}: {}",
+                            if dry_run { "dry-run" } else { "apply" },
+                            name,
+                            e
+                        )
+                    })?;
+                Ok(observed_before)
+            }
+            "StatefulSet" => {
+                let api: Api<StatefulSet> = Api::namespaced(self.client.clone(), namespace);
+                let before = api
+                    .get(name)
+                    .await
+                    .map_err(|e| format!("failed to get StatefulSet {}: {}", name, e))?;
+                let observed_before = json!({
+                    "restartedAt": before
+                        .spec
+                        .as_ref()
+                        .and_then(|s| s.template.metadata.as_ref())
+                        .and_then(|m| m.annotations.as_ref())
+                        .and_then(|ann| ann.get("kubectl.kubernetes.io/restartedAt"))
+                        .cloned(),
+                });
+                let _ = api
+                    .patch(name, &pp, &Patch::Strategic(patch))
+                    .await
+                    .map_err(|e| {
+                        format!(
+                            "{} patch failed for StatefulSet {}: {}",
+                            if dry_run { "dry-run" } else { "apply" },
+                            name,
+                            e
+                        )
+                    })?;
+                Ok(observed_before)
+            }
+            "DaemonSet" => {
+                let api: Api<DaemonSet> = Api::namespaced(self.client.clone(), namespace);
+                let before = api
+                    .get(name)
+                    .await
+                    .map_err(|e| format!("failed to get DaemonSet {}: {}", name, e))?;
+                let observed_before = json!({
+                    "restartedAt": before
+                        .spec
+                        .as_ref()
+                        .and_then(|s| s.template.metadata.as_ref())
+                        .and_then(|m| m.annotations.as_ref())
+                        .and_then(|ann| ann.get("kubectl.kubernetes.io/restartedAt"))
+                        .cloned(),
+                });
+                let _ = api
+                    .patch(name, &pp, &Patch::Strategic(patch))
+                    .await
+                    .map_err(|e| {
+                        format!(
+                            "{} patch failed for DaemonSet {}: {}",
+                            if dry_run { "dry-run" } else { "apply" },
+                            name,
+                            e
+                        )
+                    })?;
+                Ok(observed_before)
+            }
+            other => Err(format!(
+                "unsupported rollout_restart target kind {}; expected Deployment, StatefulSet, or DaemonSet",
+                other
+            )),
+        }
+    }
+
+    async fn wait_for_rollout_completion(
+        &self,
+        kind: &str,
+        namespace: &str,
+        name: &str,
+    ) -> Result<ActionVerification, String> {
+        let timeout = Duration::from_secs(120);
+        let deadline = SystemTime::now()
+            .checked_add(timeout)
+            .ok_or_else(|| "failed to compute rollout deadline".to_string())?;
+
+        loop {
+            if SystemTime::now() > deadline {
+                return Err(format!(
+                    "rollout verification timed out for {}/{} {}",
+                    namespace, kind, name
+                ));
+            }
+
+            let observed = match kind {
+                "Deployment" => self.verify_deployment_rollout(namespace, name).await?,
+                "StatefulSet" => self.verify_statefulset_rollout(namespace, name).await?,
+                "DaemonSet" => self.verify_daemonset_rollout(namespace, name).await?,
+                other => {
+                    return Err(format!(
+                        "unsupported rollout verification target kind {}; expected Deployment, StatefulSet, or DaemonSet",
+                        other
+                    ));
+                }
+            };
+
+            if observed["ready"].as_bool().unwrap_or(false) {
+                return Ok(ActionVerification {
+                    status: "ready".into(),
+                    message: Some("workload rollout completed successfully".into()),
+                    observed_state: Some(observed),
+                });
+            }
+
+            sleep(Duration::from_secs(2)).await;
+        }
+    }
+
+    async fn verify_deployment_rollout(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> Result<Value, String> {
+        let api: Api<Deployment> = Api::namespaced(self.client.clone(), namespace);
+        let workload = api.get(name).await.map_err(|e| {
+            format!(
+                "failed to read Deployment {} for rollout verification: {}",
+                name, e
+            )
+        })?;
+        let spec_replicas = workload.spec.as_ref().and_then(|s| s.replicas).unwrap_or(1);
+        let status = workload.status.as_ref();
+        let ready = status.and_then(|s| s.updated_replicas).unwrap_or_default() >= spec_replicas
+            && status
+                .and_then(|s| s.available_replicas)
+                .unwrap_or_default()
+                >= spec_replicas
+            && status
+                .and_then(|s| s.observed_generation)
+                .unwrap_or_default()
+                >= workload.metadata.generation.unwrap_or_default();
+
+        Ok(json!({
+            "ready": ready,
+            "replicas": status.map(|s| s.replicas).unwrap_or_default(),
+            "updated_replicas": status.and_then(|s| s.updated_replicas).unwrap_or_default(),
+            "available_replicas": status.and_then(|s| s.available_replicas).unwrap_or_default(),
+            "ready_replicas": status.and_then(|s| s.ready_replicas).unwrap_or_default(),
+            "observed_generation": status.and_then(|s| s.observed_generation).unwrap_or_default(),
+        }))
+    }
+
+    async fn verify_statefulset_rollout(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> Result<Value, String> {
+        let api: Api<StatefulSet> = Api::namespaced(self.client.clone(), namespace);
+        let workload = api.get(name).await.map_err(|e| {
+            format!(
+                "failed to read StatefulSet {} for rollout verification: {}",
+                name, e
+            )
+        })?;
+        let spec_replicas = workload.spec.as_ref().and_then(|s| s.replicas).unwrap_or(1);
+        let status = workload.status.as_ref();
+        let ready = status.and_then(|s| s.updated_replicas).unwrap_or_default() >= spec_replicas
+            && status.and_then(|s| s.ready_replicas).unwrap_or_default() >= spec_replicas
+            && status
+                .and_then(|s| s.observed_generation)
+                .unwrap_or_default()
+                >= workload.metadata.generation.unwrap_or_default();
+
+        Ok(json!({
+            "ready": ready,
+            "replicas": status.map(|s| s.replicas).unwrap_or_default(),
+            "updated_replicas": status.and_then(|s| s.updated_replicas).unwrap_or_default(),
+            "ready_replicas": status.and_then(|s| s.ready_replicas).unwrap_or_default(),
+            "current_replicas": status.and_then(|s| s.current_replicas).unwrap_or_default(),
+            "observed_generation": status.and_then(|s| s.observed_generation).unwrap_or_default(),
+        }))
+    }
+
+    async fn verify_daemonset_rollout(&self, namespace: &str, name: &str) -> Result<Value, String> {
+        let api: Api<DaemonSet> = Api::namespaced(self.client.clone(), namespace);
+        let workload = api.get(name).await.map_err(|e| {
+            format!(
+                "failed to read DaemonSet {} for rollout verification: {}",
+                name, e
+            )
+        })?;
+        let status = workload.status.as_ref();
+        let ready = status
+            .map(|s| s.desired_number_scheduled)
+            .unwrap_or_default()
+            > 0
+            && status
+                .and_then(|s| s.updated_number_scheduled)
+                .unwrap_or_default()
+                >= status
+                    .map(|s| s.desired_number_scheduled)
+                    .unwrap_or_default()
+            && status.and_then(|s| s.number_available).unwrap_or_default()
+                >= status
+                    .map(|s| s.desired_number_scheduled)
+                    .unwrap_or_default()
+            && status
+                .and_then(|s| s.observed_generation)
+                .unwrap_or_default()
+                >= workload.metadata.generation.unwrap_or_default();
+
+        Ok(json!({
+            "ready": ready,
+            "desired_number_scheduled": status.map(|s| s.desired_number_scheduled).unwrap_or_default(),
+            "current_number_scheduled": status.map(|s| s.current_number_scheduled).unwrap_or_default(),
+            "number_ready": status.map(|s| s.number_ready).unwrap_or_default(),
+            "updated_number_scheduled": status.map(|s| s.updated_number_scheduled).unwrap_or_default(),
+            "number_available": status.map(|s| s.number_available).unwrap_or_default(),
+            "observed_generation": status.map(|s| s.observed_generation).unwrap_or_default(),
+        }))
+    }
+
+    async fn scale_workload_dup(&self, command_id: &str, spec: ScaleSpec) -> CommandResult {
+        if let Err(message) = self
+            .ensure_effective_policy_ready(&spec.target.namespace)
+            .await
+        {
+            return command_error(command_id, spec.execution.mode, message);
+        }
+
+        if spec.replicas < 0 {
+            return command_error(
+                command_id,
+                spec.execution.mode,
+                "scale replicas must be greater than or equal to 0".into(),
+            );
+        }
+
+        if spec.target.kind != "Deployment" {
+            return command_error(
+                command_id,
+                spec.execution.mode,
+                format!(
+                    "unsupported scale target kind {}; expected Deployment",
+                    spec.target.kind
+                ),
+            );
+        }
+
+        let api: Api<Deployment> = Api::namespaced(self.client.clone(), &spec.target.namespace);
+        let before = match api.get(&spec.target.name).await {
+            Ok(workload) => workload,
+            Err(e) => {
+                return command_error(
+                    command_id,
+                    spec.execution.mode,
+                    format!("failed to get Deployment {}: {}", spec.target.name, e),
+                );
+            }
+        };
+        let before_scale = match api.get_scale(&spec.target.name).await {
+            Ok(scale) => scale,
+            Err(e) => {
+                return command_error(
+                    command_id,
+                    spec.execution.mode,
+                    format!(
+                        "failed to get scale for Deployment {}: {}",
+                        spec.target.name, e
+                    ),
+                );
+            }
+        };
+
+        let requested_state = json!({
+            "execution": {"mode": spec.execution.mode},
+            "target": {
+                "kind": spec.target.kind,
+                "namespace": spec.target.namespace,
+                "name": spec.target.name,
+            },
+            "replicas": spec.replicas,
+        });
+
+        let mut result = CommandResult::simple(command_id.to_string(), "ok", None);
+        result.requested_state = Some(requested_state);
+        result.observed_before = Some(json!({
+            "replicas": before_scale.spec.as_ref().map(|s| s.replicas).unwrap_or_default(),
+            "ready_replicas": before.status.as_ref().map(|s| s.ready_replicas).unwrap_or_default(),
+            "available_replicas": before.status.as_ref().map(|s| s.available_replicas).unwrap_or_default(),
+        }));
+
+        let patch = json!({"spec": {"replicas": spec.replicas}});
+        let dry_run = match api
+            .patch_scale(
+                &spec.target.name,
+                &PatchParams::default().dry_run(),
+                &Patch::Merge(&patch),
+            )
+            .await
+        {
+            Ok(scale) => scale,
+            Err(e) => {
+                return command_error(
+                    command_id,
+                    spec.execution.mode,
+                    format!(
+                        "scale dry-run failed for Deployment {}: {}",
+                        spec.target.name, e
+                    ),
+                );
+            }
+        };
+        result.applied_patch = Some(json!({"spec": {"replicas": spec.replicas}}));
+        result.dry_run = Some(true);
+        result.observed_after = Some(json!({
+            "desired_replicas": dry_run.spec.as_ref().map(|s| s.replicas).unwrap_or_default(),
+            "current_replicas": dry_run.status.as_ref().map(|s| s.replicas).unwrap_or_default(),
+        }));
+
+        if matches!(spec.execution.mode, ExecutionMode::Preview) {
+            return result;
+        }
+
+        let applied = match api
+            .patch_scale(
+                &spec.target.name,
+                &PatchParams::default(),
+                &Patch::Merge(&patch),
+            )
+            .await
+        {
+            Ok(scale) => scale,
+            Err(e) => {
+                return command_error(
+                    command_id,
+                    spec.execution.mode,
+                    format!(
+                        "scale apply failed for Deployment {}: {}",
+                        spec.target.name, e
+                    ),
+                );
+            }
+        };
+
+        result.dry_run = Some(false);
+        result.observed_after = Some(json!({
+            "desired_replicas": applied.spec.as_ref().map(|s| s.replicas).unwrap_or_default(),
+            "current_replicas": applied.status.as_ref().map(|s| s.replicas).unwrap_or_default(),
+        }));
+        result.verification = Some(ActionVerification {
+            status: "accepted".into(),
+            message: Some("scale request applied; stabilization is tracked separately".into()),
+            observed_state: Some(json!({
+                "desired_replicas": applied.spec.as_ref().map(|s| s.replicas).unwrap_or_default(),
+                "current_replicas": applied.status.as_ref().map(|s| s.replicas).unwrap_or_default(),
+            })),
+        });
+        result
     }
 
     async fn self_update(&self, command_id: &str, spec: SelfUpdateSpec) -> CommandResult {
@@ -981,6 +2097,71 @@ fn quantity_map_to_value(resources: &BTreeMap<String, Quantity>) -> Value {
 fn parse_spec<T: serde::de::DeserializeOwned>(cmd: &Command) -> Result<T, String> {
     serde_json::from_value(cmd.spec.clone())
         .map_err(|e| format!("invalid spec for kind {}: {}", cmd.kind, e))
+}
+
+fn command_error(command_id: &str, mode: ExecutionMode, message: String) -> CommandResult {
+    let mut result = CommandResult::simple(command_id.to_string(), "error", Some(message));
+    result.dry_run = Some(matches!(mode, ExecutionMode::Preview));
+    result
+}
+
+fn dedup_begin(cmd: &Command) -> Option<CommandResult> {
+    let mut state = COMMAND_DEDUP.lock().expect("command dedup mutex poisoned");
+
+    if let Some(result) = state.completed.get(&cmd.id).cloned() {
+        return Some(result);
+    }
+
+    if !state.running.insert(cmd.id.clone()) {
+        return Some(CommandResult::simple(
+            cmd.id.clone(),
+            "skipped",
+            Some("command already running".into()),
+        ));
+    }
+
+    None
+}
+
+fn dedup_finish(result: &CommandResult) {
+    let mut state = COMMAND_DEDUP.lock().expect("command dedup mutex poisoned");
+    state.running.remove(&result.command_id);
+    state
+        .completed
+        .insert(result.command_id.clone(), result.clone());
+}
+
+fn condition_true(conditions: &[SentinellaHubActionPolicyCondition], condition_type: &str) -> bool {
+    conditions.iter().any(|condition| {
+        condition.type_ == condition_type && condition.status.eq_ignore_ascii_case("true")
+    })
+}
+
+fn now_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0)
+}
+
+fn now_rfc3339() -> String {
+    OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".into())
+}
+
+fn rollout_restart_patch(_target: &WorkloadTargetRef, restart_at: &str) -> Value {
+    json!({
+        "spec": {
+            "template": {
+                "metadata": {
+                    "annotations": {
+                        "kubectl.kubernetes.io/restartedAt": restart_at,
+                    }
+                }
+            }
+        }
+    })
 }
 
 fn spec_error(cmd: &Command, message: String) -> CommandResult {
