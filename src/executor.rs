@@ -1057,7 +1057,8 @@ impl Executor {
                 return Some("is missing a workload resources spec".into());
             };
 
-            if let Some(reason) = Self::policy_limits_violation_reason(policy.spec.limits.as_ref(), spec)
+            if let Some(reason) =
+                Self::policy_limits_violation_reason(policy.spec.limits.as_ref(), spec)
             {
                 return Some(reason);
             }
@@ -1076,18 +1077,24 @@ impl Executor {
         if let Some(cpu_limit) = limits.max_cpu_limit.as_deref() {
             if let Some(requests) = &spec.requests {
                 if let Some(cpu) = requests.cpu.as_deref() {
-                    if let Some(reason) =
-                        Self::quantity_exceeds_limit("cpu request", cpu, cpu_limit, parse_cpu_quantity)
-                    {
+                    if let Some(reason) = Self::quantity_exceeds_limit(
+                        "cpu request",
+                        cpu,
+                        cpu_limit,
+                        parse_cpu_quantity,
+                    ) {
                         violations.push(reason);
                     }
                 }
             }
             if let Some(limits_map) = &spec.limits {
                 if let Some(cpu) = limits_map.cpu.as_deref() {
-                    if let Some(reason) =
-                        Self::quantity_exceeds_limit("cpu limit", cpu, cpu_limit, parse_cpu_quantity)
-                    {
+                    if let Some(reason) = Self::quantity_exceeds_limit(
+                        "cpu limit",
+                        cpu,
+                        cpu_limit,
+                        parse_cpu_quantity,
+                    ) {
                         violations.push(reason);
                     }
                 }
@@ -1423,150 +1430,6 @@ impl Executor {
             "number_available": status.map(|s| s.number_available).unwrap_or_default(),
             "observed_generation": status.map(|s| s.observed_generation).unwrap_or_default(),
         }))
-    }
-
-    async fn scale_workload_dup(&self, command_id: &str, spec: ScaleSpec) -> CommandResult {
-        if let Err(message) = self
-            .ensure_effective_policy_allows(
-                &spec.target.namespace,
-                "scale",
-                Some(spec.target.kind.as_str()),
-                None,
-            )
-            .await
-        {
-            return command_error(command_id, spec.execution.mode, message);
-        }
-
-        if spec.replicas < 0 {
-            return command_error(
-                command_id,
-                spec.execution.mode,
-                "scale replicas must be greater than or equal to 0".into(),
-            );
-        }
-
-        if spec.target.kind != "Deployment" {
-            return command_error(
-                command_id,
-                spec.execution.mode,
-                format!(
-                    "unsupported scale target kind {}; expected Deployment",
-                    spec.target.kind
-                ),
-            );
-        }
-
-        let api: Api<Deployment> = Api::namespaced(self.client.clone(), &spec.target.namespace);
-        let before = match api.get(&spec.target.name).await {
-            Ok(workload) => workload,
-            Err(e) => {
-                return command_error(
-                    command_id,
-                    spec.execution.mode,
-                    format!("failed to get Deployment {}: {}", spec.target.name, e),
-                );
-            }
-        };
-        let before_scale = match api.get_scale(&spec.target.name).await {
-            Ok(scale) => scale,
-            Err(e) => {
-                return command_error(
-                    command_id,
-                    spec.execution.mode,
-                    format!(
-                        "failed to get scale for Deployment {}: {}",
-                        spec.target.name, e
-                    ),
-                );
-            }
-        };
-
-        let requested_state = json!({
-            "execution": {"mode": spec.execution.mode},
-            "target": {
-                "kind": spec.target.kind,
-                "namespace": spec.target.namespace,
-                "name": spec.target.name,
-            },
-            "replicas": spec.replicas,
-        });
-
-        let mut result = CommandResult::simple(command_id.to_string(), "ok", None);
-        result.requested_state = Some(requested_state);
-        result.observed_before = Some(json!({
-            "replicas": before_scale.spec.as_ref().map(|s| s.replicas).unwrap_or_default(),
-            "ready_replicas": before.status.as_ref().map(|s| s.ready_replicas).unwrap_or_default(),
-            "available_replicas": before.status.as_ref().map(|s| s.available_replicas).unwrap_or_default(),
-        }));
-
-        let patch = json!({"spec": {"replicas": spec.replicas}});
-        let dry_run = match api
-            .patch_scale(
-                &spec.target.name,
-                &PatchParams::default().dry_run(),
-                &Patch::Merge(&patch),
-            )
-            .await
-        {
-            Ok(scale) => scale,
-            Err(e) => {
-                return command_error(
-                    command_id,
-                    spec.execution.mode,
-                    format!(
-                        "scale dry-run failed for Deployment {}: {}",
-                        spec.target.name, e
-                    ),
-                );
-            }
-        };
-        result.applied_patch = Some(json!({"spec": {"replicas": spec.replicas}}));
-        result.dry_run = Some(true);
-        result.observed_after = Some(json!({
-            "desired_replicas": dry_run.spec.as_ref().map(|s| s.replicas).unwrap_or_default(),
-            "current_replicas": dry_run.status.as_ref().map(|s| s.replicas).unwrap_or_default(),
-        }));
-
-        if matches!(spec.execution.mode, ExecutionMode::Preview) {
-            return result;
-        }
-
-        let applied = match api
-            .patch_scale(
-                &spec.target.name,
-                &PatchParams::default(),
-                &Patch::Merge(&patch),
-            )
-            .await
-        {
-            Ok(scale) => scale,
-            Err(e) => {
-                return command_error(
-                    command_id,
-                    spec.execution.mode,
-                    format!(
-                        "scale apply failed for Deployment {}: {}",
-                        spec.target.name, e
-                    ),
-                );
-            }
-        };
-
-        result.dry_run = Some(false);
-        result.observed_after = Some(json!({
-            "desired_replicas": applied.spec.as_ref().map(|s| s.replicas).unwrap_or_default(),
-            "current_replicas": applied.status.as_ref().map(|s| s.replicas).unwrap_or_default(),
-        }));
-        result.verification = Some(ActionVerification {
-            status: "accepted".into(),
-            message: Some("scale request applied; stabilization is tracked separately".into()),
-            observed_state: Some(json!({
-                "desired_replicas": applied.spec.as_ref().map(|s| s.replicas).unwrap_or_default(),
-                "current_replicas": applied.status.as_ref().map(|s| s.replicas).unwrap_or_default(),
-            })),
-        });
-        result
     }
 
     async fn self_update(&self, command_id: &str, spec: SelfUpdateSpec) -> CommandResult {
