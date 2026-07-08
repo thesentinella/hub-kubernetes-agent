@@ -1,7 +1,7 @@
 //! DTOs sent to the Sentinella Hub. Keep field names stable — the Hub depends on them.
 
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
 /// Top-level inventory snapshot.
 #[derive(Serialize, Debug)]
@@ -819,10 +819,47 @@ pub struct SentinellaHubActionPolicyStatus {
     pub conditions: Vec<SentinellaHubActionPolicyCondition>,
     #[serde(default)]
     pub observed_generation: Option<i64>,
-    #[serde(default)]
+    #[serde(
+        default,
+        serialize_with = "serialize_u128_string_option",
+        deserialize_with = "deserialize_u128_string_option"
+    )]
     pub last_reconciled_at_ms: Option<u128>,
     #[serde(default)]
     pub stale: bool,
+}
+
+fn serialize_u128_string_option<S>(value: &Option<u128>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match value {
+        Some(value) => serializer.serialize_some(&value.to_string()),
+        None => serializer.serialize_none(),
+    }
+}
+
+fn deserialize_u128_string_option<'de, D>(deserializer: D) -> Result<Option<u128>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Repr {
+        String(String),
+        Number(u64),
+    }
+
+    let value = Option::<Repr>::deserialize(deserializer)?;
+    match value {
+        Some(Repr::String(text)) => text
+            .trim()
+            .parse::<u128>()
+            .map(Some)
+            .map_err(de::Error::custom),
+        Some(Repr::Number(number)) => Ok(Some(number as u128)),
+        None => Ok(None),
+    }
 }
 
 pub fn policy_status_is_stale(
@@ -1130,6 +1167,21 @@ mod tests {
         let body: ClusterStatus = serde_json::from_str(json).unwrap();
         assert_eq!(body.last_seen_at.as_deref(), Some("2026-05-29T16:00:00Z"));
         assert_eq!(body.k8s_uid.as_deref(), Some("uid-123"));
+    }
+
+    #[test]
+    fn action_policy_status_serializes_timestamp_as_string() {
+        let status = SentinellaHubActionPolicyStatus {
+            effective_namespaces: vec!["app-prod".into()],
+            conditions: vec![],
+            observed_generation: Some(7),
+            last_reconciled_at_ms: Some(1234567890123),
+            stale: false,
+        };
+
+        let value = serde_json::to_value(&status).unwrap();
+        assert_eq!(value["lastReconciledAtMs"], "1234567890123");
+        assert_eq!(value["stale"], false);
     }
 
     #[test]
