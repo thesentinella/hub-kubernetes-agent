@@ -704,19 +704,19 @@ pub struct ResourceMap {
 #[derive(Deserialize, Serialize, Debug, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 #[allow(dead_code)]
-pub struct SentinellaActionPolicy {
+pub struct SentinellaHubActionPolicy {
     #[serde(default)]
     pub metadata: ObjectMeta,
     #[serde(default)]
-    pub spec: SentinellaActionPolicySpec,
+    pub spec: SentinellaHubActionPolicySpec,
     #[serde(default)]
-    pub status: Option<SentinellaActionPolicyStatus>,
+    pub status: Option<SentinellaHubActionPolicyStatus>,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 #[allow(dead_code)]
-pub struct SentinellaActionPolicySpec {
+pub struct SentinellaHubActionPolicySpec {
     #[serde(default)]
     pub namespace_selector: Option<LabelSelector>,
     #[serde(default)]
@@ -726,13 +726,13 @@ pub struct SentinellaActionPolicySpec {
     #[serde(default)]
     pub approval_required: bool,
     #[serde(default)]
-    pub limits: Option<SentinellaActionPolicyLimits>,
+    pub limits: Option<SentinellaHubActionPolicyLimits>,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 #[allow(dead_code)]
-pub struct SentinellaActionPolicyLimits {
+pub struct SentinellaHubActionPolicyLimits {
     #[serde(default)]
     pub max_cpu_limit: Option<String>,
     #[serde(default)]
@@ -742,7 +742,7 @@ pub struct SentinellaActionPolicyLimits {
 #[derive(Deserialize, Serialize, Debug, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 #[allow(dead_code)]
-pub struct SentinellaActionPolicyStatus {
+pub struct SentinellaHubActionPolicyStatus {
     #[serde(default)]
     pub effective_namespaces: Vec<String>,
     #[serde(default)]

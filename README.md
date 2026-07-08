@@ -162,9 +162,9 @@ Example snapshot payload:
 
 For Action Mode, the target namespace must also carry the label `sentinella.io/action-mode=enabled`; the executor rejects workload patch commands when the label is missing or set to another value.
 
-The Phase 3 operator path is opt-in via `ACTION_OPERATOR_ENABLED=true`. When enabled, the agent reconciles namespace-scoped `RoleBinding`s for namespaces that are both labeled `sentinella.io/action-mode=enabled` and selected by a matching cluster-scoped `SentinellaActionPolicy`.
+The Phase 3 operator path is opt-in via `ACTION_OPERATOR_ENABLED=true`. When enabled, the agent reconciles namespace-scoped `RoleBinding`s for namespaces that are both labeled `sentinella.io/action-mode=enabled` and selected by a matching cluster-scoped `SentinellaHubActionPolicy`.
 
-`SentinellaActionPolicy` currently uses `namespaceSelector` for eligibility. The `allowedActions`, `allowedResources`, and `limits` fields are reserved for later policy enforcement and are documented in the CRD, but the current operator scaffold does not enforce them yet.
+`SentinellaHubActionPolicy` currently uses `namespaceSelector` for eligibility. The `allowedActions`, `allowedResources`, and `limits` fields are reserved for later policy enforcement and are documented in the CRD, but the current operator scaffold does not enforce them yet.
 
 #### Commands: setting requests and limits
 

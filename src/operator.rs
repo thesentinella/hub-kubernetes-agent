@@ -2,7 +2,7 @@ use crate::config::Config;
 use crate::executor::{
     ACTION_MODE_NAMESPACE_LABEL, ACTION_MODE_NAMESPACE_LABEL_ENABLED, label_selector_matches,
 };
-use crate::model::SentinellaActionPolicy;
+use crate::model::SentinellaHubActionPolicy;
 use anyhow::{Context, Result};
 use k8s_openapi::api::core::v1::Namespace;
 use k8s_openapi::api::rbac::v1::RoleBinding;
@@ -18,7 +18,7 @@ use tracing::{debug, info, warn};
 
 const ACTION_POLICY_GROUP: &str = "sentinella.io";
 const ACTION_POLICY_VERSION: &str = "v1alpha1";
-const ACTION_POLICY_KIND: &str = "SentinellaActionPolicy";
+const ACTION_POLICY_KIND: &str = "SentinellaHubActionPolicy";
 const ACTION_ROLE_BINDING_NAME: &str = "sentinella-hub-k8s-agent-action-mode";
 const ACTION_CLUSTER_ROLE_NAME: &str = "sentinella-hub-k8s-agent-action-mode";
 const ACTION_SERVICE_ACCOUNT_NAMESPACE: &str = "sentinella";
@@ -80,7 +80,7 @@ async fn list_namespaces(client: &Client) -> Result<Vec<Namespace>> {
     Ok(api.list(&ListParams::default()).await?.items)
 }
 
-async fn list_policies(client: &Client) -> Result<Vec<SentinellaActionPolicy>> {
+async fn list_policies(client: &Client) -> Result<Vec<SentinellaHubActionPolicy>> {
     let gvk = GroupVersionKind::gvk(
         ACTION_POLICY_GROUP,
         ACTION_POLICY_VERSION,
@@ -93,7 +93,7 @@ async fn list_policies(client: &Client) -> Result<Vec<SentinellaActionPolicy>> {
     let mut out = Vec::new();
     for policy in list {
         let value = serde_json::to_value(&policy).context("serialize action policy")?;
-        let policy: SentinellaActionPolicy =
+        let policy: SentinellaHubActionPolicy =
             serde_json::from_value(value).context("deserialize action policy")?;
         out.push(policy);
     }
@@ -101,7 +101,7 @@ async fn list_policies(client: &Client) -> Result<Vec<SentinellaActionPolicy>> {
     Ok(out)
 }
 
-fn namespace_is_eligible(namespace: &Namespace, policies: &[SentinellaActionPolicy]) -> bool {
+fn namespace_is_eligible(namespace: &Namespace, policies: &[SentinellaHubActionPolicy]) -> bool {
     let Some(labels) = namespace.metadata.labels.as_ref() else {
         return false;
     };
@@ -118,7 +118,7 @@ fn namespace_is_eligible(namespace: &Namespace, policies: &[SentinellaActionPoli
 }
 
 fn policy_matches_namespace(
-    policy: &SentinellaActionPolicy,
+    policy: &SentinellaHubActionPolicy,
     labels: &BTreeMap<String, String>,
 ) -> bool {
     let Some(selector) = policy.spec.namespace_selector.as_ref() else {
@@ -216,10 +216,10 @@ mod tests {
         ns
     }
 
-    fn policy(selector: Value) -> SentinellaActionPolicy {
+    fn policy(selector: Value) -> SentinellaHubActionPolicy {
         serde_json::from_value(json!({
             "apiVersion": "sentinella.io/v1alpha1",
-            "kind": "SentinellaActionPolicy",
+            "kind": "SentinellaHubActionPolicy",
             "metadata": { "name": "workload-tuning" },
             "spec": {
                 "namespaceSelector": selector,
