@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v1.1.0...v1.2.0) (2026-07-08)
+
+
+### Features
+
+* sen 361 resource yaml ([#159](https://github.com/thesentinella/hub-kubernetes-agent/issues/159)) ([c233fea](https://github.com/thesentinella/hub-kubernetes-agent/commit/c233fea6e32d5aba88b1b0a93a8f2941a85647e7))
+
 ## [1.1.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v1.0.3...v1.1.0) (2026-07-08)
 
 
