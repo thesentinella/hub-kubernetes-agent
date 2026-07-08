@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.1](https://github.com/thesentinella/hub-kubernetes-agent/compare/v1.3.0...v1.3.1) (2026-07-08)
+
+
+### Bug Fixes
+
+* allow update_agent for sentinella namespace ([#164](https://github.com/thesentinella/hub-kubernetes-agent/issues/164)) ([f7a2f64](https://github.com/thesentinella/hub-kubernetes-agent/commit/f7a2f6408e3c215c2897d0604e34e891913ecbcb))
+
 ## [1.3.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v1.2.0...v1.3.0) (2026-07-08)
 
 
