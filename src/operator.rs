@@ -1,7 +1,5 @@
 use crate::config::Config;
-use crate::executor::{
-    ACTION_MODE_NAMESPACE_LABEL, ACTION_MODE_NAMESPACE_LABEL_ENABLED, label_selector_matches,
-};
+use crate::executor::{ACTION_MODE_NAMESPACE_LABEL, ACTION_MODE_NAMESPACE_LABEL_ENABLED};
 use crate::model::{
     SentinellaHubActionPolicy, SentinellaHubActionPolicyCondition, SentinellaHubActionPolicyStatus,
     policy_action_is_supported, policy_action_targets_workload, policy_limits_are_valid,
@@ -16,7 +14,7 @@ use kube::api::{
 use kube::core::GroupVersionKind;
 use kube::{Api, Client};
 use serde_json::json;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 use std::future::Future;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::time::{MissedTickBehavior, interval};
@@ -29,6 +27,13 @@ const ACTION_ROLE_BINDING_NAME: &str = "sentinella-hub-k8s-agent-action-mode";
 const ACTION_CLUSTER_ROLE_NAME: &str = "sentinella-hub-k8s-agent-action-mode";
 const ACTION_SERVICE_ACCOUNT_NAMESPACE: &str = "sentinella";
 const ACTION_SERVICE_ACCOUNT_NAME: &str = "sentinella-hub-k8s-agent";
+const SYSTEM_EXCLUDED_NAMESPACES: &[&str] = &[
+    "kube-system",
+    "kube-public",
+    "kube-node-lease",
+    "sentinella",
+    "tetragon",
+];
 
 pub async fn run_action_operator(cfg: Config, client: Client) {
     if !cfg.action_operator_enabled {
@@ -60,18 +65,31 @@ async fn reconcile_action_policies(cfg: &Config, client: &Client) -> Result<()> 
         .checked_mul(3)
         .unwrap_or(cfg.action_operator_poll_interval)
         .as_millis();
+    let excluded_namespaces =
+        combined_excluded_namespaces(&cfg.action_operator_excluded_namespaces);
 
     reconcile_action_policies_with(
         now,
         stale_after_ms,
+        excluded_namespaces,
         || list_namespaces(client),
         || list_policies(client),
-        |namespaces, policies| async move {
-            reconcile_action_role_bindings(client, &namespaces, &policies).await
+        |namespaces, policies, excluded_namespaces| async move {
+            reconcile_action_role_bindings(client, &namespaces, &policies, &excluded_namespaces)
+                .await
         },
         |name, status| async move { patch_policy_status(client, &name, status).await },
     )
     .await
+}
+
+fn combined_excluded_namespaces(extra: &[String]) -> HashSet<String> {
+    SYSTEM_EXCLUDED_NAMESPACES
+        .iter()
+        .map(|value| (*value).to_string())
+        .chain(extra.iter().map(|value| value.trim().to_string()))
+        .filter(|value| !value.is_empty())
+        .collect()
 }
 
 async fn reconcile_action_policies_with<
@@ -86,6 +104,7 @@ async fn reconcile_action_policies_with<
 >(
     now_ms: u128,
     stale_after_ms: u128,
+    excluded_namespaces: HashSet<String>,
     list_namespaces: ListNamespaces,
     list_policies: ListPolicies,
     reconcile_bindings: ReconcileBindings,
@@ -96,14 +115,20 @@ where
     NSFut: Future<Output = Result<Vec<Namespace>>>,
     ListPolicies: Fn() -> PolFut,
     PolFut: Future<Output = Result<Vec<SentinellaHubActionPolicy>>>,
-    ReconcileBindings: Fn(Vec<Namespace>, Vec<SentinellaHubActionPolicy>) -> BindFut,
+    ReconcileBindings:
+        Fn(Vec<Namespace>, Vec<SentinellaHubActionPolicy>, HashSet<String>) -> BindFut,
     BindFut: Future<Output = Result<BindingReconcileOutcome>>,
     PatchStatus: Fn(String, SentinellaHubActionPolicyStatus) -> PatchFut,
     PatchFut: Future<Output = Result<()>>,
 {
     let namespaces = list_namespaces().await?;
     let policies = list_policies().await?;
-    let binding_outcome = reconcile_bindings(namespaces.clone(), policies.clone()).await?;
+    let binding_outcome = reconcile_bindings(
+        namespaces.clone(),
+        policies.clone(),
+        excluded_namespaces.clone(),
+    )
+    .await?;
 
     for policy in &policies {
         let Some(name) = policy.metadata.name.as_deref() else {
@@ -113,6 +138,7 @@ where
         let status = build_policy_status(
             policy,
             &namespaces,
+            &excluded_namespaces,
             &binding_outcome,
             now_ms,
             stale_after_ms,
@@ -176,54 +202,25 @@ async fn patch_policy_status(
     Ok(())
 }
 
-fn policy_effective_namespaces(
-    policy: &SentinellaHubActionPolicy,
+fn effective_namespaces(
     namespaces: &[Namespace],
-) -> (bool, Vec<String>) {
+    excluded_namespaces: &HashSet<String>,
+) -> Vec<String> {
     let mut effective = Vec::new();
-    let mut policy_matched = false;
 
     for namespace in namespaces {
-        if policy_matches_namespace(policy, namespace) {
-            policy_matched = true;
-            if namespace_has_action_mode_label(namespace) {
-                if let Some(name) = namespace.metadata.name.as_ref() {
-                    effective.push(name.clone());
-                }
+        if let Some(name) = namespace.metadata.name.as_ref() {
+            if !namespace_is_excluded(name, excluded_namespaces) {
+                effective.push(name.clone());
             }
         }
     }
 
     effective.sort();
-    (policy_matched, effective)
+    effective
 }
-
-fn policy_matches_namespace(policy: &SentinellaHubActionPolicy, namespace: &Namespace) -> bool {
-    if !namespace_has_action_mode_label(namespace) {
-        return false;
-    }
-
-    let Some(selector) = policy.spec.namespace_selector.as_ref() else {
-        return false;
-    };
-
-    if selector.match_labels.is_none() && selector.match_expressions.is_none() {
-        return false;
-    }
-
-    let empty = BTreeMap::new();
-    let labels = namespace.metadata.labels.as_ref().unwrap_or(&empty);
-    label_selector_matches(Some(selector), labels)
-}
-
-fn namespace_has_action_mode_label(namespace: &Namespace) -> bool {
-    namespace
-        .metadata
-        .labels
-        .as_ref()
-        .and_then(|labels| labels.get(ACTION_MODE_NAMESPACE_LABEL))
-        .map(String::as_str)
-        == Some(ACTION_MODE_NAMESPACE_LABEL_ENABLED)
+fn namespace_is_excluded(name: &str, excluded_namespaces: &HashSet<String>) -> bool {
+    excluded_namespaces.contains(name)
 }
 
 struct BindingReconcileOutcome {
@@ -235,10 +232,12 @@ async fn reconcile_action_role_bindings(
     client: &Client,
     namespaces: &[Namespace],
     policies: &[SentinellaHubActionPolicy],
+    excluded_namespaces: &HashSet<String>,
 ) -> Result<BindingReconcileOutcome> {
     reconcile_action_role_bindings_with(
         namespaces,
         policies,
+        excluded_namespaces,
         |namespace| ensure_action_role_binding(client, namespace),
         |namespace| remove_action_role_binding(client, namespace),
     )
@@ -247,7 +246,8 @@ async fn reconcile_action_role_bindings(
 
 async fn reconcile_action_role_bindings_with<Ensure, Remove, EnsureFuture, RemoveFuture>(
     namespaces: &[Namespace],
-    policies: &[SentinellaHubActionPolicy],
+    _policies: &[SentinellaHubActionPolicy],
+    excluded_namespaces: &HashSet<String>,
     ensure: Ensure,
     remove: Remove,
 ) -> Result<BindingReconcileOutcome>
@@ -257,13 +257,6 @@ where
     Remove: Fn(String) -> RemoveFuture,
     RemoveFuture: Future<Output = Result<()>>,
 {
-    let mut eligible_union = HashSet::new();
-
-    for policy in policies {
-        let (_, effective_namespaces) = policy_effective_namespaces(policy, namespaces);
-        eligible_union.extend(effective_namespaces);
-    }
-
     let mut errors = Vec::new();
 
     for namespace in namespaces {
@@ -272,7 +265,7 @@ where
         };
         let name = name.to_string();
 
-        if eligible_union.contains(&name) {
+        if !namespace_is_excluded(&name, excluded_namespaces) {
             if let Err(err) = ensure(name).await {
                 errors.push(err.to_string());
             }
@@ -362,13 +355,15 @@ fn desired_action_role_binding(namespace: &str) -> Result<RoleBinding> {
 fn build_policy_status(
     policy: &SentinellaHubActionPolicy,
     namespaces: &[Namespace],
+    excluded_namespaces: &HashSet<String>,
     binding_outcome: &BindingReconcileOutcome,
     now_ms: u128,
     stale_after_ms: u128,
 ) -> SentinellaHubActionPolicyStatus {
-    let (policy_matched, effective_namespaces) = policy_effective_namespaces(policy, namespaces);
+    let effective_namespaces = effective_namespaces(namespaces, excluded_namespaces);
+    let policy_matched = true;
     let namespaces_eligible = !effective_namespaces.is_empty();
-    let permission_granted = namespaces_eligible && binding_outcome.permission_granted;
+    let permission_granted = binding_outcome.permission_granted;
     let reconciliation_error = binding_outcome.reconciliation_error.clone();
     let action_allowed = policy
         .spec
@@ -452,12 +447,15 @@ fn build_policy_conditions(
             if namespaces_eligible {
                 Some("eligible_namespaces_found")
             } else {
-                Some("no_eligible_namespaces")
+                Some("all_namespaces_excluded")
             },
             if namespaces_eligible {
-                Some("At least one namespace matches the action-mode label and selector".into())
+                Some(
+                    "At least one namespace is eligible after applying the operator exclude list"
+                        .into(),
+                )
             } else {
-                Some("No namespace matched the action-mode label and selector".into())
+                Some("All namespaces are excluded from action-mode reconciliation".into())
             },
             observed_generation,
             now_ms,
@@ -465,16 +463,8 @@ fn build_policy_conditions(
         policy_condition(
             "PolicyMatched",
             policy_matched,
-            if policy_matched {
-                Some("policy_selector_matched")
-            } else {
-                Some("policy_selector_missed")
-            },
-            if policy_matched {
-                Some("Namespace selector matched at least one namespace".into())
-            } else {
-                Some("Namespace selector matched no namespaces".into())
-            },
+            Some("global_exclude_list_active"),
+            Some("Policy is evaluated under the global namespace exclude-list model".into()),
             observed_generation,
             now_ms,
         ),
@@ -581,9 +571,9 @@ fn build_policy_conditions(
             Some("not_ready")
         },
         if ready {
-            Some("Policy is Ready for agent action checks".into())
+            Some("Policy is Ready for global agent action checks".into())
         } else {
-            Some("Policy is not Ready for agent action checks".into())
+            Some("Policy is not Ready for global agent action checks".into())
         },
         observed_generation,
         now_ms,
@@ -708,6 +698,7 @@ mod tests {
             ACTION_MODE_NAMESPACE_LABEL: ACTION_MODE_NAMESPACE_LABEL_ENABLED,
             "environment": "prod"
         })))];
+        let excluded_namespaces = HashSet::new();
         let mut policy = policy(json!({
             "matchLabels": {"environment": "prod"}
         }));
@@ -722,6 +713,7 @@ mod tests {
         let status = build_policy_status(
             &policy,
             &namespaces,
+            &excluded_namespaces,
             &binding_outcome(true, None),
             1000,
             150,
@@ -759,6 +751,7 @@ mod tests {
             ACTION_MODE_NAMESPACE_LABEL: ACTION_MODE_NAMESPACE_LABEL_ENABLED,
             "environment": "prod"
         })))];
+        let excluded_namespaces = HashSet::new();
         let mut policy = policy(json!({
             "matchLabels": {"environment": "prod"}
         }));
@@ -773,6 +766,7 @@ mod tests {
         let status = build_policy_status(
             &policy,
             &namespaces,
+            &excluded_namespaces,
             &binding_outcome(false, Some("cannot reconcile app-prod")),
             1000,
             150,
@@ -796,6 +790,7 @@ mod tests {
             ACTION_MODE_NAMESPACE_LABEL: ACTION_MODE_NAMESPACE_LABEL_ENABLED,
             "environment": "prod"
         })))];
+        let excluded_namespaces = HashSet::new();
         let mut policy = policy(json!({
             "matchLabels": {"environment": "prod"}
         }));
@@ -810,6 +805,7 @@ mod tests {
         let status = build_policy_status(
             &policy,
             &namespaces,
+            &excluded_namespaces,
             &binding_outcome(true, None),
             1000,
             150,
@@ -822,9 +818,13 @@ mod tests {
 
     #[test]
     fn build_policy_status_marks_not_ready_when_no_eligible_namespaces() {
-        let namespaces = vec![namespace(Some(json!({
-            "environment": "qa"
-        })))];
+        let namespaces = vec![namespace_with_name(
+            "app-qa",
+            Some(json!({
+                "environment": "qa"
+            })),
+        )];
+        let excluded_namespaces = HashSet::from(["app-qa".to_string()]);
         let mut policy = policy(json!({
             "matchLabels": {"environment": "prod"}
         }));
@@ -839,6 +839,7 @@ mod tests {
         let status = build_policy_status(
             &policy,
             &namespaces,
+            &excluded_namespaces,
             &binding_outcome(true, None),
             1000,
             150,
@@ -857,6 +858,7 @@ mod tests {
             ACTION_MODE_NAMESPACE_LABEL: ACTION_MODE_NAMESPACE_LABEL_ENABLED,
             "environment": "prod"
         })))];
+        let excluded_namespaces = HashSet::new();
         let mut policy = policy(json!({
             "matchLabels": {"environment": "prod"}
         }));
@@ -872,6 +874,7 @@ mod tests {
         let status = build_policy_status(
             &policy,
             &namespaces,
+            &excluded_namespaces,
             &binding_outcome(true, None),
             1000,
             150,
@@ -890,6 +893,7 @@ mod tests {
             ACTION_MODE_NAMESPACE_LABEL: ACTION_MODE_NAMESPACE_LABEL_ENABLED,
             "environment": "prod"
         })))];
+        let excluded_namespaces = HashSet::new();
         let mut policy = policy(json!({
             "matchLabels": {"environment": "prod"}
         }));
@@ -905,6 +909,7 @@ mod tests {
         let status = build_policy_status(
             &policy,
             &namespaces,
+            &excluded_namespaces,
             &binding_outcome(true, None),
             1000,
             150,
@@ -923,6 +928,7 @@ mod tests {
             ACTION_MODE_NAMESPACE_LABEL: ACTION_MODE_NAMESPACE_LABEL_ENABLED,
             "environment": "prod"
         })))];
+        let excluded_namespaces = HashSet::new();
         let mut policy = policy(json!({
             "matchLabels": {"environment": "prod"}
         }));
@@ -941,6 +947,7 @@ mod tests {
         let status = build_policy_status(
             &policy,
             &namespaces,
+            &excluded_namespaces,
             &binding_outcome(true, None),
             1000,
             150,
@@ -989,10 +996,12 @@ mod tests {
         let patch_calls_cloned = Arc::clone(&patch_calls);
         let namespaces_for_test = namespaces.clone();
         let policies_for_test = vec![policy_a.clone(), policy_b.clone()];
+        let excluded_namespaces = HashSet::new();
 
         reconcile_action_policies_with(
             1000,
             150,
+            excluded_namespaces,
             move || {
                 let namespaces = namespaces_for_test.clone();
                 async move { Ok(namespaces) }
@@ -1001,7 +1010,7 @@ mod tests {
                 let policies = policies_for_test.clone();
                 async move { Ok(policies) }
             },
-            move |_, _| async { Ok(binding_outcome(false, Some("cannot reconcile app-prod"))) },
+            move |_, _, _| async { Ok(binding_outcome(false, Some("cannot reconcile app-prod"))) },
             move |name, status| {
                 let patch_calls = Arc::clone(&patch_calls_cloned);
                 async move {
@@ -1048,6 +1057,7 @@ mod tests {
         let policies = vec![policy(json!({
             "matchLabels": {"environment": "prod"}
         }))];
+        let excluded_namespaces = HashSet::from(["app-qa".to_string()]);
 
         let ensure_calls = Arc::new(Mutex::new(Vec::new()));
         let remove_calls = Arc::new(Mutex::new(Vec::new()));
@@ -1080,9 +1090,15 @@ mod tests {
             }
         };
 
-        let outcome = reconcile_action_role_bindings_with(&namespaces, &policies, ensure, remove)
-            .await
-            .expect("binding reconciliation should complete");
+        let outcome = reconcile_action_role_bindings_with(
+            &namespaces,
+            &policies,
+            &excluded_namespaces,
+            ensure,
+            remove,
+        )
+        .await
+        .expect("binding reconciliation should complete");
 
         assert!(!outcome.permission_granted);
         assert_eq!(
@@ -1100,35 +1116,27 @@ mod tests {
     }
 
     #[test]
-    fn namespace_is_eligible_requires_label_and_matching_policy() {
-        let labeled = namespace(Some(json!({
-            ACTION_MODE_NAMESPACE_LABEL: ACTION_MODE_NAMESPACE_LABEL_ENABLED,
-            "environment": "prod"
-        })));
-        let unlabeled = namespace(Some(json!({
-            "environment": "prod"
-        })));
-        let mismatched = namespace(Some(json!({
-            ACTION_MODE_NAMESPACE_LABEL: ACTION_MODE_NAMESPACE_LABEL_ENABLED,
-            "environment": "qa"
-        })));
-        let policies = vec![policy(json!({
-            "matchLabels": {"environment": "prod"}
-        }))];
+    fn namespace_is_excluded_matches_additive_denylist() {
+        let excluded_namespaces =
+            HashSet::from(["app-prod".to_string(), "kube-system".to_string()]);
 
-        assert!(policy_matches_namespace(&policies[0], &labeled));
-        assert!(!policy_matches_namespace(&policies[0], &unlabeled));
-        assert!(!policy_matches_namespace(&policies[0], &mismatched));
+        assert!(namespace_is_excluded("app-prod", &excluded_namespaces));
+        assert!(namespace_is_excluded("kube-system", &excluded_namespaces));
+        assert!(!namespace_is_excluded("app-qa", &excluded_namespaces));
     }
 
     #[test]
-    fn namespace_is_eligible_rejects_missing_selector() {
-        let labeled = namespace(Some(json!({
-            ACTION_MODE_NAMESPACE_LABEL: ACTION_MODE_NAMESPACE_LABEL_ENABLED
-        })));
-        let policies = vec![policy(json!({}))];
+    fn effective_namespaces_excludes_blocked_namespaces() {
+        let namespaces = vec![
+            namespace_with_name("app-prod", Some(json!({"environment": "prod"}))),
+            namespace_with_name("app-qa", Some(json!({"environment": "qa"}))),
+        ];
+        let excluded_namespaces = HashSet::from(["app-qa".to_string()]);
 
-        assert!(!policy_matches_namespace(&policies[0], &labeled));
+        assert_eq!(
+            effective_namespaces(&namespaces, &excluded_namespaces),
+            vec!["app-prod".to_string()]
+        );
     }
 
     #[test]

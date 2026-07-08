@@ -8,6 +8,7 @@ pub const AGENT_CONFIG_ENV_ALLOWLIST: &[&str] = &[
     "ACTIONS_ENABLED",
     "ACTION_OPERATOR_ENABLED",
     "ACTION_OPERATOR_POLL_INTERVAL_SECS",
+    "ACTION_OPERATOR_EXCLUDED_NAMESPACES",
     "AGENT_HTTP_DEBUG",
     "AGENT_HTTP_DEBUG_BODIES",
     "AGENT_LOG",
@@ -76,6 +77,9 @@ pub struct Config {
 
     /// How often the action-mode RoleBinding reconciler runs.
     pub action_operator_poll_interval: Duration,
+
+    /// Additive namespace exclusions for action-mode RoleBinding reconciliation.
+    pub action_operator_excluded_namespaces: Vec<String>,
 
     /// Master switch for read-only diagnostic commands.
     pub readonly_commands_enabled: bool,
@@ -229,6 +233,8 @@ impl Config {
             .unwrap_or(false);
         let action_operator_enabled = env_flag("ACTION_OPERATOR_ENABLED");
         let action_operator_poll_interval = parse_secs("ACTION_OPERATOR_POLL_INTERVAL_SECS", 60);
+        let action_operator_excluded_namespaces =
+            parse_yaml_list_env("ACTION_OPERATOR_EXCLUDED_NAMESPACES");
         let readonly_commands_enabled = env_flag("READONLY_COMMANDS_ENABLED");
         let collect_secrets = env_flag("COLLECT_SECRETS");
         let collect_dependencies_tetragon = env_flag("COLLECT_DEPENDENCIES_TETRAGON");
@@ -313,6 +319,7 @@ impl Config {
             actions_enabled,
             action_operator_enabled,
             action_operator_poll_interval,
+            action_operator_excluded_namespaces,
             readonly_commands_enabled,
             collect_secrets,
             collect_dependencies_tetragon,
@@ -389,6 +396,9 @@ fn runtime_env_value(cfg: &Config, key: &str) -> Option<String> {
         "ACTION_OPERATOR_POLL_INTERVAL_SECS" => {
             Some(cfg.action_operator_poll_interval.as_secs().to_string())
         }
+        "ACTION_OPERATOR_EXCLUDED_NAMESPACES" => {
+            Some(yaml_list_string(&cfg.action_operator_excluded_namespaces))
+        }
         "READONLY_COMMANDS_ENABLED" => Some(bool_string(cfg.readonly_commands_enabled)),
         "AGENT_HTTP_DEBUG" => Some(bool_string(cfg.http_debug)),
         "AGENT_HTTP_DEBUG_BODIES" => Some(bool_string(cfg.http_debug_bodies)),
@@ -444,6 +454,7 @@ fn configured_env_value(key: &str, value: &str) -> Option<String> {
     match key {
         "ACTIONS_ENABLED"
         | "ACTION_OPERATOR_ENABLED"
+        | "ACTION_OPERATOR_EXCLUDED_NAMESPACES"
         | "AGENT_HTTP_DEBUG"
         | "AGENT_HTTP_DEBUG_BODIES"
         | "COLLECT_DEPENDENCIES_TETRAGON"
@@ -461,6 +472,9 @@ fn configured_env_value(key: &str, value: &str) -> Option<String> {
             trimmed.to_string()
         }),
         "AGENT_VERSION_OVERRIDE" => parse_non_empty_value(trimmed),
+        "POSTGRESQL_MONITORING_NAMESPACES"
+        | "APP_METRICS_NAMESPACES"
+        | "WORKLOAD_MONITORING_NAMESPACES" => Some(trimmed.to_string()),
         "COLLECT_INTERVAL_SECS"
         | "ACTION_OPERATOR_POLL_INTERVAL_SECS"
         | "HTTP_TIMEOUT_SECS"
@@ -634,6 +648,7 @@ mod tests {
             "WORKLOAD_MONITORING_TARGETS",
             "POSTGRESQL_MONITORING_ENABLED",
             "POSTGRESQL_MONITORING_NAMESPACES",
+            "ACTION_OPERATOR_EXCLUDED_NAMESPACES",
         ] {
             unsafe { env::remove_var(var) };
         }
@@ -807,6 +822,26 @@ mod tests {
     }
 
     #[test]
+    fn action_operator_excluded_namespaces_parses_yaml_list() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        unsafe {
+            reset_env();
+            set_required("https://hub.example.com", "cluster-1");
+            env::set_var(
+                "ACTION_OPERATOR_EXCLUDED_NAMESPACES",
+                "- kube-system\n- sentinella\n- custom-ns",
+            );
+            let cfg = Config::from_env().unwrap();
+            assert_eq!(
+                cfg.action_operator_excluded_namespaces,
+                vec!["kube-system", "sentinella", "custom-ns"]
+            );
+            env::remove_var("ACTION_OPERATOR_EXCLUDED_NAMESPACES");
+            clear_required();
+        }
+    }
+
+    #[test]
     fn readonly_commands_enabled_true_values() {
         let _lock = ENV_LOCK.lock().unwrap();
         unsafe {
@@ -895,6 +930,7 @@ mod tests {
             actions_enabled: true,
             action_operator_enabled: false,
             action_operator_poll_interval: Duration::from_secs(60),
+            action_operator_excluded_namespaces: vec![],
             readonly_commands_enabled: true,
             collect_secrets: false,
             collect_dependencies_tetragon: true,
@@ -1131,6 +1167,7 @@ mod tests {
             actions_enabled: false,
             action_operator_enabled: false,
             action_operator_poll_interval: Duration::from_secs(60),
+            action_operator_excluded_namespaces: vec![],
             readonly_commands_enabled: false,
             collect_secrets: false,
             collect_dependencies_tetragon: false,
@@ -1192,6 +1229,7 @@ mod tests {
             actions_enabled: false,
             action_operator_enabled: false,
             action_operator_poll_interval: Duration::from_secs(60),
+            action_operator_excluded_namespaces: vec![],
             readonly_commands_enabled: false,
             collect_secrets: false,
             collect_dependencies_tetragon: false,
