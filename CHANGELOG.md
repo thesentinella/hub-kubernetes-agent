@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.1](https://github.com/thesentinella/hub-kubernetes-agent/compare/v1.0.0...v1.0.1) (2026-07-08)
+
+
+### Bug Fixes
+
+* finish action operator verification ([#151](https://github.com/thesentinella/hub-kubernetes-agent/issues/151)) ([d35e3d4](https://github.com/thesentinella/hub-kubernetes-agent/commit/d35e3d4fb53962ccbe8ca289ed5a50b2b99d96fc))
+
 ## [1.0.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.37.0...v1.0.0) (2026-07-08)
 
 
