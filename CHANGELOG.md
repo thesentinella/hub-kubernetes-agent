@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v1.0.3...v1.1.0) (2026-07-08)
+
+
+### Features
+
+* add resource yaml fetch command ([#157](https://github.com/thesentinella/hub-kubernetes-agent/issues/157)) ([ca5572b](https://github.com/thesentinella/hub-kubernetes-agent/commit/ca5572b077ce6f2944253014eadc0c5cf7e8b894))
+
 ## [1.0.3](https://github.com/thesentinella/hub-kubernetes-agent/compare/v1.0.2...v1.0.3) (2026-07-08)
 
 
