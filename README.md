@@ -162,7 +162,9 @@ Example snapshot payload:
 
 For Action Mode, the target namespace must also carry the label `sentinella.io/action-mode=enabled`; the executor rejects workload patch commands when the label is missing or set to another value.
 
-The Phase 3 operator path is opt-in via `ACTION_OPERATOR_ENABLED=true`. When enabled, the agent reconciles namespace-scoped `RoleBinding`s for namespaces that are both labeled `sentinella.io/action-mode=enabled` and selected by a matching cluster-scoped `SentinellaHubActionPolicy`.
+The Phase 3 operator path is opt-in via `ACTION_OPERATOR_ENABLED=true`. When enabled, the agent reconciles namespace-scoped `RoleBinding`s and updates policy status for namespaces that are both labeled `sentinella.io/action-mode=enabled` and selected by a matching cluster-scoped `SentinellaHubActionPolicy`.
+
+The operator manifest must include the `sentinellahubactionpolicies/status` subresource permission; without it, status freshness cannot be written and the operator will fail closed.
 
 `SentinellaHubActionPolicy` uses `namespaceSelector` for eligibility and now enforces `allowedActions`, `allowedResources`, and `limits` as part of the action policy gate. Policies are also treated as stale when their freshness timestamp is missing or too old.
 
