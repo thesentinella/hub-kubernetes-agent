@@ -34,6 +34,7 @@ use tokio_postgres::NoTls;
 /// is non-empty; `None` otherwise. The result is `None` (omitted from JSON)
 /// when the plugin is disabled — this matches the ADR decision that the
 /// `plugins` field is omitted entirely when the feature is off.
+#[allow(clippy::too_many_arguments)]
 pub fn build_workload_monitoring(
     cfg: &Config,
     workloads: &Workloads,

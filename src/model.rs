@@ -628,6 +628,11 @@ pub struct CommandBatch {
 ///   Spec shape: [`UpdateAgentSpec`].
 /// - `diagnose_postgresql` — read-only PostgreSQL diagnosis.
 ///   Spec shape: [`PostgresqlDiagnosticSpec`].
+/// - `rollout_restart` — restarts a workload by patching the pod template
+///   restart annotation.
+///   Spec shape: [`RolloutRestartSpec`].
+/// - `scale` — changes desired replicas for a workload.
+///   Spec shape: [`ScaleSpec`].
 ///
 /// The two-command pattern (preview, then apply) is intentional:
 /// - Each artifact is a separate Hub record with its own id, timestamp, and
@@ -642,6 +647,54 @@ pub struct Command {
     pub kind: String,
     #[serde(default)]
     pub spec: serde_json::Value,
+}
+
+/// Execution mode for remote actions.
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+#[allow(dead_code)]
+pub enum ExecutionMode {
+    #[default]
+    Preview,
+    Execute,
+}
+
+/// Shared execution envelope for remote actions.
+#[derive(Deserialize, Serialize, Debug, Clone, Default)]
+#[allow(dead_code)]
+pub struct ExecutionSpec {
+    #[serde(default)]
+    pub mode: ExecutionMode,
+    #[serde(default)]
+    pub approval_id: Option<String>,
+    #[serde(default)]
+    pub preview_resource_version: Option<String>,
+}
+
+/// Common workload target reference for remote actions.
+#[derive(Deserialize, Serialize, Debug, Clone)]
+#[allow(dead_code)]
+pub struct WorkloadTargetRef {
+    pub kind: String,
+    pub namespace: String,
+    pub name: String,
+}
+
+/// Spec payload for `rollout_restart`.
+#[derive(Deserialize, Serialize, Debug, Clone)]
+#[allow(dead_code)]
+pub struct RolloutRestartSpec {
+    pub execution: ExecutionSpec,
+    pub target: WorkloadTargetRef,
+}
+
+/// Spec payload for `scale`.
+#[derive(Deserialize, Serialize, Debug, Clone)]
+#[allow(dead_code)]
+pub struct ScaleSpec {
+    pub execution: ExecutionSpec,
+    pub target: WorkloadTargetRef,
+    pub replicas: i32,
 }
 
 /// Spec payload for `diagnose_postgresql`.
@@ -713,6 +766,23 @@ pub struct SentinellaHubActionPolicy {
     pub status: Option<SentinellaHubActionPolicyStatus>,
 }
 
+#[derive(Deserialize, Serialize, Debug, Clone, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
+pub struct SentinellaHubActionPolicyCondition {
+    #[serde(rename = "type")]
+    pub type_: String,
+    pub status: String,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub message: Option<String>,
+    #[serde(default)]
+    pub observed_generation: Option<i64>,
+    #[serde(default)]
+    pub last_transition_time_ms: Option<u128>,
+}
+
 #[derive(Deserialize, Serialize, Debug, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 #[allow(dead_code)]
@@ -746,9 +816,11 @@ pub struct SentinellaHubActionPolicyStatus {
     #[serde(default)]
     pub effective_namespaces: Vec<String>,
     #[serde(default)]
-    pub conditions: Vec<serde_json::Value>,
+    pub conditions: Vec<SentinellaHubActionPolicyCondition>,
     #[serde(default)]
     pub observed_generation: Option<i64>,
+    #[serde(default)]
+    pub last_reconciled_at_ms: Option<u128>,
 }
 
 /// Spec payload for `self_update`.
@@ -791,7 +863,7 @@ pub struct UpdateAgentSpec {
 ///
 /// For resource patch commands (preview or apply), the audit fields below
 /// are populated.
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, Clone)]
 pub struct CommandResult {
     pub command_id: String,
     pub status: &'static str,
@@ -834,6 +906,14 @@ pub struct CommandResult {
     /// restart the pod.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub restart_requested: Option<bool>,
+
+    /// Structured desired-state evidence for action commands.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requested_state: Option<serde_json::Value>,
+
+    /// Structured verification result for action commands.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verification: Option<ActionVerification>,
 }
 
 impl CommandResult {
@@ -852,8 +932,19 @@ impl CommandResult {
             warnings: Vec::new(),
             diagnostic: None,
             restart_requested: None,
+            requested_state: None,
+            verification: None,
         }
     }
+}
+
+#[derive(Serialize, Debug, Clone)]
+pub struct ActionVerification {
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_state: Option<serde_json::Value>,
 }
 
 /// Structured report returned by `diagnose_postgresql`.

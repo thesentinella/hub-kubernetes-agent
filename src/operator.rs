@@ -2,7 +2,9 @@ use crate::config::Config;
 use crate::executor::{
     ACTION_MODE_NAMESPACE_LABEL, ACTION_MODE_NAMESPACE_LABEL_ENABLED, label_selector_matches,
 };
-use crate::model::SentinellaHubActionPolicy;
+use crate::model::{
+    SentinellaHubActionPolicy, SentinellaHubActionPolicyCondition, SentinellaHubActionPolicyStatus,
+};
 use anyhow::{Context, Result};
 use k8s_openapi::api::core::v1::Namespace;
 use k8s_openapi::api::rbac::v1::RoleBinding;
@@ -13,6 +15,7 @@ use kube::core::GroupVersionKind;
 use kube::{Api, Client};
 use serde_json::json;
 use std::collections::{BTreeMap, HashSet};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::time::{MissedTickBehavior, interval};
 use tracing::{debug, info, warn};
 
@@ -39,7 +42,7 @@ pub async fn run_action_operator(cfg: Config, client: Client) {
 
     loop {
         ticker.tick().await;
-        if let Err(err) = reconcile_action_bindings(&client).await {
+        if let Err(err) = reconcile_action_policies(&cfg, &client).await {
             warn!(error = %err, "action operator reconcile failed");
         } else {
             debug!("action operator reconcile complete");
@@ -47,29 +50,52 @@ pub async fn run_action_operator(cfg: Config, client: Client) {
     }
 }
 
-async fn reconcile_action_bindings(client: &Client) -> Result<()> {
+async fn reconcile_action_policies(cfg: &Config, client: &Client) -> Result<()> {
     let namespaces = list_namespaces(client).await?;
     let policies = list_policies(client).await?;
+    let binding_outcome = reconcile_action_role_bindings(client, &namespaces, &policies).await?;
+    let now = now_ms();
 
-    let mut eligible_namespaces = HashSet::new();
-    for namespace in &namespaces {
-        if namespace_is_eligible(namespace, &policies) {
-            if let Some(name) = namespace.metadata.name.as_ref() {
-                eligible_namespaces.insert(name.clone());
-            }
-        }
-    }
-
-    for namespace in namespaces {
-        let Some(name) = namespace.metadata.name.as_deref() else {
+    for policy in &policies {
+        let Some(name) = policy.metadata.name.as_deref() else {
             continue;
         };
 
-        if eligible_namespaces.contains(name) {
-            ensure_action_role_binding(client, name).await?;
-        } else {
-            remove_action_role_binding(client, name).await?;
+        let (policy_matched, effective_namespaces) =
+            policy_effective_namespaces(policy, &namespaces);
+        let namespaces_eligible = !effective_namespaces.is_empty();
+        let permission_granted = namespaces_eligible && binding_outcome.permission_granted;
+        let reconciliation_error = binding_outcome.reconciliation_error.clone();
+        let stale = false;
+        let ready = policy_matched
+            && namespaces_eligible
+            && permission_granted
+            && !stale
+            && reconciliation_error.is_none();
+
+        let status = SentinellaHubActionPolicyStatus {
+            effective_namespaces,
+            conditions: build_policy_conditions(
+                policy,
+                policy_matched,
+                namespaces_eligible,
+                permission_granted,
+                reconciliation_error.as_deref(),
+                stale,
+                ready,
+                now,
+            ),
+            observed_generation: policy.metadata.generation,
+            last_reconciled_at_ms: Some(now),
+        };
+
+        if let Err(err) = patch_policy_status(client, name, status).await {
+            warn!(policy = %name, error = %err, "failed to update action policy status");
         }
+    }
+
+    if let Some(error) = binding_outcome.reconciliation_error {
+        warn!(poll_interval_secs = cfg.action_operator_poll_interval.as_secs(), error = %error, "action operator reconciliation completed with errors");
     }
 
     Ok(())
@@ -101,26 +127,53 @@ async fn list_policies(client: &Client) -> Result<Vec<SentinellaHubActionPolicy>
     Ok(out)
 }
 
-fn namespace_is_eligible(namespace: &Namespace, policies: &[SentinellaHubActionPolicy]) -> bool {
-    let Some(labels) = namespace.metadata.labels.as_ref() else {
-        return false;
-    };
+async fn patch_policy_status(
+    client: &Client,
+    name: &str,
+    status: SentinellaHubActionPolicyStatus,
+) -> Result<()> {
+    let gvk = GroupVersionKind::gvk(
+        ACTION_POLICY_GROUP,
+        ACTION_POLICY_VERSION,
+        ACTION_POLICY_KIND,
+    );
+    let ar = ApiResource::from_gvk(&gvk);
+    let api: Api<DynamicObject> = Api::all_with(client.clone(), &ar);
+    let patch = json!({"status": status});
 
-    if labels.get(ACTION_MODE_NAMESPACE_LABEL).map(String::as_str)
-        != Some(ACTION_MODE_NAMESPACE_LABEL_ENABLED)
-    {
+    api.patch_status(name, &PatchParams::default(), &Patch::Merge(&patch))
+        .await
+        .with_context(|| format!("patching status for policy {}", name))?;
+    Ok(())
+}
+
+fn policy_effective_namespaces(
+    policy: &SentinellaHubActionPolicy,
+    namespaces: &[Namespace],
+) -> (bool, Vec<String>) {
+    let mut effective = Vec::new();
+    let mut policy_matched = false;
+
+    for namespace in namespaces {
+        if policy_matches_namespace(policy, namespace) {
+            policy_matched = true;
+            if namespace_has_action_mode_label(namespace) {
+                if let Some(name) = namespace.metadata.name.as_ref() {
+                    effective.push(name.clone());
+                }
+            }
+        }
+    }
+
+    effective.sort();
+    (policy_matched, effective)
+}
+
+fn policy_matches_namespace(policy: &SentinellaHubActionPolicy, namespace: &Namespace) -> bool {
+    if !namespace_has_action_mode_label(namespace) {
         return false;
     }
 
-    policies
-        .iter()
-        .any(|policy| policy_matches_namespace(policy, labels))
-}
-
-fn policy_matches_namespace(
-    policy: &SentinellaHubActionPolicy,
-    labels: &BTreeMap<String, String>,
-) -> bool {
     let Some(selector) = policy.spec.namespace_selector.as_ref() else {
         return false;
     };
@@ -129,7 +182,62 @@ fn policy_matches_namespace(
         return false;
     }
 
+    let empty = BTreeMap::new();
+    let labels = namespace.metadata.labels.as_ref().unwrap_or(&empty);
     label_selector_matches(Some(selector), labels)
+}
+
+fn namespace_has_action_mode_label(namespace: &Namespace) -> bool {
+    namespace
+        .metadata
+        .labels
+        .as_ref()
+        .and_then(|labels| labels.get(ACTION_MODE_NAMESPACE_LABEL))
+        .map(String::as_str)
+        == Some(ACTION_MODE_NAMESPACE_LABEL_ENABLED)
+}
+
+struct BindingReconcileOutcome {
+    permission_granted: bool,
+    reconciliation_error: Option<String>,
+}
+
+async fn reconcile_action_role_bindings(
+    client: &Client,
+    namespaces: &[Namespace],
+    policies: &[SentinellaHubActionPolicy],
+) -> Result<BindingReconcileOutcome> {
+    let mut eligible_union = HashSet::new();
+
+    for policy in policies {
+        let (_, effective_namespaces) = policy_effective_namespaces(policy, namespaces);
+        eligible_union.extend(effective_namespaces);
+    }
+
+    let mut errors = Vec::new();
+
+    for namespace in namespaces {
+        let Some(name) = namespace.metadata.name.as_deref() else {
+            continue;
+        };
+
+        if eligible_union.contains(name) {
+            if let Err(err) = ensure_action_role_binding(client, name).await {
+                errors.push(err.to_string());
+            }
+        } else if let Err(err) = remove_action_role_binding(client, name).await {
+            errors.push(err.to_string());
+        }
+    }
+
+    Ok(BindingReconcileOutcome {
+        permission_granted: errors.is_empty(),
+        reconciliation_error: if errors.is_empty() {
+            None
+        } else {
+            Some(errors.join("; "))
+        },
+    })
 }
 
 async fn ensure_action_role_binding(client: &Client, namespace: &str) -> Result<()> {
@@ -200,10 +308,146 @@ fn desired_action_role_binding(namespace: &str) -> Result<RoleBinding> {
     .map_err(|e| anyhow::anyhow!("failed to build desired RoleBinding: {}", e))
 }
 
+#[allow(clippy::too_many_arguments)]
+fn build_policy_conditions(
+    policy: &SentinellaHubActionPolicy,
+    policy_matched: bool,
+    namespaces_eligible: bool,
+    permission_granted: bool,
+    reconciliation_error: Option<&str>,
+    stale: bool,
+    ready: bool,
+    now_ms: u128,
+) -> Vec<SentinellaHubActionPolicyCondition> {
+    let observed_generation = policy.metadata.generation;
+    let mut conditions = vec![
+        policy_condition(
+            "NamespacesEligible",
+            namespaces_eligible,
+            if namespaces_eligible {
+                Some("eligible_namespaces_found")
+            } else {
+                Some("no_eligible_namespaces")
+            },
+            if namespaces_eligible {
+                Some("At least one namespace matches the action-mode label and selector".into())
+            } else {
+                Some("No namespace matched the action-mode label and selector".into())
+            },
+            observed_generation,
+            now_ms,
+        ),
+        policy_condition(
+            "PolicyMatched",
+            policy_matched,
+            if policy_matched {
+                Some("policy_selector_matched")
+            } else {
+                Some("policy_selector_missed")
+            },
+            if policy_matched {
+                Some("Namespace selector matched at least one namespace".into())
+            } else {
+                Some("Namespace selector matched no namespaces".into())
+            },
+            observed_generation,
+            now_ms,
+        ),
+        policy_condition(
+            "PermissionGranted",
+            permission_granted,
+            if permission_granted {
+                Some("rolebinding_reconciled")
+            } else {
+                Some("rolebinding_reconcile_failed")
+            },
+            if permission_granted {
+                Some("Managed RoleBindings were reconciled successfully".into())
+            } else {
+                Some("Managed RoleBindings are not fully reconciled".into())
+            },
+            observed_generation,
+            now_ms,
+        ),
+        policy_condition(
+            "ReconciliationError",
+            reconciliation_error.is_some(),
+            if reconciliation_error.is_some() {
+                Some("reconcile_error")
+            } else {
+                Some("reconcile_ok")
+            },
+            reconciliation_error.map(|msg| format!("Reconciliation error: {}", msg)),
+            observed_generation,
+            now_ms,
+        ),
+        policy_condition(
+            "Stale",
+            stale,
+            if stale {
+                Some("status_stale")
+            } else {
+                Some("status_fresh")
+            },
+            if stale {
+                Some("Policy status is stale".into())
+            } else {
+                Some("Policy status is fresh".into())
+            },
+            observed_generation,
+            now_ms,
+        ),
+    ];
+
+    conditions.push(policy_condition(
+        "Ready",
+        ready,
+        if ready {
+            Some("ready")
+        } else {
+            Some("not_ready")
+        },
+        if ready {
+            Some("Policy is Ready for agent action checks".into())
+        } else {
+            Some("Policy is not Ready for agent action checks".into())
+        },
+        observed_generation,
+        now_ms,
+    ));
+
+    conditions
+}
+
+fn policy_condition(
+    type_: &str,
+    is_true: bool,
+    reason: Option<&str>,
+    message: Option<String>,
+    observed_generation: Option<i64>,
+    now_ms: u128,
+) -> SentinellaHubActionPolicyCondition {
+    SentinellaHubActionPolicyCondition {
+        type_: type_.to_string(),
+        status: if is_true { "True" } else { "False" }.to_string(),
+        reason: reason.map(ToString::to_string),
+        message,
+        observed_generation,
+        last_transition_time_ms: Some(now_ms),
+    }
+}
+
+fn now_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     fn namespace(labels: Option<Value>) -> Namespace {
         let mut ns: Namespace = serde_json::from_value(json!({
@@ -248,9 +492,9 @@ mod tests {
             "matchLabels": {"environment": "prod"}
         }))];
 
-        assert!(namespace_is_eligible(&labeled, &policies));
-        assert!(!namespace_is_eligible(&unlabeled, &policies));
-        assert!(!namespace_is_eligible(&mismatched, &policies));
+        assert!(policy_matches_namespace(&policies[0], &labeled));
+        assert!(!policy_matches_namespace(&policies[0], &unlabeled));
+        assert!(!policy_matches_namespace(&policies[0], &mismatched));
     }
 
     #[test]
@@ -260,7 +504,7 @@ mod tests {
         })));
         let policies = vec![policy(json!({}))];
 
-        assert!(!namespace_is_eligible(&labeled, &policies));
+        assert!(!policy_matches_namespace(&policies[0], &labeled));
     }
 
     #[test]

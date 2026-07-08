@@ -177,7 +177,7 @@ async fn build_and_send(cfg: &Config, kube: &KubeClient, hub: &HubClient) -> Res
         events,
         metrics,
         snapshot_api,
-    ) = collector::collect(kube, &cfg).await?;
+    ) = collector::collect(kube, cfg).await?;
     warn_metrics_status_change(&metrics);
     warn_snapshot_api_status_change(&snapshot_api);
     configuration.agent_runtime_env = config::agent_runtime_env(cfg);

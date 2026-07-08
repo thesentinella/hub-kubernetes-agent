@@ -502,14 +502,8 @@ async fn scrape_app_metrics_target(
                 Ok(body) => {
                     let (samples, matched_count, truncated) =
                         parse_prometheus_text(&body, &allowlist, max_samples);
-                    let result_status = if status.is_success() {
-                        if matched_count == 0 {
-                            "warning"
-                        } else if truncated {
-                            "warning"
-                        } else {
-                            "ok"
-                        }
+                    let result_status = if status.is_success() && matched_count > 0 && !truncated {
+                        "ok"
                     } else {
                         "warning"
                     };
