@@ -633,6 +633,9 @@ pub struct CommandBatch {
 ///   Spec shape: [`RolloutRestartSpec`].
 /// - `scale` — changes desired replicas for a workload.
 ///   Spec shape: [`ScaleSpec`].
+/// - `get_resource_yaml` — reads an allowlisted Kubernetes object and
+///   returns a sanitized manifest-like YAML rendering.
+///   Spec shape: [`ResourceYamlSpec`].
 ///
 /// The two-command pattern (preview, then apply) is intentional:
 /// - Each artifact is a separate Hub record with its own id, timestamp, and
@@ -697,6 +700,18 @@ pub struct ScaleSpec {
     pub replicas: i32,
 }
 
+/// Spec payload for `get_resource_yaml`.
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
+pub struct ResourceYamlSpec {
+    pub api_version: String,
+    pub kind: String,
+    #[serde(default)]
+    pub namespace: Option<String>,
+    pub name: String,
+}
+
 /// Spec payload for `diagnose_postgresql`.
 ///
 /// `namespace` is required. The remaining fields are optional discovery hints
@@ -750,6 +765,120 @@ pub struct ResourceMap {
     pub cpu: Option<String>,
     #[serde(default)]
     pub memory: Option<String>,
+}
+
+/// A Kubernetes resource kind the agent may render to manifest-like YAML.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResourceYamlTarget {
+    pub api_version: &'static str,
+    pub kind: &'static str,
+    pub namespaced: bool,
+}
+
+pub const RESOURCE_YAML_SUPPORTED_TARGETS: &[ResourceYamlTarget] = &[
+    ResourceYamlTarget {
+        api_version: "v1",
+        kind: "Pod",
+        namespaced: true,
+    },
+    ResourceYamlTarget {
+        api_version: "v1",
+        kind: "Service",
+        namespaced: true,
+    },
+    ResourceYamlTarget {
+        api_version: "v1",
+        kind: "ConfigMap",
+        namespaced: true,
+    },
+    ResourceYamlTarget {
+        api_version: "v1",
+        kind: "PersistentVolumeClaim",
+        namespaced: true,
+    },
+    ResourceYamlTarget {
+        api_version: "v1",
+        kind: "PersistentVolume",
+        namespaced: false,
+    },
+    ResourceYamlTarget {
+        api_version: "v1",
+        kind: "Namespace",
+        namespaced: false,
+    },
+    ResourceYamlTarget {
+        api_version: "apps/v1",
+        kind: "Deployment",
+        namespaced: true,
+    },
+    ResourceYamlTarget {
+        api_version: "apps/v1",
+        kind: "StatefulSet",
+        namespaced: true,
+    },
+    ResourceYamlTarget {
+        api_version: "apps/v1",
+        kind: "DaemonSet",
+        namespaced: true,
+    },
+    ResourceYamlTarget {
+        api_version: "apps/v1",
+        kind: "ReplicaSet",
+        namespaced: true,
+    },
+    ResourceYamlTarget {
+        api_version: "batch/v1",
+        kind: "Job",
+        namespaced: true,
+    },
+    ResourceYamlTarget {
+        api_version: "batch/v1",
+        kind: "CronJob",
+        namespaced: true,
+    },
+    ResourceYamlTarget {
+        api_version: "networking.k8s.io/v1",
+        kind: "Ingress",
+        namespaced: true,
+    },
+    ResourceYamlTarget {
+        api_version: "networking.k8s.io/v1",
+        kind: "NetworkPolicy",
+        namespaced: true,
+    },
+];
+
+pub fn resource_yaml_target(api_version: &str, kind: &str) -> Option<ResourceYamlTarget> {
+    RESOURCE_YAML_SUPPORTED_TARGETS
+        .iter()
+        .copied()
+        .find(|target| target.api_version == api_version && target.kind == kind)
+}
+
+/// Structured response for `get_resource_yaml`.
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceYamlResult {
+    pub cluster_id: String,
+    pub resource: ResourceYamlMetadata,
+    pub format: String,
+    pub mode: String,
+    pub content: String,
+    pub fetched_at: String,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub warnings: Vec<String>,
+}
+
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceYamlMetadata {
+    pub api_version: String,
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource_version: Option<String>,
 }
 
 /// Cluster-scoped policy that controls which namespaces may receive managed
@@ -1072,6 +1201,10 @@ pub struct CommandResult {
     /// Structured verification result for action commands.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verification: Option<ActionVerification>,
+
+    /// Structured YAML fetch result for read-only resource inspection.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource_yaml: Option<ResourceYamlResult>,
 }
 
 impl CommandResult {
@@ -1092,6 +1225,7 @@ impl CommandResult {
             restart_requested: None,
             requested_state: None,
             verification: None,
+            resource_yaml: None,
         }
     }
 }
@@ -1185,6 +1319,59 @@ mod tests {
         let r = CommandResult::simple("cmd-5".into(), "ok", None);
         let v: Value = serde_json::to_value(&r).unwrap();
         assert!(!v.as_object().unwrap().contains_key("diagnostic"));
+    }
+
+    #[test]
+    fn resource_yaml_spec_deserializes() {
+        let json = r#"{
+            "apiVersion": "apps/v1",
+            "kind": "Deployment",
+            "namespace": "app-prod",
+            "name": "checkout-api"
+        }"#;
+        let spec: ResourceYamlSpec = serde_json::from_str(json).unwrap();
+        assert_eq!(spec.api_version, "apps/v1");
+        assert_eq!(spec.kind, "Deployment");
+        assert_eq!(spec.namespace.as_deref(), Some("app-prod"));
+        assert_eq!(spec.name, "checkout-api");
+    }
+
+    #[test]
+    fn resource_yaml_target_supports_expected_kinds() {
+        let deployment = resource_yaml_target("apps/v1", "Deployment").unwrap();
+        assert!(deployment.namespaced);
+        assert_eq!(deployment.api_version, "apps/v1");
+        assert_eq!(deployment.kind, "Deployment");
+
+        let pv = resource_yaml_target("v1", "PersistentVolume").unwrap();
+        assert!(!pv.namespaced);
+        assert!(resource_yaml_target("v1", "Secret").is_none());
+    }
+
+    #[test]
+    fn resource_yaml_result_serializes() {
+        let result = ResourceYamlResult {
+            cluster_id: "cluster-prod-01".into(),
+            resource: ResourceYamlMetadata {
+                api_version: "apps/v1".into(),
+                kind: "Deployment".into(),
+                namespace: Some("app-prod".into()),
+                name: "checkout-api".into(),
+                resource_version: Some("18421102".into()),
+            },
+            format: "yaml".into(),
+            mode: "manifest".into(),
+            content: "apiVersion: apps/v1\nkind: Deployment\n".into(),
+            fetched_at: "2026-07-08T14:00:00Z".into(),
+            warnings: Vec::new(),
+        };
+
+        let v: Value = serde_json::to_value(&result).unwrap();
+        assert_eq!(v["clusterId"], "cluster-prod-01");
+        assert_eq!(v["mode"], "manifest");
+        assert_eq!(v["resource"]["kind"], "Deployment");
+        assert_eq!(v["resource"]["namespace"], "app-prod");
+        assert_eq!(v["resource"]["resourceVersion"], "18421102");
     }
 
     #[test]

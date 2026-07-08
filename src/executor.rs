@@ -6,11 +6,12 @@
 use crate::config::Config;
 use crate::model::{
     ActionVerification, Command, CommandResult, ExecutionMode, PostgresqlDiagnosticSpec,
-    ResourceMap, RolloutRestartSpec, ScaleSpec, SelfUpdateSpec, SentinellaHubActionPolicy,
-    SentinellaHubActionPolicyCondition, SentinellaHubActionPolicyLimits,
-    SentinellaHubActionPolicyStatus, UpdateAgentSpec, WorkloadResourcesSpec, WorkloadTargetRef,
-    parse_cpu_quantity, parse_memory_quantity, policy_action_is_supported,
-    policy_action_targets_workload, policy_resource_is_supported, policy_status_is_stale,
+    ResourceMap, ResourceYamlMetadata, ResourceYamlResult, ResourceYamlSpec, RolloutRestartSpec,
+    ScaleSpec, SelfUpdateSpec, SentinellaHubActionPolicy, SentinellaHubActionPolicyCondition,
+    SentinellaHubActionPolicyLimits, SentinellaHubActionPolicyStatus, UpdateAgentSpec,
+    WorkloadResourcesSpec, WorkloadTargetRef, parse_cpu_quantity, parse_memory_quantity,
+    policy_action_is_supported, policy_action_targets_workload, policy_resource_is_supported,
+    policy_status_is_stale, resource_yaml_target,
 };
 use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, StatefulSet};
 use k8s_openapi::api::autoscaling::v2::HorizontalPodAutoscaler;
@@ -22,7 +23,7 @@ use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector;
 use kube::api::{ApiResource, DynamicObject, ListParams, Patch, PatchParams};
 use kube::core::GroupVersionKind;
-use kube::{Api, Client};
+use kube::{Api, Client, Error as KubeError};
 use once_cell::sync::Lazy;
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -41,6 +42,9 @@ const UPDATE_AGENT_CONTAINER: &str = "agent";
 const ACTION_POLICY_GROUP: &str = "sentinella.io";
 const ACTION_POLICY_VERSION: &str = "v1alpha1";
 const ACTION_POLICY_KIND: &str = "SentinellaHubActionPolicy";
+const RESOURCE_YAML_FORMAT: &str = "yaml";
+const RESOURCE_YAML_MODE: &str = "manifest";
+const RESOURCE_YAML_MAX_BYTES: usize = 512 * 1024;
 pub(crate) const ACTION_MODE_NAMESPACE_LABEL: &str = "sentinella.io/action-mode";
 pub(crate) const ACTION_MODE_NAMESPACE_LABEL_ENABLED: &str = "enabled";
 
@@ -83,6 +87,10 @@ impl Executor {
 
     async fn execute_inner(&self, cmd: &Command) -> CommandResult {
         match cmd.kind.as_str() {
+            "get_resource_yaml" => match parse_spec::<ResourceYamlSpec>(cmd) {
+                Ok(spec) => self.get_resource_yaml(&cmd.id, spec).await,
+                Err(e) => spec_error(cmd, e),
+            },
             "diagnose_postgresql" => {
                 if !self.cfg.readonly_commands_enabled {
                     warn!(command_id = %cmd.id, kind = %cmd.kind, "read-only commands disabled; skipping");
@@ -200,6 +208,154 @@ impl Executor {
                 )
             }
         }
+    }
+
+    async fn get_resource_yaml(&self, command_id: &str, spec: ResourceYamlSpec) -> CommandResult {
+        let api_version = spec.api_version.trim();
+        let kind = spec.kind.trim();
+        let name = spec.name.trim();
+        let namespace = spec
+            .namespace
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+
+        if api_version.is_empty() {
+            return resource_yaml_error(command_id, "apiVersion is required".into());
+        }
+        if kind.is_empty() {
+            return resource_yaml_error(command_id, "kind is required".into());
+        }
+        if name.is_empty() {
+            return resource_yaml_error(command_id, "name is required".into());
+        }
+        if kind == "Secret" {
+            return resource_yaml_error(command_id, "Secret retrieval is disabled".into());
+        }
+
+        let Some(target) = resource_yaml_target(api_version, kind) else {
+            return resource_yaml_error(
+                command_id,
+                format!(
+                    "unsupported resource kind {} with apiVersion {}",
+                    kind, api_version
+                ),
+            );
+        };
+
+        let namespace = match (target.namespaced, namespace) {
+            (true, Some(namespace)) => namespace,
+            (true, None) => {
+                return resource_yaml_error(
+                    command_id,
+                    format!(
+                        "namespace is required for namespaced resource kind {}",
+                        kind
+                    ),
+                );
+            }
+            (false, Some(_)) => {
+                return resource_yaml_error(
+                    command_id,
+                    format!(
+                        "namespace must be omitted for cluster-scoped resource kind {}",
+                        kind
+                    ),
+                );
+            }
+            (false, None) => "",
+        };
+
+        let requested_state = json!({
+            "apiVersion": api_version,
+            "kind": kind,
+            "namespace": if namespace.is_empty() { Value::Null } else { Value::String(namespace.to_string()) },
+            "name": name,
+        });
+
+        let Some((group, version)) = split_api_version(api_version) else {
+            return resource_yaml_error(
+                command_id,
+                format!("unsupported apiVersion format {}", api_version),
+            );
+        };
+
+        let gvk = GroupVersionKind::gvk(group, version, kind);
+        let ar = ApiResource::from_gvk(&gvk);
+        let api: Api<DynamicObject> = if target.namespaced {
+            Api::namespaced_with(self.client.clone(), namespace, &ar)
+        } else {
+            Api::all_with(self.client.clone(), &ar)
+        };
+
+        let object = match api.get(name).await {
+            Ok(object) => object,
+            Err(err) => {
+                return resource_yaml_error(
+                    command_id,
+                    resource_yaml_read_error(kind, namespace, name, &err),
+                );
+            }
+        };
+
+        let resource_version = object.metadata.resource_version.clone();
+        let mut json_value = match serde_json::to_value(&object) {
+            Ok(value) => value,
+            Err(err) => {
+                return resource_yaml_error(
+                    command_id,
+                    format!("failed to serialize {} {} to JSON: {}", kind, name, err),
+                );
+            }
+        };
+
+        if let Err(err) = sanitize_manifest_like_yaml(&mut json_value) {
+            return resource_yaml_error(command_id, err);
+        }
+
+        let yaml = match serde_yaml::to_string(&json_value) {
+            Ok(yaml) => yaml,
+            Err(err) => {
+                return resource_yaml_error(
+                    command_id,
+                    format!("failed to serialize {} {} to YAML: {}", kind, name, err),
+                );
+            }
+        };
+
+        if yaml.len() > RESOURCE_YAML_MAX_BYTES {
+            return resource_yaml_error(
+                command_id,
+                format!(
+                    "resource YAML exceeds maximum size of {} bytes (got {})",
+                    RESOURCE_YAML_MAX_BYTES,
+                    yaml.len()
+                ),
+            );
+        }
+
+        let mut result = CommandResult::simple(command_id.to_string(), "ok", None);
+        result.requested_state = Some(requested_state);
+        result.resource_yaml = Some(ResourceYamlResult {
+            cluster_id: self.cfg.cluster_id.clone(),
+            resource: ResourceYamlMetadata {
+                api_version: api_version.to_string(),
+                kind: kind.to_string(),
+                namespace: if namespace.is_empty() {
+                    None
+                } else {
+                    Some(namespace.to_string())
+                },
+                name: name.to_string(),
+                resource_version,
+            },
+            format: RESOURCE_YAML_FORMAT.into(),
+            mode: RESOURCE_YAML_MODE.into(),
+            content: yaml,
+            fetched_at: now_rfc3339(),
+            warnings: Vec::new(),
+        });
+        result
     }
 
     // -------- Handlers --------
@@ -1964,6 +2120,69 @@ fn now_rfc3339() -> String {
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".into())
 }
 
+fn split_api_version(api_version: &str) -> Option<(&str, &str)> {
+    if let Some((group, version)) = api_version.split_once('/') {
+        if group.is_empty() || version.is_empty() {
+            None
+        } else {
+            Some((group, version))
+        }
+    } else if api_version.is_empty() {
+        None
+    } else {
+        Some(("", api_version))
+    }
+}
+
+fn sanitize_manifest_like_yaml(value: &mut Value) -> Result<(), String> {
+    let obj = value
+        .as_object_mut()
+        .ok_or_else(|| "expected Kubernetes object payload".to_string())?;
+
+    if let Some(metadata) = obj.get_mut("metadata") {
+        let metadata = metadata
+            .as_object_mut()
+            .ok_or_else(|| "expected Kubernetes metadata object".to_string())?;
+
+        for field in [
+            "managedFields",
+            "resourceVersion",
+            "uid",
+            "creationTimestamp",
+            "generation",
+            "selfLink",
+        ] {
+            metadata.remove(field);
+        }
+    }
+
+    obj.remove("status");
+    Ok(())
+}
+
+fn resource_yaml_read_error(kind: &str, namespace: &str, name: &str, err: &KubeError) -> String {
+    let scope = if namespace.is_empty() {
+        format!("{} {}", kind, name)
+    } else {
+        format!("{} {}/{}", kind, namespace, name)
+    };
+
+    match err {
+        KubeError::Api(status) if status.code == 403 => format!("forbidden to read {}", scope),
+        KubeError::Api(status) if status.code == 404 => format!("resource {} not found", scope),
+        KubeError::Api(status) => format!(
+            "failed to read {}: kube API error {} {}",
+            scope, status.code, status.reason
+        ),
+        _ => format!("failed to read {}: {}", scope, err),
+    }
+}
+
+fn resource_yaml_error(command_id: &str, message: String) -> CommandResult {
+    warn!(command_id, "get_resource_yaml failed: {message}");
+    CommandResult::simple(command_id.to_string(), "error", Some(message))
+}
+
 fn rollout_restart_patch(_target: &WorkloadTargetRef, restart_at: &str) -> Value {
     json!({
         "spec": {
@@ -2527,5 +2746,83 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err, "update_agent image has invalid sha256 digest format");
+    }
+
+    fn kube_api_error(code: u16) -> KubeError {
+        KubeError::Api(Box::new(kube::core::Status {
+            code,
+            message: String::new(),
+            reason: String::new(),
+            ..Default::default()
+        }))
+    }
+
+    #[test]
+    fn split_api_version_handles_core_and_group_versions() {
+        assert_eq!(split_api_version("v1"), Some(("", "v1")));
+        assert_eq!(split_api_version("apps/v1"), Some(("apps", "v1")));
+        assert_eq!(split_api_version(""), None);
+        assert_eq!(split_api_version("apps/"), None);
+    }
+
+    #[test]
+    fn sanitize_manifest_like_yaml_strips_server_generated_fields() {
+        let mut value = json!({
+            "apiVersion": "apps/v1",
+            "kind": "Deployment",
+            "metadata": {
+                "name": "checkout-api",
+                "namespace": "app-prod",
+                "managedFields": [{"foo": "bar"}],
+                "resourceVersion": "18421102",
+                "uid": "12345",
+                "creationTimestamp": "2026-07-08T14:00:00Z",
+                "generation": 7,
+                "selfLink": "/apis/apps/v1/namespaces/app-prod/deployments/checkout-api"
+            },
+            "status": {
+                "readyReplicas": 1
+            }
+        });
+
+        sanitize_manifest_like_yaml(&mut value).unwrap();
+
+        assert_eq!(
+            value.pointer("/metadata/name").and_then(Value::as_str),
+            Some("checkout-api")
+        );
+        assert_eq!(
+            value.pointer("/metadata/namespace").and_then(Value::as_str),
+            Some("app-prod")
+        );
+        assert!(value.pointer("/metadata/managedFields").is_none());
+        assert!(value.pointer("/metadata/resourceVersion").is_none());
+        assert!(value.pointer("/metadata/uid").is_none());
+        assert!(value.pointer("/metadata/creationTimestamp").is_none());
+        assert!(value.pointer("/metadata/generation").is_none());
+        assert!(value.pointer("/metadata/selfLink").is_none());
+        assert!(value.get("status").is_none());
+    }
+
+    #[test]
+    fn resource_yaml_read_error_classifies_forbidden_and_missing() {
+        assert!(
+            resource_yaml_read_error(
+                "Deployment",
+                "app-prod",
+                "checkout-api",
+                &kube_api_error(403)
+            )
+            .contains("forbidden")
+        );
+        assert!(
+            resource_yaml_read_error(
+                "Deployment",
+                "app-prod",
+                "checkout-api",
+                &kube_api_error(404)
+            )
+            .contains("not found")
+        );
     }
 }
