@@ -10,6 +10,7 @@ use crate::model::{
 };
 use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, StatefulSet};
 use k8s_openapi::api::autoscaling::v2::HorizontalPodAutoscaler;
+use k8s_openapi::api::core::v1::Namespace;
 use k8s_openapi::api::core::v1::ResourceRequirements;
 use k8s_openapi::api::core::v1::{LimitRange, ResourceQuota};
 use k8s_openapi::api::policy::v1::PodDisruptionBudget;
@@ -27,6 +28,8 @@ const UPDATE_AGENT_ALLOWED_PREFIX: &str =
 const UPDATE_AGENT_NAMESPACE: &str = "sentinella";
 const UPDATE_AGENT_DAEMONSET: &str = "sentinella-hub-k8s-agent";
 const UPDATE_AGENT_CONTAINER: &str = "agent";
+pub(crate) const ACTION_MODE_NAMESPACE_LABEL: &str = "sentinella.io/action-mode";
+pub(crate) const ACTION_MODE_NAMESPACE_LABEL_ENABLED: &str = "enabled";
 
 pub struct Executor {
     cfg: Config,
@@ -204,6 +207,9 @@ impl Executor {
         spec: &WorkloadResourcesSpec,
         dry_run: bool,
     ) -> Result<ResourcePreview, String> {
+        self.ensure_namespace_action_mode_enabled(&spec.namespace)
+            .await?;
+
         let patch = build_workload_resources_patch(spec)?;
         let pp = if dry_run {
             PatchParams::default().dry_run()
@@ -291,6 +297,16 @@ impl Executor {
                 other
             )),
         }
+    }
+
+    async fn ensure_namespace_action_mode_enabled(&self, namespace: &str) -> Result<(), String> {
+        let api: Api<Namespace> = Api::all(self.client.clone());
+        let namespace = api
+            .get(namespace)
+            .await
+            .map_err(|e| format!("failed to get Namespace {}: {}", namespace, e))?;
+
+        namespace_action_mode_enabled(&namespace)
     }
 
     async fn collect_preflight_warnings(
@@ -665,6 +681,31 @@ fn update_agent_error(command_id: &str, message: String) -> CommandResult {
     result
 }
 
+fn namespace_action_mode_enabled(namespace: &Namespace) -> Result<(), String> {
+    let name = namespace.metadata.name.as_deref().unwrap_or("<unknown>");
+    let value = namespace
+        .metadata
+        .labels
+        .as_ref()
+        .and_then(|labels| labels.get(ACTION_MODE_NAMESPACE_LABEL))
+        .map(String::as_str);
+
+    if value == Some(ACTION_MODE_NAMESPACE_LABEL_ENABLED) {
+        return Ok(());
+    }
+
+    match value {
+        Some(found) => Err(format!(
+            "namespace {} is not enabled for Sentinella action mode: label {}={} is required",
+            name, ACTION_MODE_NAMESPACE_LABEL, found
+        )),
+        None => Err(format!(
+            "namespace {} is not enabled for Sentinella action mode: add label {}={}",
+            name, ACTION_MODE_NAMESPACE_LABEL, ACTION_MODE_NAMESPACE_LABEL_ENABLED
+        )),
+    }
+}
+
 fn validate_update_agent_image(image: &str) -> Result<String, String> {
     let image = image.trim();
     if image.is_empty() {
@@ -861,7 +902,7 @@ fn daemonset_pod_labels(workload: &DaemonSet) -> BTreeMap<String, String> {
         .unwrap_or_default()
 }
 
-fn label_selector_matches(
+pub(crate) fn label_selector_matches(
     selector: Option<&LabelSelector>,
     labels: &BTreeMap<String, String>,
 ) -> bool {
@@ -956,6 +997,20 @@ mod tests {
         serde_json::from_value(spec).unwrap()
     }
 
+    fn namespace_spec(labels: Option<Value>) -> Namespace {
+        let mut namespace: Namespace = serde_json::from_value(json!({
+            "apiVersion": "v1",
+            "kind": "Namespace",
+            "metadata": {
+                "name": "app-prod"
+            }
+        }))
+        .unwrap();
+
+        namespace.metadata.labels = labels.and_then(|value| serde_json::from_value(value).ok());
+        namespace
+    }
+
     #[test]
     fn build_workload_resources_patch_includes_named_container_only() {
         let spec = workload_spec(json!({
@@ -1018,6 +1073,41 @@ mod tests {
         assert_eq!(
             patch["spec"]["template"]["spec"]["containers"][0]["resources"]["limits"],
             Value::Null
+        );
+    }
+
+    #[test]
+    fn namespace_action_mode_enabled_accepts_enabled_label() {
+        let namespace = namespace_spec(Some(json!({
+            "sentinella.io/action-mode": "enabled"
+        })));
+
+        assert_eq!(namespace_action_mode_enabled(&namespace), Ok(()));
+    }
+
+    #[test]
+    fn namespace_action_mode_enabled_rejects_missing_label() {
+        let namespace = namespace_spec(None);
+
+        let err = namespace_action_mode_enabled(&namespace).unwrap_err();
+
+        assert_eq!(
+            err,
+            "namespace app-prod is not enabled for Sentinella action mode: add label sentinella.io/action-mode=enabled"
+        );
+    }
+
+    #[test]
+    fn namespace_action_mode_enabled_rejects_wrong_label_value() {
+        let namespace = namespace_spec(Some(json!({
+            "sentinella.io/action-mode": "disabled"
+        })));
+
+        let err = namespace_action_mode_enabled(&namespace).unwrap_err();
+
+        assert_eq!(
+            err,
+            "namespace app-prod is not enabled for Sentinella action mode: label sentinella.io/action-mode=disabled is required"
         );
     }
 

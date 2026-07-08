@@ -13,9 +13,10 @@ metadata:
   namespace: sentinella
 ---
 # Cluster-wide READ-ONLY permissions for inventory collection.
-# When ACTIONS_ENABLED=true, apply a separate ClusterRole/Binding scoped to
-# patch on apps/deployments, apps/statefulsets, and apps/daemonsets. Do not
-# expand this read-only role with mutating verbs.
+# Action Mode eligibility is namespace-label driven: namespaces must carry
+# sentinella.io/action-mode=enabled, and action RBAC is granted separately via
+# namespace-scoped Role/RoleBinding entries in the eligible namespaces.
+# Do not expand this read-only role with mutating verbs.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -79,6 +80,112 @@ rules:
       - volumesnapshots
     verbs: ["get", "list", "watch"]
 ---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: sentinellahubactionpolicies.sentinella.io
+spec:
+  group: sentinella.io
+  scope: Cluster
+  names:
+    plural: sentinellahubactionpolicies
+    singular: sentinellahubactionpolicy
+    kind: SentinellaHubActionPolicy
+    listKind: SentinellaHubActionPolicyList
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                namespaceSelector:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                allowedActions:
+                  type: array
+                  items:
+                    type: string
+                allowedResources:
+                  type: array
+                  items:
+                    type: string
+                approvalRequired:
+                  type: boolean
+                limits:
+                  type: object
+                  properties:
+                    maxCpuLimit:
+                      type: string
+                    maxMemoryLimit:
+                      type: string
+            status:
+              type: object
+              properties:
+                effectiveNamespaces:
+                  type: array
+                  items:
+                    type: string
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                observedGeneration:
+                  type: integer
+                  format: int64
+---
+# Operator RBAC: only used when ACTION_OPERATOR_ENABLED=true.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sentinella-hub-k8s-agent-action-operator
+rules:
+  - apiGroups: [""]
+    resources:
+      - namespaces
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources:
+      - rolebindings
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["sentinella.io"]
+    resources:
+      - sentinellahubactionpolicies
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: sentinella-hub-k8s-agent-action-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: sentinella-hub-k8s-agent-action-operator
+subjects:
+  - kind: ServiceAccount
+    name: sentinella-hub-k8s-agent
+    namespace: sentinella
+---
+# Action Mode RBAC: workload patch permissions for labeled namespaces.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sentinella-hub-k8s-agent-action-mode
+rules:
+  - apiGroups: ["apps"]
+    resources:
+      - deployments
+      - statefulsets
+      - daemonsets
+    verbs: ["get", "list", "watch", "patch"]
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
@@ -132,6 +239,8 @@ data:
   HTTP_TIMEOUT_SECS: "20"
   LEASE_TTL_SECS: "30"
   ACTIONS_ENABLED: "false"           # read-only by default
+  ACTION_OPERATOR_ENABLED: "false"    # opt-in; reconciles namespace RoleBindings for labeled namespaces that match a policy
+  ACTION_OPERATOR_POLL_INTERVAL_SECS: "60"  # reconcile interval when operator mode is enabled
   READONLY_COMMANDS_ENABLED: "false"  # opt-in; enables read-only diagnostic commands
   COLLECT_SECRETS: "false"           # requires separate secrets-reader RBAC when true
   COLLECT_DEPENDENCIES_TETRAGON: "false"  # opt-in; requires Tetragon with gRPC enabled

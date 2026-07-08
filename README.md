@@ -160,6 +160,12 @@ Example snapshot payload:
 
 `src/executor.rs` rejects every command while `ACTIONS_ENABLED=false`, before parsing the command spec. When actions are enabled, `preview_workload_resources` performs a server-side dry-run, `apply_workload_resources` performs a live strategic-merge patch, `self_update` triggers an immediate agent restart, and `update_agent` updates the fixed agent DaemonSet image.
 
+For Action Mode, the target namespace must also carry the label `sentinella.io/action-mode=enabled`; the executor rejects workload patch commands when the label is missing or set to another value.
+
+The Phase 3 operator path is opt-in via `ACTION_OPERATOR_ENABLED=true`. When enabled, the agent reconciles namespace-scoped `RoleBinding`s for namespaces that are both labeled `sentinella.io/action-mode=enabled` and selected by a matching cluster-scoped `SentinellaHubActionPolicy`.
+
+`SentinellaHubActionPolicy` currently uses `namespaceSelector` for eligibility. The `allowedActions`, `allowedResources`, and `limits` fields are reserved for later policy enforcement and are documented in the CRD, but the current operator scaffold does not enforce them yet.
+
 #### Commands: setting requests and limits
 
 Two command kinds form the resource-patch flow:
@@ -234,7 +240,7 @@ Warning strings use stable code prefixes for Hub-side grouping:
   verbs: ["patch"]
 ```
 
-This must be a separate ClusterRole/Binding applied only when `ACTIONS_ENABLED=true`. The read-only ClusterRole stays untouched. **No `*` on `*/*`**. The root `agent.yaml` does not grant this workload patch RBAC by default.
+This must be a separate ClusterRole/Binding applied only when `ACTIONS_ENABLED=true`. The read-only ClusterRole stays untouched. **No `*` on `*/*`**. The root `agent.yaml` does not grant this workload patch RBAC by default. Eligible namespaces must also be labeled `sentinella.io/action-mode=enabled`; the agent checks that label before patching.
 
 Pre-flight warning checks are also best-effort. Without additional read permissions for HPAs, VPAs, LimitRanges, ResourceQuotas, and PDBs, preview still succeeds but includes `preflight.check.unavailable` warnings for the checks the agent cannot evaluate.
 
