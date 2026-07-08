@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v1.2.0...v1.3.0) (2026-07-08)
+
+
+### Features
+
+* add operator exclusions and command contracts ([#161](https://github.com/thesentinella/hub-kubernetes-agent/issues/161)) ([ecd6f7d](https://github.com/thesentinella/hub-kubernetes-agent/commit/ecd6f7dc7505f8c17ab93e776ee661036d2ed49a))
+
 ## [1.2.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v1.1.0...v1.2.0) (2026-07-08)
 
 
