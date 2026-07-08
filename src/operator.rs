@@ -4,7 +4,8 @@ use crate::executor::{
 };
 use crate::model::{
     SentinellaHubActionPolicy, SentinellaHubActionPolicyCondition, SentinellaHubActionPolicyStatus,
-    policy_status_is_stale,
+    policy_action_is_supported, policy_action_targets_workload, policy_limits_are_valid,
+    policy_resource_is_supported, policy_status_is_stale,
 };
 use anyhow::{Context, Result};
 use k8s_openapi::api::core::v1::Namespace;
@@ -369,6 +370,28 @@ fn build_policy_status(
     let namespaces_eligible = !effective_namespaces.is_empty();
     let permission_granted = namespaces_eligible && binding_outcome.permission_granted;
     let reconciliation_error = binding_outcome.reconciliation_error.clone();
+    let action_allowed = policy
+        .spec
+        .allowed_actions
+        .iter()
+        .all(|action| policy_action_is_supported(action))
+        && !policy.spec.allowed_actions.is_empty();
+    let resource_allowed = if policy
+        .spec
+        .allowed_actions
+        .iter()
+        .any(|action| policy_action_targets_workload(action))
+    {
+        !policy.spec.allowed_resources.is_empty()
+            && policy
+                .spec
+                .allowed_resources
+                .iter()
+                .all(|resource| policy_resource_is_supported(resource))
+    } else {
+        true
+    };
+    let limits_satisfied = policy_limits_are_valid(&policy.spec.limits);
     let stale = policy_status_is_stale(
         policy
             .status
@@ -380,6 +403,9 @@ fn build_policy_status(
     let ready = policy_matched
         && namespaces_eligible
         && permission_granted
+        && action_allowed
+        && resource_allowed
+        && limits_satisfied
         && !stale
         && reconciliation_error.is_none();
 
@@ -390,6 +416,9 @@ fn build_policy_status(
             policy_matched,
             namespaces_eligible,
             permission_granted,
+            action_allowed,
+            resource_allowed,
+            limits_satisfied,
             reconciliation_error.as_deref(),
             stale,
             ready,
@@ -407,6 +436,9 @@ fn build_policy_conditions(
     policy_matched: bool,
     namespaces_eligible: bool,
     permission_granted: bool,
+    action_allowed: bool,
+    resource_allowed: bool,
+    limits_satisfied: bool,
     reconciliation_error: Option<&str>,
     stale: bool,
     ready: bool,
@@ -458,6 +490,54 @@ fn build_policy_conditions(
                 Some("Managed RoleBindings were reconciled successfully".into())
             } else {
                 Some("Managed RoleBindings are not fully reconciled".into())
+            },
+            observed_generation,
+            now_ms,
+        ),
+        policy_condition(
+            "ActionAllowed",
+            action_allowed,
+            if action_allowed {
+                Some("action_allowed")
+            } else {
+                Some("action_not_allowed")
+            },
+            if action_allowed {
+                Some("At least one declared action is supported".into())
+            } else {
+                Some("No supported actions are declared".into())
+            },
+            observed_generation,
+            now_ms,
+        ),
+        policy_condition(
+            "ResourceAllowed",
+            resource_allowed,
+            if resource_allowed {
+                Some("resource_allowed")
+            } else {
+                Some("resource_not_allowed")
+            },
+            if resource_allowed {
+                Some("Declared resources are compatible with declared actions".into())
+            } else {
+                Some("Declared resources do not permit the declared actions".into())
+            },
+            observed_generation,
+            now_ms,
+        ),
+        policy_condition(
+            "LimitsSatisfied",
+            limits_satisfied,
+            if limits_satisfied {
+                Some("limits_satisfied")
+            } else {
+                Some("limits_exceeded")
+            },
+            if limits_satisfied {
+                Some("Declared limits are valid".into())
+            } else {
+                Some("Declared limits are invalid".into())
             },
             observed_generation,
             now_ms,
@@ -540,6 +620,7 @@ fn now_ms() -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::SentinellaHubActionPolicyLimits;
     use serde_json::{Value, json};
     use std::sync::{Arc, Mutex};
 
@@ -561,8 +642,8 @@ mod tests {
             "metadata": { "name": name },
             "spec": {
                 "namespaceSelector": selector,
-                "allowedActions": ["patchWorkloadResources"],
-                "allowedResources": ["deployments"],
+                "allowedActions": ["rollout_restart", "scale", "preview_workload_resources", "apply_workload_resources", "self_update", "update_agent", "diagnose_postgresql"],
+                "allowedResources": ["Deployment", "StatefulSet", "DaemonSet"],
                 "approvalRequired": true
             }
         }))
@@ -603,6 +684,9 @@ mod tests {
             true,
             true,
             reconciliation_error.is_none(),
+            true,
+            true,
+            true,
             reconciliation_error,
             stale,
             ready,
@@ -645,6 +729,18 @@ mod tests {
 
         assert_eq!(status.effective_namespaces, vec!["app-prod"]);
         assert_eq!(condition_status(&status.conditions, "Ready"), "True");
+        assert_eq!(
+            condition_status(&status.conditions, "ActionAllowed"),
+            "True"
+        );
+        assert_eq!(
+            condition_status(&status.conditions, "ResourceAllowed"),
+            "True"
+        );
+        assert_eq!(
+            condition_status(&status.conditions, "LimitsSatisfied"),
+            "True"
+        );
         assert_eq!(condition_status(&status.conditions, "Stale"), "False");
         assert_eq!(
             condition_status(&status.conditions, "PermissionGranted"),
@@ -750,6 +846,108 @@ mod tests {
 
         assert_eq!(
             condition_status(&status.conditions, "NamespacesEligible"),
+            "False"
+        );
+        assert_eq!(condition_status(&status.conditions, "Ready"), "False");
+    }
+
+    #[test]
+    fn build_policy_status_marks_not_ready_when_action_is_not_allowed() {
+        let namespaces = vec![namespace(Some(json!({
+            ACTION_MODE_NAMESPACE_LABEL: ACTION_MODE_NAMESPACE_LABEL_ENABLED,
+            "environment": "prod"
+        })))];
+        let mut policy = policy(json!({
+            "matchLabels": {"environment": "prod"}
+        }));
+        policy.spec.allowed_actions = vec!["bogus_action".into()];
+        policy.status = Some(SentinellaHubActionPolicyStatus {
+            effective_namespaces: Vec::new(),
+            conditions: Vec::new(),
+            observed_generation: Some(1),
+            last_reconciled_at_ms: Some(900),
+            stale: false,
+        });
+
+        let status = build_policy_status(
+            &policy,
+            &namespaces,
+            &binding_outcome(true, None),
+            1000,
+            150,
+        );
+
+        assert_eq!(
+            condition_status(&status.conditions, "ActionAllowed"),
+            "False"
+        );
+        assert_eq!(condition_status(&status.conditions, "Ready"), "False");
+    }
+
+    #[test]
+    fn build_policy_status_marks_not_ready_when_resource_is_not_allowed() {
+        let namespaces = vec![namespace(Some(json!({
+            ACTION_MODE_NAMESPACE_LABEL: ACTION_MODE_NAMESPACE_LABEL_ENABLED,
+            "environment": "prod"
+        })))];
+        let mut policy = policy(json!({
+            "matchLabels": {"environment": "prod"}
+        }));
+        policy.spec.allowed_resources = vec!["ConfigMap".into()];
+        policy.status = Some(SentinellaHubActionPolicyStatus {
+            effective_namespaces: Vec::new(),
+            conditions: Vec::new(),
+            observed_generation: Some(1),
+            last_reconciled_at_ms: Some(900),
+            stale: false,
+        });
+
+        let status = build_policy_status(
+            &policy,
+            &namespaces,
+            &binding_outcome(true, None),
+            1000,
+            150,
+        );
+
+        assert_eq!(
+            condition_status(&status.conditions, "ResourceAllowed"),
+            "False"
+        );
+        assert_eq!(condition_status(&status.conditions, "Ready"), "False");
+    }
+
+    #[test]
+    fn build_policy_status_marks_not_ready_when_limits_are_invalid() {
+        let namespaces = vec![namespace(Some(json!({
+            ACTION_MODE_NAMESPACE_LABEL: ACTION_MODE_NAMESPACE_LABEL_ENABLED,
+            "environment": "prod"
+        })))];
+        let mut policy = policy(json!({
+            "matchLabels": {"environment": "prod"}
+        }));
+        policy.spec.limits = Some(SentinellaHubActionPolicyLimits {
+            max_cpu_limit: Some("bogus".into()),
+            max_memory_limit: Some("1Gi".into()),
+        });
+        policy.status = Some(SentinellaHubActionPolicyStatus {
+            effective_namespaces: Vec::new(),
+            conditions: Vec::new(),
+            observed_generation: Some(1),
+            last_reconciled_at_ms: Some(900),
+            stale: false,
+        });
+
+        let status = build_policy_status(
+            &policy,
+            &namespaces,
+            &binding_outcome(true, None),
+            1000,
+            150,
+        );
+
+        assert_eq!(
+            condition_status(&status.conditions, "LimitsSatisfied"),
             "False"
         );
         assert_eq!(condition_status(&status.conditions, "Ready"), "False");
