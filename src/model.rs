@@ -821,6 +821,8 @@ pub struct SentinellaHubActionPolicyStatus {
     pub observed_generation: Option<i64>,
     #[serde(default)]
     pub last_reconciled_at_ms: Option<u128>,
+    #[serde(default)]
+    pub stale: bool,
 }
 
 /// Spec payload for `self_update`.

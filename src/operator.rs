@@ -55,6 +55,11 @@ async fn reconcile_action_policies(cfg: &Config, client: &Client) -> Result<()> 
     let policies = list_policies(client).await?;
     let binding_outcome = reconcile_action_role_bindings(client, &namespaces, &policies).await?;
     let now = now_ms();
+    let stale_after_ms = cfg
+        .action_operator_poll_interval
+        .checked_mul(3)
+        .unwrap_or(cfg.action_operator_poll_interval)
+        .as_millis();
 
     for policy in &policies {
         let Some(name) = policy.metadata.name.as_deref() else {
@@ -66,7 +71,14 @@ async fn reconcile_action_policies(cfg: &Config, client: &Client) -> Result<()> 
         let namespaces_eligible = !effective_namespaces.is_empty();
         let permission_granted = namespaces_eligible && binding_outcome.permission_granted;
         let reconciliation_error = binding_outcome.reconciliation_error.clone();
-        let stale = false;
+        let stale = policy_status_is_stale(
+            policy
+                .status
+                .as_ref()
+                .and_then(|status| status.last_reconciled_at_ms),
+            now,
+            stale_after_ms,
+        );
         let ready = policy_matched
             && namespaces_eligible
             && permission_granted
@@ -87,6 +99,7 @@ async fn reconcile_action_policies(cfg: &Config, client: &Client) -> Result<()> 
             ),
             observed_generation: policy.metadata.generation,
             last_reconciled_at_ms: Some(now),
+            stale,
         };
 
         if let Err(err) = patch_policy_status(client, name, status).await {
@@ -276,6 +289,19 @@ async fn remove_action_role_binding(client: &Client, namespace: &str) -> Result<
     }
 
     Ok(())
+}
+
+fn policy_status_is_stale(
+    last_reconciled_at_ms: Option<u128>,
+    now_ms: u128,
+    stale_after_ms: u128,
+) -> bool {
+    match last_reconciled_at_ms {
+        Some(last_reconciled_at_ms) => {
+            now_ms.saturating_sub(last_reconciled_at_ms) > stale_after_ms
+        }
+        None => true,
+    }
 }
 
 fn desired_action_role_binding(namespace: &str) -> Result<RoleBinding> {
@@ -475,6 +501,35 @@ mod tests {
         .unwrap()
     }
 
+    fn ready_conditions(
+        stale: bool,
+        ready: bool,
+        reconciliation_error: Option<&str>,
+    ) -> Vec<SentinellaHubActionPolicyCondition> {
+        let policy = policy(json!({
+            "matchLabels": {"environment": "prod"}
+        }));
+
+        build_policy_conditions(
+            &policy,
+            true,
+            true,
+            reconciliation_error.is_none(),
+            reconciliation_error,
+            stale,
+            ready,
+            1234,
+        )
+    }
+
+    fn condition_status(conditions: &[SentinellaHubActionPolicyCondition], name: &str) -> String {
+        conditions
+            .iter()
+            .find(|condition| condition.type_ == name)
+            .map(|condition| condition.status.clone())
+            .unwrap_or_default()
+    }
+
     #[test]
     fn namespace_is_eligible_requires_label_and_matching_policy() {
         let labeled = namespace(Some(json!({
@@ -505,6 +560,46 @@ mod tests {
         let policies = vec![policy(json!({}))];
 
         assert!(!policy_matches_namespace(&policies[0], &labeled));
+    }
+
+    #[test]
+    fn policy_status_is_fresh_when_timestamp_is_recent() {
+        assert!(!policy_status_is_stale(Some(900), 1000, 150));
+    }
+
+    #[test]
+    fn policy_status_is_stale_when_timestamp_exceeds_window() {
+        assert!(policy_status_is_stale(Some(800), 1000, 150));
+    }
+
+    #[test]
+    fn build_policy_conditions_marks_ready_when_all_gates_pass() {
+        let conditions = ready_conditions(false, true, None);
+
+        assert_eq!(condition_status(&conditions, "Ready"), "True");
+        assert_eq!(condition_status(&conditions, "Stale"), "False");
+        assert_eq!(condition_status(&conditions, "PermissionGranted"), "True");
+        assert_eq!(
+            condition_status(&conditions, "ReconciliationError"),
+            "False"
+        );
+    }
+
+    #[test]
+    fn build_policy_conditions_marks_not_ready_on_rbac_error() {
+        let conditions = ready_conditions(false, false, Some("rbac denied"));
+
+        assert_eq!(condition_status(&conditions, "Ready"), "False");
+        assert_eq!(condition_status(&conditions, "PermissionGranted"), "False");
+        assert_eq!(condition_status(&conditions, "ReconciliationError"), "True");
+    }
+
+    #[test]
+    fn build_policy_conditions_marks_not_ready_when_stale() {
+        let conditions = ready_conditions(true, false, None);
+
+        assert_eq!(condition_status(&conditions, "Ready"), "False");
+        assert_eq!(condition_status(&conditions, "Stale"), "True");
     }
 
     #[test]
