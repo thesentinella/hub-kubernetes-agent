@@ -875,6 +875,112 @@ pub fn policy_status_is_stale(
     }
 }
 
+pub const ACTION_POLICY_SUPPORTED_ACTIONS: &[&str] = &[
+    "diagnose_postgresql",
+    "preview_workload_resources",
+    "apply_workload_resources",
+    "rollout_restart",
+    "scale",
+    "self_update",
+    "update_agent",
+];
+
+pub const ACTION_POLICY_WORKLOAD_ACTIONS: &[&str] = &[
+    "preview_workload_resources",
+    "apply_workload_resources",
+    "rollout_restart",
+    "scale",
+];
+
+pub const ACTION_POLICY_SUPPORTED_RESOURCES: &[&str] = &["Deployment", "StatefulSet", "DaemonSet"];
+
+pub fn policy_action_is_supported(action: &str) -> bool {
+    ACTION_POLICY_SUPPORTED_ACTIONS.contains(&action)
+}
+
+pub fn policy_action_targets_workload(action: &str) -> bool {
+    ACTION_POLICY_WORKLOAD_ACTIONS.contains(&action)
+}
+
+pub fn policy_resource_is_supported(resource: &str) -> bool {
+    ACTION_POLICY_SUPPORTED_RESOURCES.contains(&resource)
+}
+
+pub fn parse_cpu_quantity(quantity: &str) -> Option<i128> {
+    parse_scaled_decimal(
+        quantity,
+        &[
+            ("n", 1),
+            ("u", 1_000),
+            ("m", 1_000_000),
+            ("", 1_000_000_000),
+        ],
+    )
+}
+
+pub fn parse_memory_quantity(quantity: &str) -> Option<i128> {
+    parse_scaled_decimal(
+        quantity,
+        &[
+            ("Ki", 1024),
+            ("Mi", 1024_i128.pow(2)),
+            ("Gi", 1024_i128.pow(3)),
+            ("Ti", 1024_i128.pow(4)),
+            ("Pi", 1024_i128.pow(5)),
+            ("Ei", 1024_i128.pow(6)),
+            ("k", 1_000),
+            ("M", 1_000_000),
+            ("G", 1_000_000_000),
+            ("T", 1_000_000_000_000),
+            ("P", 1_000_000_000_000_000),
+            ("E", 1_000_000_000_000_000_000),
+            ("", 1),
+        ],
+    )
+}
+
+pub fn policy_limits_are_valid(limits: &Option<SentinellaHubActionPolicyLimits>) -> bool {
+    let Some(limits) = limits else {
+        return true;
+    };
+
+    limits
+        .max_cpu_limit
+        .as_deref()
+        .is_none_or(|value| parse_cpu_quantity(value).is_some())
+        && limits
+            .max_memory_limit
+            .as_deref()
+            .is_none_or(|value| parse_memory_quantity(value).is_some())
+}
+
+fn parse_scaled_decimal(quantity: &str, suffixes: &[(&str, i128)]) -> Option<i128> {
+    for (suffix, scale) in suffixes {
+        if let Some(number) = quantity.strip_suffix(suffix) {
+            if suffix.is_empty() || !number.is_empty() {
+                return parse_decimal_scaled(number, *scale);
+            }
+        }
+    }
+    None
+}
+
+fn parse_decimal_scaled(number: &str, scale: i128) -> Option<i128> {
+    let trimmed = number.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let (whole, frac) = trimmed.split_once('.').unwrap_or((trimmed, ""));
+    let whole_value = whole.parse::<i128>().ok()?;
+    let mut total = whole_value.checked_mul(scale)?;
+    if !frac.is_empty() {
+        let frac_value = frac.parse::<i128>().ok()?;
+        let denom = 10_i128.checked_pow(frac.len() as u32)?;
+        total = total.checked_add(frac_value.checked_mul(scale)?.checked_div(denom)?)?;
+    }
+    Some(total)
+}
+
 /// Spec payload for `self_update`.
 ///
 /// This command requests an immediate process restart so Kubernetes can

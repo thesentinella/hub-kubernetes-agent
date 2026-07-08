@@ -7,8 +7,10 @@ use crate::config::Config;
 use crate::model::{
     ActionVerification, Command, CommandResult, ExecutionMode, PostgresqlDiagnosticSpec,
     ResourceMap, RolloutRestartSpec, ScaleSpec, SelfUpdateSpec, SentinellaHubActionPolicy,
-    SentinellaHubActionPolicyCondition, SentinellaHubActionPolicyStatus, UpdateAgentSpec,
-    WorkloadResourcesSpec, WorkloadTargetRef, policy_status_is_stale,
+    SentinellaHubActionPolicyCondition, SentinellaHubActionPolicyLimits,
+    SentinellaHubActionPolicyStatus, UpdateAgentSpec, WorkloadResourcesSpec, WorkloadTargetRef,
+    parse_cpu_quantity, parse_memory_quantity, policy_action_is_supported,
+    policy_action_targets_workload, policy_resource_is_supported, policy_status_is_stale,
 };
 use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, StatefulSet};
 use k8s_openapi::api::autoscaling::v2::HorizontalPodAutoscaler;
@@ -54,6 +56,7 @@ static COMMAND_DEDUP: Lazy<Mutex<CommandDedupState>> =
 #[allow(dead_code)]
 struct EffectivePolicy {
     name: String,
+    policy: SentinellaHubActionPolicy,
     status: SentinellaHubActionPolicyStatus,
 }
 
@@ -274,7 +277,17 @@ impl Executor {
         spec: &WorkloadResourcesSpec,
         dry_run: bool,
     ) -> Result<ResourcePreview, String> {
-        self.ensure_effective_policy_ready(&spec.namespace).await?;
+        self.ensure_effective_policy_allows(
+            &spec.namespace,
+            if dry_run {
+                "preview_workload_resources"
+            } else {
+                "apply_workload_resources"
+            },
+            Some(spec.workload_kind.as_str()),
+            Some(spec),
+        )
+        .await?;
 
         let patch = build_workload_resources_patch(spec)?;
         let pp = if dry_run {
@@ -592,7 +605,12 @@ impl Executor {
 
     async fn rollout_restart(&self, command_id: &str, spec: RolloutRestartSpec) -> CommandResult {
         if let Err(message) = self
-            .ensure_effective_policy_ready(&spec.target.namespace)
+            .ensure_effective_policy_allows(
+                &spec.target.namespace,
+                "rollout_restart",
+                Some(spec.target.kind.as_str()),
+                None,
+            )
             .await
         {
             return command_error(command_id, spec.execution.mode, message);
@@ -676,7 +694,12 @@ impl Executor {
 
     async fn scale_workload(&self, command_id: &str, spec: ScaleSpec) -> CommandResult {
         if let Err(message) = self
-            .ensure_effective_policy_ready(&spec.target.namespace)
+            .ensure_effective_policy_allows(
+                &spec.target.namespace,
+                "scale",
+                Some(spec.target.kind.as_str()),
+                None,
+            )
             .await
         {
             return command_error(command_id, spec.execution.mode, message);
@@ -856,6 +879,87 @@ impl Executor {
 
             return Ok(EffectivePolicy {
                 name: policy_name,
+                policy,
+                status,
+            });
+        }
+
+        Err(format!(
+            "namespace {} is not eligible for action: {}",
+            namespace,
+            if reasons.is_empty() {
+                "no Ready policy matched the namespace".into()
+            } else {
+                reasons.join("; ")
+            }
+        ))
+    }
+
+    async fn ensure_effective_policy_allows(
+        &self,
+        namespace: &str,
+        command_kind: &str,
+        target_kind: Option<&str>,
+        resource_spec: Option<&WorkloadResourcesSpec>,
+    ) -> Result<EffectivePolicy, String> {
+        let policies = self.list_action_policies().await?;
+        let stale_after = self
+            .cfg
+            .action_operator_poll_interval
+            .checked_mul(3)
+            .unwrap_or(self.cfg.action_operator_poll_interval);
+        let stale_after_ms = stale_after.as_millis();
+        let now = now_ms();
+
+        let mut reasons = Vec::new();
+        for policy in policies {
+            let Some(policy_name) = policy.metadata.name.clone() else {
+                continue;
+            };
+            let Some(status) = policy.status.clone() else {
+                reasons.push(format!("policy {} has no status", policy_name));
+                continue;
+            };
+
+            let Some(last_reconciled_at_ms) = status.last_reconciled_at_ms else {
+                reasons.push(format!(
+                    "policy {} status has no freshness timestamp",
+                    policy_name
+                ));
+                continue;
+            };
+
+            if policy_status_is_stale(Some(last_reconciled_at_ms), now, stale_after_ms) {
+                reasons.push(format!("policy {} status is stale", policy_name));
+                continue;
+            }
+
+            if !condition_true(&status.conditions, "Ready") {
+                reasons.push(format!("policy {} is not Ready", policy_name));
+                continue;
+            }
+
+            if !status
+                .effective_namespaces
+                .iter()
+                .any(|candidate| candidate == namespace)
+            {
+                continue;
+            }
+
+            if let Some(reason) = Self::policy_rejection_reason_for_command(
+                &policy,
+                command_kind,
+                target_kind,
+                resource_spec,
+            ) {
+                reasons.push(format!("policy {} {}", policy_name, reason));
+                continue;
+            }
+
+            return Ok(EffectivePolicy {
+                name: policy_name,
+                policy,
                 status,
             });
         }
@@ -893,6 +997,162 @@ impl Executor {
         }
 
         Ok(out)
+    }
+
+    fn policy_rejection_reason_for_command(
+        policy: &SentinellaHubActionPolicy,
+        command_kind: &str,
+        target_kind: Option<&str>,
+        resource_spec: Option<&WorkloadResourcesSpec>,
+    ) -> Option<String> {
+        if !policy
+            .spec
+            .allowed_actions
+            .iter()
+            .all(|action| policy_action_is_supported(action))
+            || policy.spec.allowed_actions.is_empty()
+        {
+            return Some("does not declare any supported actions".into());
+        }
+
+        if !policy
+            .spec
+            .allowed_actions
+            .iter()
+            .any(|action| action == command_kind)
+        {
+            return Some(format!("does not allow action {}", command_kind));
+        }
+
+        if policy_action_targets_workload(command_kind) {
+            let Some(target_kind) = target_kind else {
+                return Some("is missing a workload target kind".into());
+            };
+
+            if !policy
+                .spec
+                .allowed_resources
+                .iter()
+                .all(|resource| policy_resource_is_supported(resource))
+                || policy.spec.allowed_resources.is_empty()
+            {
+                return Some("does not declare any supported workload resources".into());
+            }
+
+            if !policy
+                .spec
+                .allowed_resources
+                .iter()
+                .any(|resource| resource == target_kind)
+            {
+                return Some(format!("does not allow resource {}", target_kind));
+            }
+        }
+
+        if matches!(
+            command_kind,
+            "preview_workload_resources" | "apply_workload_resources"
+        ) {
+            let Some(spec) = resource_spec else {
+                return Some("is missing a workload resources spec".into());
+            };
+
+            if let Some(reason) =
+                Self::policy_limits_violation_reason(policy.spec.limits.as_ref(), spec)
+            {
+                return Some(reason);
+            }
+        }
+
+        None
+    }
+
+    fn policy_limits_violation_reason(
+        limits: Option<&SentinellaHubActionPolicyLimits>,
+        spec: &WorkloadResourcesSpec,
+    ) -> Option<String> {
+        let limits = limits?;
+
+        let mut violations = Vec::new();
+        if let Some(cpu_limit) = limits.max_cpu_limit.as_deref() {
+            if let Some(requests) = &spec.requests {
+                if let Some(cpu) = requests.cpu.as_deref() {
+                    if let Some(reason) = Self::quantity_exceeds_limit(
+                        "cpu request",
+                        cpu,
+                        cpu_limit,
+                        parse_cpu_quantity,
+                    ) {
+                        violations.push(reason);
+                    }
+                }
+            }
+            if let Some(limits_map) = &spec.limits {
+                if let Some(cpu) = limits_map.cpu.as_deref() {
+                    if let Some(reason) = Self::quantity_exceeds_limit(
+                        "cpu limit",
+                        cpu,
+                        cpu_limit,
+                        parse_cpu_quantity,
+                    ) {
+                        violations.push(reason);
+                    }
+                }
+            }
+        }
+
+        if let Some(memory_limit) = limits.max_memory_limit.as_deref() {
+            if let Some(requests) = &spec.requests {
+                if let Some(memory) = requests.memory.as_deref() {
+                    if let Some(reason) = Self::quantity_exceeds_limit(
+                        "memory request",
+                        memory,
+                        memory_limit,
+                        parse_memory_quantity,
+                    ) {
+                        violations.push(reason);
+                    }
+                }
+            }
+            if let Some(limits_map) = &spec.limits {
+                if let Some(memory) = limits_map.memory.as_deref() {
+                    if let Some(reason) = Self::quantity_exceeds_limit(
+                        "memory limit",
+                        memory,
+                        memory_limit,
+                        parse_memory_quantity,
+                    ) {
+                        violations.push(reason);
+                    }
+                }
+            }
+        }
+
+        if violations.is_empty() {
+            None
+        } else {
+            Some(format!("limits exceeded: {}", violations.join(", ")))
+        }
+    }
+
+    fn quantity_exceeds_limit(
+        label: &str,
+        quantity: &str,
+        limit: &str,
+        parse: fn(&str) -> Option<i128>,
+    ) -> Option<String> {
+        let quantity_value = parse(quantity).or(Some(i128::MIN))?;
+        let limit_value = parse(limit).or(Some(i128::MIN))?;
+
+        if quantity_value == i128::MIN {
+            Some(format!("{} {} is not a valid quantity", label, quantity))
+        } else if limit_value == i128::MIN {
+            Some(format!("policy limit {} is not a valid quantity", limit))
+        } else if quantity_value > limit_value {
+            Some(format!("{} {} exceeds max {}", label, quantity, limit))
+        } else {
+            None
+        }
     }
 
     fn policy_status_rejection_reason(
@@ -1172,146 +1432,15 @@ impl Executor {
         }))
     }
 
-    async fn scale_workload_dup(&self, command_id: &str, spec: ScaleSpec) -> CommandResult {
-        if let Err(message) = self
-            .ensure_effective_policy_ready(&spec.target.namespace)
-            .await
-        {
-            return command_error(command_id, spec.execution.mode, message);
-        }
-
-        if spec.replicas < 0 {
-            return command_error(
-                command_id,
-                spec.execution.mode,
-                "scale replicas must be greater than or equal to 0".into(),
-            );
-        }
-
-        if spec.target.kind != "Deployment" {
-            return command_error(
-                command_id,
-                spec.execution.mode,
-                format!(
-                    "unsupported scale target kind {}; expected Deployment",
-                    spec.target.kind
-                ),
-            );
-        }
-
-        let api: Api<Deployment> = Api::namespaced(self.client.clone(), &spec.target.namespace);
-        let before = match api.get(&spec.target.name).await {
-            Ok(workload) => workload,
-            Err(e) => {
-                return command_error(
-                    command_id,
-                    spec.execution.mode,
-                    format!("failed to get Deployment {}: {}", spec.target.name, e),
-                );
-            }
-        };
-        let before_scale = match api.get_scale(&spec.target.name).await {
-            Ok(scale) => scale,
-            Err(e) => {
-                return command_error(
-                    command_id,
-                    spec.execution.mode,
-                    format!(
-                        "failed to get scale for Deployment {}: {}",
-                        spec.target.name, e
-                    ),
-                );
-            }
-        };
-
-        let requested_state = json!({
-            "execution": {"mode": spec.execution.mode},
-            "target": {
-                "kind": spec.target.kind,
-                "namespace": spec.target.namespace,
-                "name": spec.target.name,
-            },
-            "replicas": spec.replicas,
-        });
-
-        let mut result = CommandResult::simple(command_id.to_string(), "ok", None);
-        result.requested_state = Some(requested_state);
-        result.observed_before = Some(json!({
-            "replicas": before_scale.spec.as_ref().map(|s| s.replicas).unwrap_or_default(),
-            "ready_replicas": before.status.as_ref().map(|s| s.ready_replicas).unwrap_or_default(),
-            "available_replicas": before.status.as_ref().map(|s| s.available_replicas).unwrap_or_default(),
-        }));
-
-        let patch = json!({"spec": {"replicas": spec.replicas}});
-        let dry_run = match api
-            .patch_scale(
-                &spec.target.name,
-                &PatchParams::default().dry_run(),
-                &Patch::Merge(&patch),
-            )
-            .await
-        {
-            Ok(scale) => scale,
-            Err(e) => {
-                return command_error(
-                    command_id,
-                    spec.execution.mode,
-                    format!(
-                        "scale dry-run failed for Deployment {}: {}",
-                        spec.target.name, e
-                    ),
-                );
-            }
-        };
-        result.applied_patch = Some(json!({"spec": {"replicas": spec.replicas}}));
-        result.dry_run = Some(true);
-        result.observed_after = Some(json!({
-            "desired_replicas": dry_run.spec.as_ref().map(|s| s.replicas).unwrap_or_default(),
-            "current_replicas": dry_run.status.as_ref().map(|s| s.replicas).unwrap_or_default(),
-        }));
-
-        if matches!(spec.execution.mode, ExecutionMode::Preview) {
-            return result;
-        }
-
-        let applied = match api
-            .patch_scale(
-                &spec.target.name,
-                &PatchParams::default(),
-                &Patch::Merge(&patch),
-            )
-            .await
-        {
-            Ok(scale) => scale,
-            Err(e) => {
-                return command_error(
-                    command_id,
-                    spec.execution.mode,
-                    format!(
-                        "scale apply failed for Deployment {}: {}",
-                        spec.target.name, e
-                    ),
-                );
-            }
-        };
-
-        result.dry_run = Some(false);
-        result.observed_after = Some(json!({
-            "desired_replicas": applied.spec.as_ref().map(|s| s.replicas).unwrap_or_default(),
-            "current_replicas": applied.status.as_ref().map(|s| s.replicas).unwrap_or_default(),
-        }));
-        result.verification = Some(ActionVerification {
-            status: "accepted".into(),
-            message: Some("scale request applied; stabilization is tracked separately".into()),
-            observed_state: Some(json!({
-                "desired_replicas": applied.spec.as_ref().map(|s| s.replicas).unwrap_or_default(),
-                "current_replicas": applied.status.as_ref().map(|s| s.replicas).unwrap_or_default(),
-            })),
-        });
-        result
-    }
-
     async fn self_update(&self, command_id: &str, spec: SelfUpdateSpec) -> CommandResult {
+        let namespace = UPDATE_AGENT_NAMESPACE;
+        if let Err(message) = self
+            .ensure_effective_policy_allows(namespace, "self_update", None, None)
+            .await
+        {
+            return command_error(command_id, ExecutionMode::Execute, message);
+        }
+
         info!(command_id, "self_update: restart requested");
         let strategy = spec.strategy.unwrap_or_else(|| "restart_pod".into());
         let target = spec.target_version.as_deref().unwrap_or("<unspecified>");
@@ -1330,6 +1459,13 @@ impl Executor {
     }
 
     async fn update_agent(&self, command_id: &str, spec: UpdateAgentSpec) -> CommandResult {
+        if let Err(message) = self
+            .ensure_effective_policy_allows(UPDATE_AGENT_NAMESPACE, "update_agent", None, None)
+            .await
+        {
+            return update_agent_error(command_id, message);
+        }
+
         let image = match validate_update_agent_image(&spec.image) {
             Ok(image) => image,
             Err(message) => {
@@ -1454,6 +1590,13 @@ impl Executor {
         command_id: &str,
         spec: PostgresqlDiagnosticSpec,
     ) -> CommandResult {
+        if let Err(message) = self
+            .ensure_effective_policy_allows(&spec.namespace, "diagnose_postgresql", None, None)
+            .await
+        {
+            return command_error(command_id, ExecutionMode::Execute, message);
+        }
+
         info!(command_id, namespace = %spec.namespace, "diagnose_postgresql: collecting read-only diagnostics");
         let report = crate::plugins::diagnose_postgresql(&self.client, &self.cfg, &spec).await;
         let mut result = CommandResult::simple(command_id.to_string(), "ok", None);
@@ -1863,6 +2006,30 @@ mod tests {
         namespace
     }
 
+    fn policy_for_gating(
+        actions: Vec<&str>,
+        resources: Vec<&str>,
+        limits: Option<Value>,
+    ) -> SentinellaHubActionPolicy {
+        serde_json::from_value(json!({
+            "apiVersion": "sentinella.io/v1alpha1",
+            "kind": "SentinellaHubActionPolicy",
+            "metadata": { "name": "policy" },
+            "spec": {
+                "namespaceSelector": {"matchLabels": {"environment": "prod"}},
+                "allowedActions": actions,
+                "allowedResources": resources,
+                "approvalRequired": true,
+                "limits": limits
+            }
+        }))
+        .unwrap()
+    }
+
+    fn workload_resources_spec(spec: Value) -> WorkloadResourcesSpec {
+        serde_json::from_value(spec).unwrap()
+    }
+
     fn policy_status(
         stale: bool,
         last_reconciled_at_ms: Option<u128>,
@@ -1882,6 +2049,108 @@ mod tests {
             last_reconciled_at_ms,
             stale,
         }
+    }
+
+    #[test]
+    fn policy_rejection_reason_for_command_allows_supported_workload_action() {
+        let policy = policy_for_gating(vec!["rollout_restart"], vec!["Deployment"], None);
+        let spec = workload_resources_spec(json!({
+            "workload_kind": "Deployment",
+            "namespace": "prod",
+            "name": "api",
+            "container": "app",
+            "requests": {"cpu": "250m", "memory": "256Mi"}
+        }));
+
+        assert!(
+            Executor::policy_rejection_reason_for_command(
+                &policy,
+                "rollout_restart",
+                Some("Deployment"),
+                Some(&spec)
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn policy_rejection_reason_for_command_rejects_unsupported_action() {
+        let policy = policy_for_gating(vec!["scale"], vec!["Deployment"], None);
+        let spec = workload_resources_spec(json!({
+            "workload_kind": "Deployment",
+            "namespace": "prod",
+            "name": "api",
+            "container": "app",
+            "requests": {"cpu": "250m", "memory": "256Mi"}
+        }));
+
+        let reason = Executor::policy_rejection_reason_for_command(
+            &policy,
+            "rollout_restart",
+            Some("Deployment"),
+            Some(&spec),
+        )
+        .expect("expected action to be rejected");
+
+        assert_eq!(reason, "does not allow action rollout_restart");
+    }
+
+    #[test]
+    fn policy_rejection_reason_for_command_rejects_unsupported_resource() {
+        let policy = policy_for_gating(vec!["rollout_restart"], vec!["StatefulSet"], None);
+        let spec = workload_resources_spec(json!({
+            "workload_kind": "Deployment",
+            "namespace": "prod",
+            "name": "api",
+            "container": "app",
+            "requests": {"cpu": "250m", "memory": "256Mi"}
+        }));
+
+        let reason = Executor::policy_rejection_reason_for_command(
+            &policy,
+            "rollout_restart",
+            Some("Deployment"),
+            Some(&spec),
+        )
+        .expect("expected resource to be rejected");
+
+        assert_eq!(reason, "does not allow resource Deployment");
+    }
+
+    #[test]
+    fn policy_rejection_reason_for_command_rejects_limits_exceeded() {
+        let policy = policy_for_gating(
+            vec!["apply_workload_resources"],
+            vec!["Deployment"],
+            Some(json!({"maxCpuLimit": "500m", "maxMemoryLimit": "512Mi"})),
+        );
+        let spec = workload_resources_spec(json!({
+            "workload_kind": "Deployment",
+            "namespace": "prod",
+            "name": "api",
+            "container": "app",
+            "requests": {"cpu": "750m", "memory": "256Mi"}
+        }));
+
+        let reason = Executor::policy_rejection_reason_for_command(
+            &policy,
+            "apply_workload_resources",
+            Some("Deployment"),
+            Some(&spec),
+        )
+        .expect("expected limits to be rejected");
+
+        assert!(reason.contains("limits exceeded"));
+    }
+
+    #[test]
+    fn policy_rejection_reason_for_command_allows_self_update_without_resources() {
+        let policy = policy_for_gating(vec!["self_update"], Vec::new(), None);
+
+        assert!(
+            Executor::policy_rejection_reason_for_command(&policy, "self_update", None, None)
+                .is_none()
+        );
     }
 
     #[test]

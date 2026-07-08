@@ -147,6 +147,8 @@ spec:
                   type: boolean
 ---
 # Operator RBAC: only used when ACTION_OPERATOR_ENABLED=true.
+# The operator needs to reconcile RoleBindings and write policy status, so
+# keep the policy/status permissions scoped to the CRD and its status subresource.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -164,6 +166,10 @@ rules:
     resources:
       - sentinellahubactionpolicies
     verbs: ["get", "list", "watch"]
+  - apiGroups: ["sentinella.io"]
+    resources:
+      - sentinellahubactionpolicies/status
+    verbs: ["get", "patch", "update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

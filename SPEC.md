@@ -699,8 +699,9 @@ Known command kinds:
 - Unknown command kinds return `status: "unknown"` when actions are enabled.
 - Recognized command kinds are `preview_workload_resources`, `apply_workload_resources`, `self_update`, and `update_agent`.
 - Workload resource commands require the target namespace to carry label `sentinella.io/action-mode=enabled`; otherwise the executor returns `status: "error"` before patching.
-- The Phase 3 operator path is opt-in via `ACTION_OPERATOR_ENABLED=true`; when enabled, it reconciles namespace-scoped `RoleBinding`s only for namespaces that are both labeled `sentinella.io/action-mode=enabled` and matched by at least one cluster-scoped `SentinellaHubActionPolicy`.
-- `SentinellaHubActionPolicy.namespaceSelector` is the only enforced policy field in the current operator scaffold. `allowedActions`, `allowedResources`, and `limits` are reserved for future enforcement and should be treated as non-authoritative for now.
+- The Phase 3 operator path is opt-in via `ACTION_OPERATOR_ENABLED=true`; when enabled, it reconciles namespace-scoped `RoleBinding`s and patches policy status only for namespaces that are both labeled `sentinella.io/action-mode=enabled` and matched by at least one cluster-scoped `SentinellaHubActionPolicy`.
+- The operator ClusterRole must include `sentinellahubactionpolicies/status` with `get`, `patch`, and `update`; without that subresource permission, status freshness cannot be recorded and policy gating fails closed.
+- `SentinellaHubActionPolicy` enforces `namespaceSelector`, `allowedActions`, `allowedResources`, and `limits`, and marks policies stale when the freshness timestamp is missing or older than the operator freshness window.
 - Resource commands target workload controllers, not Pods.
 - Resource patch implementation must use strategic-merge semantics for `spec.template.spec.containers[name=<container>].resources`; JSON merge would clobber the whole `containers` array.
 - `preview_workload_resources` performs a Kubernetes strategic-merge dry-run patch with `dryRun=All` for `Deployment`, `StatefulSet`, and `DaemonSet` when actions are enabled.
