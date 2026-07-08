@@ -39,6 +39,9 @@
 | `LEASE_NAME` | no | `sentinella-hub-k8s-agent-leader` | Lease object name. |
 | `ACTIONS_ENABLED` | no | `false` | Only `true` or `1` enables action dispatch. |
 | `READONLY_COMMANDS_ENABLED` | no | `false` | Enables read-only commands such as `diagnose_postgresql` without enabling mutating actions. |
+| `ACTION_OPERATOR_ENABLED` | no | `false` | Enables the action-policy reconciler loop. |
+| `ACTION_OPERATOR_POLL_INTERVAL_SECS` | no | `60` | Reconciler poll interval. |
+| `ACTION_OPERATOR_EXCLUDED_NAMESPACES` | no | `[]` | YAML list of additional namespaces excluded from action RoleBinding reconciliation. |
 | `COLLECT_SECRETS` | no | `false` | When `true`, collect Secret metadata and key names only; requires separate `secrets` read RBAC. |
 | `COLLECT_DEPENDENCIES_TETRAGON` | no | `false` | When `true`, collect dependency edges from Tetragon gRPC. |
 | `APP_METRICS_ENABLED` | no | `false` | Collect app Prometheus samples from annotated Services. |
@@ -651,8 +654,17 @@ Known command kinds:
 
 - `preview_workload_resources`.
 - `apply_workload_resources`.
+- `get_resource_yaml`.
 - `self_update`.
 - `update_agent`.
+- `rollout_restart`.
+- `scale`.
+- `delete_pod`.
+- `cordon_node`.
+- `uncordon_node`.
+- `drain_node`.
+- `apply_manifest`.
+- `rollout_undo`.
 
 `WorkloadResourcesSpec` fields for known resource commands:
 
@@ -696,13 +708,14 @@ Known command kinds:
 
 - `ACTIONS_ENABLED=false` keeps the agent in read-only mode and is the default. Mutating commands are skipped before parsing `spec`, but `get_resource_yaml` remains available.
 - Unknown command kinds return `status: "unknown"` when actions are enabled.
-- Recognized command kinds are `preview_workload_resources`, `apply_workload_resources`, `get_resource_yaml`, `self_update`, and `update_agent`.
+- Recognized command kinds are `preview_workload_resources`, `apply_workload_resources`, `get_resource_yaml`, `rollout_restart`, `scale`, `delete_pod`, `cordon_node`, `uncordon_node`, `drain_node`, `apply_manifest`, `rollout_undo`, `self_update`, and `update_agent`.
 - `get_resource_yaml` reads an allowlisted Kubernetes object, returns manifest-like YAML with server-managed metadata stripped, and rejects `Secret` requests.
-- Workload resource commands require the target namespace to carry label `sentinella.io/action-mode=enabled`; otherwise the executor returns `status: "error"` before patching.
-- The Phase 3 operator path is opt-in via `ACTION_OPERATOR_ENABLED=true`; when enabled, it reconciles namespace-scoped `RoleBinding`s and patches policy status only for namespaces that are both labeled `sentinella.io/action-mode=enabled` and matched by at least one cluster-scoped `SentinellaHubActionPolicy`.
+- Workload resource commands are gated by the current effective policy for the target namespace; the executor rejects commands when the namespace is not present in a `Ready` policy's `effectiveNamespaces`.
+- The Phase 3 operator path is opt-in via `ACTION_OPERATOR_ENABLED=true`; when enabled, it reconciles namespace-scoped `RoleBinding`s and patches policy status using the global namespace exclude-list model.
 - The operator ClusterRole must include `sentinellahubactionpolicies/status` with `get`, `patch`, and `update`; without that subresource permission, status freshness cannot be recorded and policy gating fails closed.
 - `SentinellaHubActionPolicy` enforces `namespaceSelector`, `allowedActions`, `allowedResources`, and `limits`, and marks policies stale when the freshness timestamp is missing or older than the operator freshness window.
 - Resource commands target workload controllers, not Pods.
+- `apply_manifest` is the contract name for constrained patching; the current implementation may still use the internal `apply_workload_resources` command name.
 - Resource patch implementation must use strategic-merge semantics for `spec.template.spec.containers[name=<container>].resources`; JSON merge would clobber the whole `containers` array.
 - `preview_workload_resources` performs a Kubernetes strategic-merge dry-run patch with `dryRun=All` for `Deployment`, `StatefulSet`, and `DaemonSet` when actions are enabled.
 - Preview pre-flight checks are best-effort and non-fatal; check errors become warnings and do not fail the preview by themselves.
@@ -723,11 +736,89 @@ Known command kinds:
 - `update_agent` returns `status: "ok"`, `dry_run: false`, `applied_patch`, `observed_before`, `observed_after`, and warning strings when patching succeeds.
 - `update_agent` allows tagged images including `:latest` and allows sha256 digest references in the allowed registry prefix.
 
+## New Command Types
+
+### 7.1 `rollout_restart`
+
+- Purpose: supports the Restart workload runbook.
+- Spec: `{ "kind": "deployment|statefulset|daemonset", "name": "my-app", "namespace": "default" }`
+- Behavioral equivalent: `kubectl rollout restart {kind}/{name} -n {namespace}`
+- Implementation behavior: patch `spec.template.metadata.annotations["kubectl.kubernetes.io/restartedAt"]` with a current RFC3339 timestamp.
+- Supported kinds: `deployment`, `statefulset`, `daemonset`.
+- Required permissions: `get`, `patch` on `apps/deployments`, `apps/statefulsets`, `apps/daemonsets`.
+
+### 7.2 `scale`
+
+- Purpose: supports the Scale deployment runbook.
+- Spec: `{ "kind": "deployment", "name": "my-app", "namespace": "default", "replicas": 5 }`
+- Validation: `replicas >= 0`.
+- Hub-side policy or UI should enforce a practical upper bound before dispatch.
+- Initial implementation scope: `kind=deployment` only.
+- Behavioral equivalent: `kubectl scale {kind}/{name} -n {namespace} --replicas={replicas}`
+- Success criterion: the desired replica count is accepted by the API server; synchronous readiness is not required.
+- Required permissions: `get`, `patch` on `apps/deployments`.
+
+### 7.3 `delete_pod`
+
+- Purpose: supports the Force-delete pod runbook.
+- Spec: `{ "name": "my-app-abc123", "namespace": "default", "grace_period_seconds": 0, "force": true }`
+- Behavioral equivalent: `kubectl delete pod {name} -n {namespace} --grace-period={grace_period_seconds} [--force]`
+- Validation: `grace_period_seconds >= 0`, `name` required, `namespace` required.
+- When `force=true`, the request semantics must be explicit and must not be silently converted to a graceful deletion.
+- Safety requirement: this command should require an explicit destructive-action opt-in beyond `ACTIONS_ENABLED=true` before it is enabled in the Hub.
+- Required permissions: `get`, `delete` on `core/pods`.
+
+### 7.4 `cordon_node`
+
+- Purpose: supports the first step of the Drain node runbook.
+- Spec: `{ "name": "worker-01" }`
+- Behavioral equivalent: `kubectl cordon worker-01`
+- Implementation behavior: set `spec.unschedulable=true`.
+- Required permissions: `get`, `patch` on `core/nodes`.
+
+### 7.5 `uncordon_node`
+
+- Purpose: supports the final step of the Drain node runbook.
+- Spec: `{ "name": "worker-01" }`
+- Behavioral equivalent: `kubectl uncordon worker-01`
+- Implementation behavior: set `spec.unschedulable=false`.
+- Required permissions: `get`, `patch` on `core/nodes`.
+
+### 7.6 `drain_node`
+
+- Purpose: supports the main operation of the Drain node runbook.
+- Spec: `{ "name": "worker-01", "ignore_daemonsets": true, "delete_emptydir_data": true, "timeout_seconds": 300 }`
+- Behavioral equivalent: `kubectl drain worker-01 --ignore-daemonsets --delete-emptydir-data`
+- Required behavior: cordon the node if needed, identify evictable pods, reject or exclude unsupported pods, evict through the Eviction API, wait for completion or timeout, and return a summarized result.
+- Validation: `timeout_seconds > 0`; `ignore_daemonsets` and `delete_emptydir_data` must be explicit.
+- Safety requirement: this command should require an explicit destructive-action opt-in beyond `ACTIONS_ENABLED=true` before it is enabled in the Hub.
+- Required permissions: `get`, `list`, `watch` on `core/pods`; `get`, `patch` on `core/nodes`; `create` on `core/pods/eviction`.
+
+### 7.7 `apply_manifest`
+
+- Purpose: supports Update workload resources and Expand PVC.
+- Spec shape: constrained patch operation, not an arbitrary manifest execution channel.
+- Workload example: `deployment|statefulset|daemonset` with strategic patch to `spec.template.spec.containers` resources.
+- PVC example: `pvc` with merge patch to `spec.resources.requests.storage`.
+- Supported kinds: `deployment`, `statefulset`, `daemonset`, `pvc`.
+- Supported patch types: `merge`, `strategic`.
+- Security constraints: reject unsupported kinds, unsupported API groups, status subresources, RBAC resources, Secrets, ServiceAccounts, admission configuration, and CRDs unless explicitly supported in a future spec.
+- Contract note: the UI/engine contract name is `apply_manifest`; until the implementation is renamed, dispatch may still use the internal `apply_workload_resources` command name.
+- Required permissions: `get`, `patch` on `apps/deployments`, `apps/statefulsets`, `apps/daemonsets`; `get`, `patch` on `core/persistentvolumeclaims`.
+
+### 7.8 `rollout_undo`
+
+- Purpose: supports the Rollback deployment runbook.
+- Spec: `{ "kind": "deployment", "name": "my-app", "namespace": "default", "revision": null|4 }`
+- Behavioral equivalent: `kubectl rollout undo deployment/my-app -n default [--to-revision=4]`
+- Implementation note: rollback semantics must use Kubernetes API/controller revision history, not shelling out to `kubectl`.
+- Recommended initial scope: `kind=deployment` only.
+
 ## Deployment Manifest
 
 - The deploy manifest is root `agent.yaml`.
-- Action Mode eligibility is namespace-label driven: labeled namespaces (`sentinella.io/action-mode=enabled`) are the runtime gate for workload patch commands.
-- `ACTION_OPERATOR_ENABLED` controls the opt-in RoleBinding reconciler loop; `ACTION_OPERATOR_POLL_INTERVAL_SECS` sets its poll interval.
+- Action Mode eligibility is policy-driven: the operator reconciles namespace RoleBindings for namespaces that are not in the fixed or configured exclude list, and the executor only allows commands in namespaces present in a `Ready` policy's `effectiveNamespaces`.
+- `ACTION_OPERATOR_ENABLED` controls the opt-in RoleBinding reconciler loop; `ACTION_OPERATOR_POLL_INTERVAL_SECS` sets its poll interval; `ACTION_OPERATOR_EXCLUDED_NAMESPACES` adds YAML-list exclusions to the fixed namespace denylist.
 - The `agent` container image is `us-east1-docker.pkg.dev/sentinella-hub/kubernetes-agent/sentinella-hub-k8s-agent:<tag>`.
 - `agent.yaml` stores runtime config in ConfigMap `sentinella-hub-k8s-agent-config` and auth in Secret `sentinella-hub-k8s-agent-auth` key `api-key`.
 - The DaemonSet injects `HUB_API_KEY` from Secret key `api-key`, optionally.
@@ -748,6 +839,9 @@ Known command kinds:
 - `POLL_WAIT_SECS`
 - `HTTP_TIMEOUT_SECS`
 - `LEASE_TTL_SECS`
+- `ACTION_OPERATOR_ENABLED`
+- `ACTION_OPERATOR_POLL_INTERVAL_SECS`
+- `ACTION_OPERATOR_EXCLUDED_NAMESPACES`
 - `ACTIONS_ENABLED`
 - `COLLECT_SECRETS`
 - `COLLECT_DEPENDENCIES_TETRAGON`
