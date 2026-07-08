@@ -8,7 +8,7 @@ use crate::model::{
     ActionVerification, Command, CommandResult, ExecutionMode, PostgresqlDiagnosticSpec,
     ResourceMap, RolloutRestartSpec, ScaleSpec, SelfUpdateSpec, SentinellaHubActionPolicy,
     SentinellaHubActionPolicyCondition, SentinellaHubActionPolicyStatus, UpdateAgentSpec,
-    WorkloadResourcesSpec, WorkloadTargetRef,
+    WorkloadResourcesSpec, WorkloadTargetRef, policy_status_is_stale,
 };
 use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, StatefulSet};
 use k8s_openapi::api::autoscaling::v2::HorizontalPodAutoscaler;
@@ -912,7 +912,7 @@ impl Executor {
             ));
         };
 
-        if now_ms.saturating_sub(last_reconciled_at_ms) > stale_after_ms {
+        if policy_status_is_stale(Some(last_reconciled_at_ms), now_ms, stale_after_ms) {
             return Some(format!("policy {} status is stale", policy_name));
         }
 

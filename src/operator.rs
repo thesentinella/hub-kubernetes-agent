@@ -4,6 +4,7 @@ use crate::executor::{
 };
 use crate::model::{
     SentinellaHubActionPolicy, SentinellaHubActionPolicyCondition, SentinellaHubActionPolicyStatus,
+    policy_status_is_stale,
 };
 use anyhow::{Context, Result};
 use k8s_openapi::api::core::v1::Namespace;
@@ -289,19 +290,6 @@ async fn remove_action_role_binding(client: &Client, namespace: &str) -> Result<
     }
 
     Ok(())
-}
-
-fn policy_status_is_stale(
-    last_reconciled_at_ms: Option<u128>,
-    now_ms: u128,
-    stale_after_ms: u128,
-) -> bool {
-    match last_reconciled_at_ms {
-        Some(last_reconciled_at_ms) => {
-            now_ms.saturating_sub(last_reconciled_at_ms) > stale_after_ms
-        }
-        None => true,
-    }
 }
 
 fn desired_action_role_binding(namespace: &str) -> Result<RoleBinding> {
