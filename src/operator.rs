@@ -53,9 +53,6 @@ pub async fn run_action_operator(cfg: Config, client: Client) {
 }
 
 async fn reconcile_action_policies(cfg: &Config, client: &Client) -> Result<()> {
-    let namespaces = list_namespaces(client).await?;
-    let policies = list_policies(client).await?;
-    let binding_outcome = reconcile_action_role_bindings(client, &namespaces, &policies).await?;
     let now = now_ms();
     let stale_after_ms = cfg
         .action_operator_poll_interval
@@ -63,54 +60,70 @@ async fn reconcile_action_policies(cfg: &Config, client: &Client) -> Result<()> 
         .unwrap_or(cfg.action_operator_poll_interval)
         .as_millis();
 
+    reconcile_action_policies_with(
+        now,
+        stale_after_ms,
+        || list_namespaces(client),
+        || list_policies(client),
+        |namespaces, policies| async move {
+            reconcile_action_role_bindings(client, &namespaces, &policies).await
+        },
+        |name, status| async move { patch_policy_status(client, &name, status).await },
+    )
+    .await
+}
+
+async fn reconcile_action_policies_with<
+    ListNamespaces,
+    ListPolicies,
+    ReconcileBindings,
+    PatchStatus,
+    NSFut,
+    PolFut,
+    BindFut,
+    PatchFut,
+>(
+    now_ms: u128,
+    stale_after_ms: u128,
+    list_namespaces: ListNamespaces,
+    list_policies: ListPolicies,
+    reconcile_bindings: ReconcileBindings,
+    patch_status: PatchStatus,
+) -> Result<()>
+where
+    ListNamespaces: Fn() -> NSFut,
+    NSFut: Future<Output = Result<Vec<Namespace>>>,
+    ListPolicies: Fn() -> PolFut,
+    PolFut: Future<Output = Result<Vec<SentinellaHubActionPolicy>>>,
+    ReconcileBindings: Fn(Vec<Namespace>, Vec<SentinellaHubActionPolicy>) -> BindFut,
+    BindFut: Future<Output = Result<BindingReconcileOutcome>>,
+    PatchStatus: Fn(String, SentinellaHubActionPolicyStatus) -> PatchFut,
+    PatchFut: Future<Output = Result<()>>,
+{
+    let namespaces = list_namespaces().await?;
+    let policies = list_policies().await?;
+    let binding_outcome = reconcile_bindings(namespaces.clone(), policies.clone()).await?;
+
     for policy in &policies {
         let Some(name) = policy.metadata.name.as_deref() else {
             continue;
         };
 
-        let (policy_matched, effective_namespaces) =
-            policy_effective_namespaces(policy, &namespaces);
-        let namespaces_eligible = !effective_namespaces.is_empty();
-        let permission_granted = namespaces_eligible && binding_outcome.permission_granted;
-        let reconciliation_error = binding_outcome.reconciliation_error.clone();
-        let stale = policy_status_is_stale(
-            policy
-                .status
-                .as_ref()
-                .and_then(|status| status.last_reconciled_at_ms),
-            now,
+        let status = build_policy_status(
+            policy,
+            &namespaces,
+            &binding_outcome,
+            now_ms,
             stale_after_ms,
         );
-        let ready = policy_matched
-            && namespaces_eligible
-            && permission_granted
-            && !stale
-            && reconciliation_error.is_none();
 
-        let status = SentinellaHubActionPolicyStatus {
-            effective_namespaces,
-            conditions: build_policy_conditions(
-                policy,
-                policy_matched,
-                namespaces_eligible,
-                permission_granted,
-                reconciliation_error.as_deref(),
-                stale,
-                ready,
-                now,
-            ),
-            observed_generation: policy.metadata.generation,
-            last_reconciled_at_ms: Some(now),
-            stale,
-        };
-
-        if let Err(err) = patch_policy_status(client, name, status).await {
+        if let Err(err) = patch_status(name.to_string(), status).await {
             warn!(policy = %name, error = %err, "failed to update action policy status");
         }
     }
 
     if let Some(error) = binding_outcome.reconciliation_error {
-        warn!(poll_interval_secs = cfg.action_operator_poll_interval.as_secs(), error = %error, "action operator reconciliation completed with errors");
+        warn!(error = %error, "action operator reconciliation completed with errors");
     }
 
     Ok(())
@@ -345,6 +358,49 @@ fn desired_action_role_binding(namespace: &str) -> Result<RoleBinding> {
     .map_err(|e| anyhow::anyhow!("failed to build desired RoleBinding: {}", e))
 }
 
+fn build_policy_status(
+    policy: &SentinellaHubActionPolicy,
+    namespaces: &[Namespace],
+    binding_outcome: &BindingReconcileOutcome,
+    now_ms: u128,
+    stale_after_ms: u128,
+) -> SentinellaHubActionPolicyStatus {
+    let (policy_matched, effective_namespaces) = policy_effective_namespaces(policy, namespaces);
+    let namespaces_eligible = !effective_namespaces.is_empty();
+    let permission_granted = namespaces_eligible && binding_outcome.permission_granted;
+    let reconciliation_error = binding_outcome.reconciliation_error.clone();
+    let stale = policy_status_is_stale(
+        policy
+            .status
+            .as_ref()
+            .and_then(|status| status.last_reconciled_at_ms),
+        now_ms,
+        stale_after_ms,
+    );
+    let ready = policy_matched
+        && namespaces_eligible
+        && permission_granted
+        && !stale
+        && reconciliation_error.is_none();
+
+    SentinellaHubActionPolicyStatus {
+        effective_namespaces,
+        conditions: build_policy_conditions(
+            policy,
+            policy_matched,
+            namespaces_eligible,
+            permission_granted,
+            reconciliation_error.as_deref(),
+            stale,
+            ready,
+            now_ms,
+        ),
+        observed_generation: policy.metadata.generation,
+        last_reconciled_at_ms: Some(now_ms),
+        stale,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_policy_conditions(
     policy: &SentinellaHubActionPolicy,
@@ -498,11 +554,11 @@ mod tests {
         ns
     }
 
-    fn policy(selector: Value) -> SentinellaHubActionPolicy {
+    fn policy_named(name: &str, selector: Value) -> SentinellaHubActionPolicy {
         serde_json::from_value(json!({
             "apiVersion": "sentinella.io/v1alpha1",
             "kind": "SentinellaHubActionPolicy",
-            "metadata": { "name": "workload-tuning" },
+            "metadata": { "name": name },
             "spec": {
                 "namespaceSelector": selector,
                 "allowedActions": ["patchWorkloadResources"],
@@ -511,6 +567,26 @@ mod tests {
             }
         }))
         .unwrap()
+    }
+
+    fn policy(selector: Value) -> SentinellaHubActionPolicy {
+        policy_named("workload-tuning", selector)
+    }
+
+    fn namespace_with_name(name: &str, labels: Option<Value>) -> Namespace {
+        let mut ns = namespace(labels);
+        ns.metadata.name = Some(name.into());
+        ns
+    }
+
+    fn binding_outcome(
+        permission_granted: bool,
+        reconciliation_error: Option<&str>,
+    ) -> BindingReconcileOutcome {
+        BindingReconcileOutcome {
+            permission_granted,
+            reconciliation_error: reconciliation_error.map(str::to_string),
+        }
     }
 
     fn ready_conditions(
@@ -540,6 +616,220 @@ mod tests {
             .find(|condition| condition.type_ == name)
             .map(|condition| condition.status.clone())
             .unwrap_or_default()
+    }
+
+    #[test]
+    fn build_policy_status_marks_ready_when_all_gates_pass() {
+        let namespaces = vec![namespace(Some(json!({
+            ACTION_MODE_NAMESPACE_LABEL: ACTION_MODE_NAMESPACE_LABEL_ENABLED,
+            "environment": "prod"
+        })))];
+        let mut policy = policy(json!({
+            "matchLabels": {"environment": "prod"}
+        }));
+        policy.status = Some(SentinellaHubActionPolicyStatus {
+            effective_namespaces: Vec::new(),
+            conditions: Vec::new(),
+            observed_generation: Some(1),
+            last_reconciled_at_ms: Some(900),
+            stale: false,
+        });
+
+        let status = build_policy_status(
+            &policy,
+            &namespaces,
+            &binding_outcome(true, None),
+            1000,
+            150,
+        );
+
+        assert_eq!(status.effective_namespaces, vec!["app-prod"]);
+        assert_eq!(condition_status(&status.conditions, "Ready"), "True");
+        assert_eq!(condition_status(&status.conditions, "Stale"), "False");
+        assert_eq!(
+            condition_status(&status.conditions, "PermissionGranted"),
+            "True"
+        );
+        assert_eq!(
+            condition_status(&status.conditions, "ReconciliationError"),
+            "False"
+        );
+        assert!(!status.stale);
+    }
+
+    #[test]
+    fn build_policy_status_marks_not_ready_on_partial_rbac_failure() {
+        let namespaces = vec![namespace(Some(json!({
+            ACTION_MODE_NAMESPACE_LABEL: ACTION_MODE_NAMESPACE_LABEL_ENABLED,
+            "environment": "prod"
+        })))];
+        let mut policy = policy(json!({
+            "matchLabels": {"environment": "prod"}
+        }));
+        policy.status = Some(SentinellaHubActionPolicyStatus {
+            effective_namespaces: Vec::new(),
+            conditions: Vec::new(),
+            observed_generation: Some(1),
+            last_reconciled_at_ms: Some(900),
+            stale: false,
+        });
+
+        let status = build_policy_status(
+            &policy,
+            &namespaces,
+            &binding_outcome(false, Some("cannot reconcile app-prod")),
+            1000,
+            150,
+        );
+
+        assert_eq!(condition_status(&status.conditions, "Ready"), "False");
+        assert_eq!(
+            condition_status(&status.conditions, "PermissionGranted"),
+            "False"
+        );
+        assert_eq!(
+            condition_status(&status.conditions, "ReconciliationError"),
+            "True"
+        );
+        assert_eq!(condition_status(&status.conditions, "Stale"), "False");
+    }
+
+    #[test]
+    fn build_policy_status_marks_stale_when_timestamp_missing() {
+        let namespaces = vec![namespace(Some(json!({
+            ACTION_MODE_NAMESPACE_LABEL: ACTION_MODE_NAMESPACE_LABEL_ENABLED,
+            "environment": "prod"
+        })))];
+        let mut policy = policy(json!({
+            "matchLabels": {"environment": "prod"}
+        }));
+        policy.status = Some(SentinellaHubActionPolicyStatus {
+            effective_namespaces: Vec::new(),
+            conditions: Vec::new(),
+            observed_generation: Some(1),
+            last_reconciled_at_ms: None,
+            stale: false,
+        });
+
+        let status = build_policy_status(
+            &policy,
+            &namespaces,
+            &binding_outcome(true, None),
+            1000,
+            150,
+        );
+
+        assert!(status.stale);
+        assert_eq!(condition_status(&status.conditions, "Ready"), "False");
+        assert_eq!(condition_status(&status.conditions, "Stale"), "True");
+    }
+
+    #[test]
+    fn build_policy_status_marks_not_ready_when_no_eligible_namespaces() {
+        let namespaces = vec![namespace(Some(json!({
+            "environment": "qa"
+        })))];
+        let mut policy = policy(json!({
+            "matchLabels": {"environment": "prod"}
+        }));
+        policy.status = Some(SentinellaHubActionPolicyStatus {
+            effective_namespaces: Vec::new(),
+            conditions: Vec::new(),
+            observed_generation: Some(1),
+            last_reconciled_at_ms: Some(900),
+            stale: false,
+        });
+
+        let status = build_policy_status(
+            &policy,
+            &namespaces,
+            &binding_outcome(true, None),
+            1000,
+            150,
+        );
+
+        assert_eq!(
+            condition_status(&status.conditions, "NamespacesEligible"),
+            "False"
+        );
+        assert_eq!(condition_status(&status.conditions, "Ready"), "False");
+    }
+
+    #[tokio::test]
+    async fn reconcile_action_policies_with_patches_each_policy_even_when_binding_fails() {
+        let namespaces = vec![namespace_with_name(
+            "app-prod",
+            Some(json!({
+                ACTION_MODE_NAMESPACE_LABEL: ACTION_MODE_NAMESPACE_LABEL_ENABLED,
+                "environment": "prod"
+            })),
+        )];
+        let mut policy_a = policy_named(
+            "workload-a",
+            json!({"matchLabels": {"environment": "prod"}}),
+        );
+        policy_a.status = Some(SentinellaHubActionPolicyStatus {
+            effective_namespaces: Vec::new(),
+            conditions: Vec::new(),
+            observed_generation: Some(1),
+            last_reconciled_at_ms: Some(900),
+            stale: false,
+        });
+        let mut policy_b = policy_named(
+            "workload-b",
+            json!({"matchLabels": {"environment": "prod"}}),
+        );
+        policy_b.status = Some(SentinellaHubActionPolicyStatus {
+            effective_namespaces: Vec::new(),
+            conditions: Vec::new(),
+            observed_generation: Some(1),
+            last_reconciled_at_ms: Some(900),
+            stale: false,
+        });
+
+        let patch_calls = Arc::new(Mutex::new(Vec::new()));
+        let patch_calls_cloned = Arc::clone(&patch_calls);
+        let namespaces_for_test = namespaces.clone();
+        let policies_for_test = vec![policy_a.clone(), policy_b.clone()];
+
+        reconcile_action_policies_with(
+            1000,
+            150,
+            move || {
+                let namespaces = namespaces_for_test.clone();
+                async move { Ok(namespaces) }
+            },
+            move || {
+                let policies = policies_for_test.clone();
+                async move { Ok(policies) }
+            },
+            move |_, _| async { Ok(binding_outcome(false, Some("cannot reconcile app-prod"))) },
+            move |name, status| {
+                let patch_calls = Arc::clone(&patch_calls_cloned);
+                async move {
+                    patch_calls
+                        .lock()
+                        .expect("patch_calls lock")
+                        .push((name, status));
+                    Ok(())
+                }
+            },
+        )
+        .await
+        .expect("reconcile should complete");
+
+        let patch_calls = patch_calls.lock().expect("patch_calls lock");
+        assert_eq!(patch_calls.len(), 2);
+        assert_eq!(patch_calls[0].0, "workload-a");
+        assert_eq!(patch_calls[1].0, "workload-b");
+        assert_eq!(
+            condition_status(&patch_calls[0].1.conditions, "Ready"),
+            "False"
+        );
+        assert_eq!(
+            condition_status(&patch_calls[1].1.conditions, "Ready"),
+            "False"
+        );
     }
 
     #[tokio::test]
