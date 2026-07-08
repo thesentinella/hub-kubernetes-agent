@@ -158,7 +158,7 @@ Example snapshot payload:
 
 ### Actions — designed for gradual rollout
 
-`src/executor.rs` rejects every command while `ACTIONS_ENABLED=false`, before parsing the command spec. When actions are enabled, `preview_workload_resources` performs a server-side dry-run, `apply_workload_resources` performs a live strategic-merge patch, `self_update` triggers an immediate agent restart, and `update_agent` updates the fixed agent DaemonSet image.
+`src/executor.rs` keeps the agent in read-only mode while `ACTIONS_ENABLED=false`: mutating commands are skipped before parsing the command spec, but `get_resource_yaml` remains available as a read-only fetch. When actions are enabled, `preview_workload_resources` performs a server-side dry-run, `apply_workload_resources` performs a live strategic-merge patch, `self_update` triggers an immediate agent restart, and `update_agent` updates the fixed agent DaemonSet image.
 
 For Action Mode, the target namespace must also carry the label `sentinella.io/action-mode=enabled`; the executor rejects workload patch commands when the label is missing or set to another value.
 
@@ -173,6 +173,7 @@ The operator manifest must include the `sentinellahubactionpolicies/status` subr
 Two command kinds form the resource-patch flow:
 
 - **`preview_workload_resources`** — implemented server-side dry-run. Computes the patch, runs it against the apiserver with `?dryRun=All`, and returns the would-be state. Cluster state is unchanged.
+- **`get_resource_yaml`** — reads an allowlisted Kubernetes object and returns manifest-like YAML with server-managed metadata stripped. Secrets are rejected.
 - **`apply_workload_resources`** — live apply. Uses the same strategic-merge patch shape and pre-flight warning checks as preview, but persists the change.
 
 The two-command pattern is intentional. Each artifact (preview, approval, apply) is a separate Hub record with its own `command_id`, timestamp, and audit trail — easier for dashboards, easier for compliance reviews. Cluster state can change between preview and apply (HPA scaled, new pods); the apply re-validates against fresh state rather than relying on a stale preview.
