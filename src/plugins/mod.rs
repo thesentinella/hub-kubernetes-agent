@@ -1679,6 +1679,7 @@ mod tests {
             actions_enabled: false,
             action_operator_enabled: false,
             action_operator_poll_interval: Duration::from_secs(60),
+            action_operator_excluded_namespaces: vec![],
             readonly_commands_enabled: false,
             collect_secrets: false,
             collect_dependencies_tetragon: false,
