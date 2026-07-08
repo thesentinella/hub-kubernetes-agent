@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.37.0...v1.0.0) (2026-07-08)
+
+
+### chore
+
+* release 1.0.0 ([eb226ed](https://github.com/thesentinella/hub-kubernetes-agent/commit/eb226ed924c868b5ea005f4ac529e0302fe59348))
+
 ## [0.37.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v0.36.3...v0.37.0) (2026-06-30)
 
 
