@@ -140,6 +140,11 @@ spec:
                 observedGeneration:
                   type: integer
                   format: int64
+                lastReconciledAtMs:
+                  type: string
+                  pattern: '^\d+$'
+                stale:
+                  type: boolean
 ---
 # Operator RBAC: only used when ACTION_OPERATOR_ENABLED=true.
 apiVersion: rbac.authorization.k8s.io/v1

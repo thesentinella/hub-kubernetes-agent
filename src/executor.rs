@@ -8,7 +8,7 @@ use crate::model::{
     ActionVerification, Command, CommandResult, ExecutionMode, PostgresqlDiagnosticSpec,
     ResourceMap, RolloutRestartSpec, ScaleSpec, SelfUpdateSpec, SentinellaHubActionPolicy,
     SentinellaHubActionPolicyCondition, SentinellaHubActionPolicyStatus, UpdateAgentSpec,
-    WorkloadResourcesSpec, WorkloadTargetRef,
+    WorkloadResourcesSpec, WorkloadTargetRef, policy_status_is_stale,
 };
 use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, StatefulSet};
 use k8s_openapi::api::autoscaling::v2::HorizontalPodAutoscaler;
@@ -811,353 +811,6 @@ impl Executor {
         result
     }
 
-    async fn ensure_effective_policy_ready_dup(
-        &self,
-        namespace: &str,
-    ) -> Result<EffectivePolicy, String> {
-        let policies = self.list_action_policies().await?;
-        let stale_after = self
-            .cfg
-            .action_operator_poll_interval
-            .checked_mul(3)
-            .unwrap_or(self.cfg.action_operator_poll_interval);
-        let stale_after_ms = stale_after.as_millis();
-        let now = now_ms();
-
-        let mut reasons = Vec::new();
-        for policy in policies {
-            let Some(policy_name) = policy.metadata.name.clone() else {
-                continue;
-            };
-            let Some(status) = policy.status.clone() else {
-                reasons.push(format!("policy {} has no status", policy_name));
-                continue;
-            };
-
-            let Some(last_reconciled_at_ms) = status.last_reconciled_at_ms else {
-                reasons.push(format!(
-                    "policy {} status has no freshness timestamp",
-                    policy_name
-                ));
-                continue;
-            };
-
-            if now.saturating_sub(last_reconciled_at_ms) > stale_after_ms {
-                reasons.push(format!("policy {} status is stale", policy_name));
-                continue;
-            }
-
-            if !condition_true(&status.conditions, "Ready") {
-                reasons.push(format!("policy {} is not Ready", policy_name));
-                continue;
-            }
-
-            if !status
-                .effective_namespaces
-                .iter()
-                .any(|candidate| candidate == namespace)
-            {
-                continue;
-            }
-
-            return Ok(EffectivePolicy {
-                name: policy_name,
-                status,
-            });
-        }
-
-        Err(format!(
-            "namespace {} is not eligible for action: {}",
-            namespace,
-            if reasons.is_empty() {
-                "no Ready policy matched the namespace".into()
-            } else {
-                reasons.join("; ")
-            }
-        ))
-    }
-
-    async fn list_action_policies_dup(&self) -> Result<Vec<SentinellaHubActionPolicy>, String> {
-        let gvk = GroupVersionKind::gvk(
-            ACTION_POLICY_GROUP,
-            ACTION_POLICY_VERSION,
-            ACTION_POLICY_KIND,
-        );
-        let ar = ApiResource::from_gvk(&gvk);
-        let api: Api<DynamicObject> = Api::all_with(self.client.clone(), &ar);
-        let list = api
-            .list(&ListParams::default())
-            .await
-            .map_err(|e| format!("failed to list {}: {}", ACTION_POLICY_KIND, e))?;
-
-        let mut out = Vec::new();
-        for policy in list {
-            let value = serde_json::to_value(&policy).map_err(|e| e.to_string())?;
-            let policy: SentinellaHubActionPolicy = serde_json::from_value(value)
-                .map_err(|e| format!("failed to deserialize {}: {}", ACTION_POLICY_KIND, e))?;
-            out.push(policy);
-        }
-
-        Ok(out)
-    }
-
-    async fn apply_rollout_restart_patch_dup(
-        &self,
-        kind: &str,
-        namespace: &str,
-        name: &str,
-        patch: &Value,
-        dry_run: bool,
-    ) -> Result<Value, String> {
-        let pp = if dry_run {
-            PatchParams::default().dry_run()
-        } else {
-            PatchParams::default()
-        };
-
-        match kind {
-            "Deployment" => {
-                let api: Api<Deployment> = Api::namespaced(self.client.clone(), namespace);
-                let before = api
-                    .get(name)
-                    .await
-                    .map_err(|e| format!("failed to get Deployment {}: {}", name, e))?;
-                let observed_before = json!({
-                    "restartedAt": before
-                        .spec
-                        .as_ref()
-                        .and_then(|s| s.template.metadata.as_ref())
-                        .and_then(|m| m.annotations.as_ref())
-                        .and_then(|ann| ann.get("kubectl.kubernetes.io/restartedAt"))
-                        .cloned(),
-                });
-                let _ = api
-                    .patch(name, &pp, &Patch::Strategic(patch))
-                    .await
-                    .map_err(|e| {
-                        format!(
-                            "{} patch failed for Deployment {}: {}",
-                            if dry_run { "dry-run" } else { "apply" },
-                            name,
-                            e
-                        )
-                    })?;
-                Ok(observed_before)
-            }
-            "StatefulSet" => {
-                let api: Api<StatefulSet> = Api::namespaced(self.client.clone(), namespace);
-                let before = api
-                    .get(name)
-                    .await
-                    .map_err(|e| format!("failed to get StatefulSet {}: {}", name, e))?;
-                let observed_before = json!({
-                    "restartedAt": before
-                        .spec
-                        .as_ref()
-                        .and_then(|s| s.template.metadata.as_ref())
-                        .and_then(|m| m.annotations.as_ref())
-                        .and_then(|ann| ann.get("kubectl.kubernetes.io/restartedAt"))
-                        .cloned(),
-                });
-                let _ = api
-                    .patch(name, &pp, &Patch::Strategic(patch))
-                    .await
-                    .map_err(|e| {
-                        format!(
-                            "{} patch failed for StatefulSet {}: {}",
-                            if dry_run { "dry-run" } else { "apply" },
-                            name,
-                            e
-                        )
-                    })?;
-                Ok(observed_before)
-            }
-            "DaemonSet" => {
-                let api: Api<DaemonSet> = Api::namespaced(self.client.clone(), namespace);
-                let before = api
-                    .get(name)
-                    .await
-                    .map_err(|e| format!("failed to get DaemonSet {}: {}", name, e))?;
-                let observed_before = json!({
-                    "restartedAt": before
-                        .spec
-                        .as_ref()
-                        .and_then(|s| s.template.metadata.as_ref())
-                        .and_then(|m| m.annotations.as_ref())
-                        .and_then(|ann| ann.get("kubectl.kubernetes.io/restartedAt"))
-                        .cloned(),
-                });
-                let _ = api
-                    .patch(name, &pp, &Patch::Strategic(patch))
-                    .await
-                    .map_err(|e| {
-                        format!(
-                            "{} patch failed for DaemonSet {}: {}",
-                            if dry_run { "dry-run" } else { "apply" },
-                            name,
-                            e
-                        )
-                    })?;
-                Ok(observed_before)
-            }
-            other => Err(format!(
-                "unsupported rollout_restart target kind {}; expected Deployment, StatefulSet, or DaemonSet",
-                other
-            )),
-        }
-    }
-
-    async fn wait_for_rollout_completion_dup(
-        &self,
-        kind: &str,
-        namespace: &str,
-        name: &str,
-    ) -> Result<ActionVerification, String> {
-        let timeout = Duration::from_secs(120);
-        let deadline = SystemTime::now()
-            .checked_add(timeout)
-            .ok_or_else(|| "failed to compute rollout deadline".to_string())?;
-
-        loop {
-            if SystemTime::now() > deadline {
-                return Err(format!(
-                    "rollout verification timed out for {}/{} {}",
-                    namespace, kind, name
-                ));
-            }
-
-            let observed = match kind {
-                "Deployment" => self.verify_deployment_rollout(namespace, name).await?,
-                "StatefulSet" => self.verify_statefulset_rollout(namespace, name).await?,
-                "DaemonSet" => self.verify_daemonset_rollout(namespace, name).await?,
-                other => {
-                    return Err(format!(
-                        "unsupported rollout verification target kind {}; expected Deployment, StatefulSet, or DaemonSet",
-                        other
-                    ));
-                }
-            };
-
-            if observed["ready"].as_bool().unwrap_or(false) {
-                return Ok(ActionVerification {
-                    status: "ready".into(),
-                    message: Some("workload rollout completed successfully".into()),
-                    observed_state: Some(observed),
-                });
-            }
-
-            sleep(Duration::from_secs(2)).await;
-        }
-    }
-
-    async fn verify_deployment_rollout_dup(
-        &self,
-        namespace: &str,
-        name: &str,
-    ) -> Result<Value, String> {
-        let api: Api<Deployment> = Api::namespaced(self.client.clone(), namespace);
-        let workload = api.get(name).await.map_err(|e| {
-            format!(
-                "failed to read Deployment {} for rollout verification: {}",
-                name, e
-            )
-        })?;
-        let spec_replicas = workload.spec.as_ref().and_then(|s| s.replicas).unwrap_or(1);
-        let status = workload.status.as_ref();
-        let ready = status.and_then(|s| s.updated_replicas).unwrap_or_default() >= spec_replicas
-            && status
-                .and_then(|s| s.available_replicas)
-                .unwrap_or_default()
-                >= spec_replicas
-            && status
-                .and_then(|s| s.observed_generation)
-                .unwrap_or_default()
-                >= workload.metadata.generation.unwrap_or_default();
-
-        Ok(json!({
-            "ready": ready,
-            "replicas": status.map(|s| s.replicas).unwrap_or_default(),
-            "updated_replicas": status.map(|s| s.updated_replicas).unwrap_or_default(),
-            "available_replicas": status.map(|s| s.available_replicas).unwrap_or_default(),
-            "ready_replicas": status.map(|s| s.ready_replicas).unwrap_or_default(),
-            "observed_generation": status.map(|s| s.observed_generation).unwrap_or_default(),
-        }))
-    }
-
-    async fn verify_statefulset_rollout_dup(
-        &self,
-        namespace: &str,
-        name: &str,
-    ) -> Result<Value, String> {
-        let api: Api<StatefulSet> = Api::namespaced(self.client.clone(), namespace);
-        let workload = api.get(name).await.map_err(|e| {
-            format!(
-                "failed to read StatefulSet {} for rollout verification: {}",
-                name, e
-            )
-        })?;
-        let spec_replicas = workload.spec.as_ref().and_then(|s| s.replicas).unwrap_or(1);
-        let status = workload.status.as_ref();
-        let ready = status.and_then(|s| s.updated_replicas).unwrap_or_default() >= spec_replicas
-            && status.and_then(|s| s.ready_replicas).unwrap_or_default() >= spec_replicas
-            && status
-                .and_then(|s| s.observed_generation)
-                .unwrap_or_default()
-                >= workload.metadata.generation.unwrap_or_default();
-
-        Ok(json!({
-            "ready": ready,
-            "replicas": status.map(|s| s.replicas).unwrap_or_default(),
-            "updated_replicas": status.map(|s| s.updated_replicas).unwrap_or_default(),
-            "ready_replicas": status.map(|s| s.ready_replicas).unwrap_or_default(),
-            "current_replicas": status.map(|s| s.current_replicas).unwrap_or_default(),
-            "observed_generation": status.map(|s| s.observed_generation).unwrap_or_default(),
-        }))
-    }
-
-    async fn verify_daemonset_rollout_dup(
-        &self,
-        namespace: &str,
-        name: &str,
-    ) -> Result<Value, String> {
-        let api: Api<DaemonSet> = Api::namespaced(self.client.clone(), namespace);
-        let workload = api.get(name).await.map_err(|e| {
-            format!(
-                "failed to read DaemonSet {} for rollout verification: {}",
-                name, e
-            )
-        })?;
-        let status = workload.status.as_ref();
-        let ready = status
-            .map(|s| s.desired_number_scheduled)
-            .unwrap_or_default()
-            > 0
-            && status
-                .and_then(|s| s.updated_number_scheduled)
-                .unwrap_or_default()
-                >= status
-                    .map(|s| s.desired_number_scheduled)
-                    .unwrap_or_default()
-            && status.and_then(|s| s.number_available).unwrap_or_default()
-                >= status
-                    .map(|s| s.desired_number_scheduled)
-                    .unwrap_or_default()
-            && status
-                .and_then(|s| s.observed_generation)
-                .unwrap_or_default()
-                >= workload.metadata.generation.unwrap_or_default();
-
-        Ok(json!({
-            "ready": ready,
-            "desired_number_scheduled": status.map(|s| s.desired_number_scheduled).unwrap_or_default(),
-            "current_number_scheduled": status.map(|s| s.current_number_scheduled).unwrap_or_default(),
-            "number_ready": status.map(|s| s.number_ready).unwrap_or_default(),
-            "updated_number_scheduled": status.map(|s| s.updated_number_scheduled).unwrap_or_default(),
-            "number_available": status.map(|s| s.number_available).unwrap_or_default(),
-            "observed_generation": status.map(|s| s.observed_generation).unwrap_or_default(),
-        }))
-    }
-
     async fn ensure_effective_policy_ready(
         &self,
         namespace: &str,
@@ -1181,16 +834,10 @@ impl Executor {
                 continue;
             };
 
-            let Some(last_reconciled_at_ms) = status.last_reconciled_at_ms else {
-                reasons.push(format!(
-                    "policy {} status has no freshness timestamp",
-                    policy_name
-                ));
-                continue;
-            };
-
-            if now.saturating_sub(last_reconciled_at_ms) > stale_after_ms {
-                reasons.push(format!("policy {} status is stale", policy_name));
+            if let Some(reason) =
+                Self::policy_status_rejection_reason(&policy_name, &status, now, stale_after_ms)
+            {
+                reasons.push(reason);
                 continue;
             }
 
@@ -1246,6 +893,30 @@ impl Executor {
         }
 
         Ok(out)
+    }
+
+    fn policy_status_rejection_reason(
+        policy_name: &str,
+        status: &SentinellaHubActionPolicyStatus,
+        now_ms: u128,
+        stale_after_ms: u128,
+    ) -> Option<String> {
+        if status.stale {
+            return Some(format!("policy {} status is stale", policy_name));
+        }
+
+        let Some(last_reconciled_at_ms) = status.last_reconciled_at_ms else {
+            return Some(format!(
+                "policy {} status has no freshness timestamp",
+                policy_name
+            ));
+        };
+
+        if policy_status_is_stale(Some(last_reconciled_at_ms), now_ms, stale_after_ms) {
+            return Some(format!("policy {} status is stale", policy_name));
+        }
+
+        None
     }
 
     async fn apply_rollout_restart_patch(
@@ -2192,6 +1863,27 @@ mod tests {
         namespace
     }
 
+    fn policy_status(
+        stale: bool,
+        last_reconciled_at_ms: Option<u128>,
+        ready: bool,
+    ) -> SentinellaHubActionPolicyStatus {
+        SentinellaHubActionPolicyStatus {
+            effective_namespaces: vec!["app-prod".into()],
+            conditions: vec![SentinellaHubActionPolicyCondition {
+                type_: "Ready".into(),
+                status: if ready { "True".into() } else { "False".into() },
+                reason: None,
+                message: None,
+                observed_generation: Some(1),
+                last_transition_time_ms: Some(1234),
+            }],
+            observed_generation: Some(1),
+            last_reconciled_at_ms,
+            stale,
+        }
+    }
+
     #[test]
     fn build_workload_resources_patch_includes_named_container_only() {
         let spec = workload_spec(json!({
@@ -2237,6 +1929,29 @@ mod tests {
         let err = build_workload_resources_patch(&spec).unwrap_err();
 
         assert_eq!(err, "at least one of requests or limits must be provided");
+    }
+
+    #[test]
+    fn policy_status_rejection_reason_rejects_stale_even_when_ready() {
+        let status = policy_status(true, Some(1234), true);
+
+        let reason = Executor::policy_status_rejection_reason("workload-tuning", &status, 1300, 50)
+            .expect("expected stale status to be rejected");
+
+        assert_eq!(reason, "policy workload-tuning status is stale");
+    }
+
+    #[test]
+    fn policy_status_rejection_reason_rejects_missing_freshness_timestamp() {
+        let status = policy_status(false, None, true);
+
+        let reason = Executor::policy_status_rejection_reason("workload-tuning", &status, 1300, 50)
+            .expect("expected missing timestamp to be rejected");
+
+        assert_eq!(
+            reason,
+            "policy workload-tuning status has no freshness timestamp"
+        );
     }
 
     #[test]
