@@ -753,10 +753,10 @@ Known command kinds:
 - Spec: `{ "kind": "deployment", "name": "my-app", "namespace": "default", "replicas": 5 }`
 - Validation: `replicas >= 0`.
 - Hub-side policy or UI should enforce a practical upper bound before dispatch.
-- Initial implementation scope: `kind=deployment` only.
+- Initial implementation scope: `kind=deployment` only; the RBAC is future-proofed for `StatefulSet` and `DaemonSet` scale subresources.
 - Behavioral equivalent: `kubectl scale {kind}/{name} -n {namespace} --replicas={replicas}`
 - Success criterion: the desired replica count is accepted by the API server; synchronous readiness is not required.
-- Required permissions: `get`, `patch` on `apps/deployments`.
+- Required permissions: `get`, `patch` on `apps/deployments/scale` (and future-proofed access to `apps/statefulsets/scale` and `apps/daemonsets/scale`).
 
 ### 7.3 `delete_pod`
 
