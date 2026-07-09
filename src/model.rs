@@ -1,7 +1,8 @@
 //! DTOs sent to the Sentinella Hub. Keep field names stable — the Hub depends on them.
 
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
-use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de, de::Visitor};
+use std::fmt;
 
 /// Top-level inventory snapshot.
 #[derive(Serialize, Debug)]
@@ -653,13 +654,50 @@ pub struct Command {
 }
 
 /// Execution mode for remote actions.
-#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Serialize, Debug, Clone, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 #[allow(dead_code)]
 pub enum ExecutionMode {
     #[default]
     Preview,
     Execute,
+}
+
+impl<'de> Deserialize<'de> for ExecutionMode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct ExecutionModeVisitor;
+
+        impl<'de> Visitor<'de> for ExecutionModeVisitor {
+            type Value = ExecutionMode;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("preview, execute, or apply")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                match value {
+                    "preview" => Ok(ExecutionMode::Preview),
+                    "execute" | "apply" => Ok(ExecutionMode::Execute),
+                    other => Err(E::unknown_variant(other, &["preview", "execute", "apply"])),
+                }
+            }
+
+            fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                self.visit_str(&value)
+            }
+        }
+
+        deserializer.deserialize_str(ExecutionModeVisitor)
+    }
 }
 
 /// Shared execution envelope for remote actions.
@@ -719,7 +757,9 @@ impl<'de> Deserialize<'de> for ScaleSpec {
                 replicas: spec.replicas,
             }),
             Repr::Legacy(spec) => Ok(Self {
-                execution: spec.execution.unwrap_or_else(default_execute_execution_spec),
+                execution: spec
+                    .execution
+                    .unwrap_or_else(default_execute_execution_spec),
                 target: WorkloadTargetRef {
                     kind: spec.kind,
                     namespace: spec.namespace,
@@ -1502,6 +1542,22 @@ mod tests {
     fn scale_spec_deserializes_nested_contract_shape() {
         let json = r#"{
             "execution": {"mode": "execute"},
+            "target": {"kind": "Deployment", "namespace": "causas-judiciales", "name": "backend"},
+            "replicas": 4
+        }"#;
+        let spec: ScaleSpec = serde_json::from_str(json).unwrap();
+
+        assert_eq!(spec.execution.mode, ExecutionMode::Execute);
+        assert_eq!(spec.target.kind, "Deployment");
+        assert_eq!(spec.target.namespace, "causas-judiciales");
+        assert_eq!(spec.target.name, "backend");
+        assert_eq!(spec.replicas, 4);
+    }
+
+    #[test]
+    fn scale_spec_accepts_apply_as_execute_compatibility_alias() {
+        let json = r#"{
+            "execution": {"mode": "apply"},
             "target": {"kind": "Deployment", "namespace": "causas-judiciales", "name": "backend"},
             "replicas": 4
         }"#;
