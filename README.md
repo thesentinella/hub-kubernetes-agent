@@ -526,7 +526,7 @@ podman push ghcr.io/sentinella/sentinella-hub-k8s-agent:0.1.0
      | CLUSTER_ID="my-cluster" HUB_API_KEY="shub_..." bash
    ```
 
-   The installer creates the auth Secret from `HUB_API_KEY`, applies `agent.yaml` plus `sentinella-dev-operator-policy.yaml`, and auto-detects the platform.
+   The installer creates the auth Secret from `HUB_API_KEY`, validates the workload with server-side dry-run, applies `agent.yaml` plus `sentinella-dev-operator-policy.yaml`, and auto-detects the platform.
    - Force a platform when needed:
      ```bash
      curl -sfL https://raw.githubusercontent.com/thesentinella/hub-kubernetes-agent/main/install.sh \

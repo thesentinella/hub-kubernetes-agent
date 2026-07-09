@@ -268,7 +268,7 @@ fi
 
 kubectl apply -f "$NAMESPACE_MANIFEST"
 
-echo "Validating manifest..."
+echo "Validating manifest with server-side dry-run..."
 if ! kubectl apply --dry-run=server -f "$WORKLOAD_MANIFEST" >/dev/null; then
   if [ "$PLATFORM" = "openshift" ]; then
     echo "Error: OpenShift rejected the agent manifest. Check SCC constraints or other workload security restrictions." >&2
