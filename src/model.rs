@@ -1,7 +1,8 @@
 //! DTOs sent to the Sentinella Hub. Keep field names stable — the Hub depends on them.
 
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
-use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de, de::Visitor};
+use std::fmt;
 
 /// Top-level inventory snapshot.
 #[derive(Serialize, Debug)]
@@ -653,13 +654,50 @@ pub struct Command {
 }
 
 /// Execution mode for remote actions.
-#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Serialize, Debug, Clone, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 #[allow(dead_code)]
 pub enum ExecutionMode {
     #[default]
     Preview,
     Execute,
+}
+
+impl<'de> Deserialize<'de> for ExecutionMode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct ExecutionModeVisitor;
+
+        impl<'de> Visitor<'de> for ExecutionModeVisitor {
+            type Value = ExecutionMode;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("preview, execute, or apply")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                match value {
+                    "preview" => Ok(ExecutionMode::Preview),
+                    "execute" | "apply" => Ok(ExecutionMode::Execute),
+                    other => Err(E::unknown_variant(other, &["preview", "execute", "apply"])),
+                }
+            }
+
+            fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                self.visit_str(&value)
+            }
+        }
+
+        deserializer.deserialize_str(ExecutionModeVisitor)
+    }
 }
 
 /// Shared execution envelope for remote actions.
@@ -692,12 +730,71 @@ pub struct RolloutRestartSpec {
 }
 
 /// Spec payload for `scale`.
-#[derive(Deserialize, Serialize, Debug, Clone)]
+#[derive(Serialize, Debug, Clone)]
 #[allow(dead_code)]
 pub struct ScaleSpec {
     pub execution: ExecutionSpec,
     pub target: WorkloadTargetRef,
     pub replicas: i32,
+}
+
+impl<'de> Deserialize<'de> for ScaleSpec {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Nested(ScaleSpecNested),
+            Legacy(ScaleSpecLegacy),
+        }
+
+        match Repr::deserialize(deserializer)? {
+            Repr::Nested(spec) => Ok(Self {
+                execution: spec.execution,
+                target: spec.target,
+                replicas: spec.replicas,
+            }),
+            Repr::Legacy(spec) => Ok(Self {
+                execution: spec
+                    .execution
+                    .unwrap_or_else(default_execute_execution_spec),
+                target: WorkloadTargetRef {
+                    kind: spec.kind,
+                    namespace: spec.namespace,
+                    name: spec.name,
+                },
+                replicas: spec.replicas,
+            }),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct ScaleSpecNested {
+    #[serde(default)]
+    execution: ExecutionSpec,
+    target: WorkloadTargetRef,
+    replicas: i32,
+}
+
+#[derive(Deserialize)]
+struct ScaleSpecLegacy {
+    #[serde(default)]
+    execution: Option<ExecutionSpec>,
+    kind: String,
+    namespace: String,
+    name: String,
+    replicas: i32,
+}
+
+fn default_execute_execution_spec() -> ExecutionSpec {
+    ExecutionSpec {
+        mode: ExecutionMode::Execute,
+        approval_id: None,
+        preview_resource_version: None,
+    }
 }
 
 /// Spec payload for `get_resource_yaml`.
@@ -1006,6 +1103,7 @@ pub fn policy_status_is_stale(
 
 pub const ACTION_POLICY_SUPPORTED_ACTIONS: &[&str] = &[
     "diagnose_postgresql",
+    "get_resource_yaml",
     "preview_workload_resources",
     "apply_workload_resources",
     "rollout_restart",
@@ -1438,6 +1536,61 @@ mod tests {
         let spec: WorkloadResourcesSpec = serde_json::from_str(json).unwrap();
         assert!(spec.requests.is_none());
         assert!(spec.limits.is_none());
+    }
+
+    #[test]
+    fn scale_spec_deserializes_nested_contract_shape() {
+        let json = r#"{
+            "execution": {"mode": "execute"},
+            "target": {"kind": "Deployment", "namespace": "causas-judiciales", "name": "backend"},
+            "replicas": 4
+        }"#;
+        let spec: ScaleSpec = serde_json::from_str(json).unwrap();
+
+        assert_eq!(spec.execution.mode, ExecutionMode::Execute);
+        assert_eq!(spec.target.kind, "Deployment");
+        assert_eq!(spec.target.namespace, "causas-judiciales");
+        assert_eq!(spec.target.name, "backend");
+        assert_eq!(spec.replicas, 4);
+    }
+
+    #[test]
+    fn scale_spec_accepts_apply_as_execute_compatibility_alias() {
+        let json = r#"{
+            "execution": {"mode": "apply"},
+            "target": {"kind": "Deployment", "namespace": "causas-judiciales", "name": "backend"},
+            "replicas": 4
+        }"#;
+        let spec: ScaleSpec = serde_json::from_str(json).unwrap();
+
+        assert_eq!(spec.execution.mode, ExecutionMode::Execute);
+        assert_eq!(spec.target.kind, "Deployment");
+        assert_eq!(spec.target.namespace, "causas-judiciales");
+        assert_eq!(spec.target.name, "backend");
+        assert_eq!(spec.replicas, 4);
+    }
+
+    #[test]
+    fn scale_spec_deserializes_legacy_flat_ui_shape() {
+        let json = r#"{
+            "kind": "Deployment",
+            "namespace": "causas-judiciales",
+            "name": "backend",
+            "replicas": 4
+        }"#;
+        let spec: ScaleSpec = serde_json::from_str(json).unwrap();
+
+        assert_eq!(spec.execution.mode, ExecutionMode::Execute);
+        assert_eq!(spec.target.kind, "Deployment");
+        assert_eq!(spec.target.namespace, "causas-judiciales");
+        assert_eq!(spec.target.name, "backend");
+        assert_eq!(spec.replicas, 4);
+    }
+
+    #[test]
+    fn policy_action_is_supported_includes_get_resource_yaml() {
+        assert!(policy_action_is_supported("get_resource_yaml"));
+        assert!(!policy_action_is_supported("apply_manifest"));
     }
 
     #[test]

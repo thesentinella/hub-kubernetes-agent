@@ -245,7 +245,7 @@ Warning strings use stable code prefixes for Hub-side grouping:
 
 This must be a separate ClusterRole/Binding applied only when `ACTIONS_ENABLED=true`. The read-only ClusterRole stays untouched. **No `*` on `*/*`**. The root `agent.yaml` does not grant this workload patch RBAC by default. Eligible namespaces must also be labeled `sentinella.io/action-mode=enabled`; the agent checks that label before patching.
 
-Pre-flight warning checks are also best-effort. Without additional read permissions for HPAs, VPAs, LimitRanges, ResourceQuotas, and PDBs, preview still succeeds but includes `preflight.check.unavailable` warnings for the checks the agent cannot evaluate.
+Pre-flight warning checks are also best-effort. With the bundled reader RBAC, HPAs, VPAs, LimitRanges, ResourceQuotas, and PDBs are evaluated; preview still succeeds but may include `preflight.check.unavailable` warnings when a checked resource type is absent or unreadable.
 
 Recommendation when enabling: only grant `patch` after the Hub has dashboard approval flow in place. The preview-then-apply pattern is the technical mechanism; the Hub-side approval workflow is what makes it safe for regulated clients.
 
@@ -526,7 +526,7 @@ podman push ghcr.io/sentinella/sentinella-hub-k8s-agent:0.1.0
      | CLUSTER_ID="my-cluster" HUB_API_KEY="shub_..." bash
    ```
 
-   The installer creates the auth Secret from `HUB_API_KEY`, applies `agent.yaml`, and auto-detects the platform.
+   The installer creates the auth Secret from `HUB_API_KEY`, validates the workload with server-side dry-run, applies `agent.yaml` plus `sentinella-dev-operator-policy.yaml`, and auto-detects the platform.
    - Force a platform when needed:
      ```bash
      curl -sfL https://raw.githubusercontent.com/thesentinella/hub-kubernetes-agent/main/install.sh \
@@ -549,15 +549,17 @@ podman push ghcr.io/sentinella/sentinella-hub-k8s-agent:0.1.0
        --from-file=api-key=/dev/stdin \
        --dry-run=client -o yaml | kubectl apply -f -
      ```
-   - Edit `agent.yaml`:
-     - `CLUSTER_ID` unique per cluster.
-     - `image:` for the `agent` container pointing to your Rust agent image.
-    - For dependency collection: set `COLLECT_DEPENDENCIES_TETRAGON=true`. The default `TETRAGON_GRPC_ADDRESS` in that mode is `tetragon-grpc.tetragon.svc.cluster.local:54321`. Set `TETRAGON_REQUIRED_FOR_READINESS=false` for dev clusters or nodes that cannot run Tetragon.
-     - Toleration block — current value runs on every node including control plane; trim if you want a smaller footprint.
-   - Apply:
-     ```bash
-     kubectl apply -f agent.yaml
-     ```
+    - Edit `agent.yaml`:
+      - `CLUSTER_ID` unique per cluster.
+      - `image:` for the `agent` container pointing to your Rust agent image.
+      - For dependency collection: set `COLLECT_DEPENDENCIES_TETRAGON=true`. The default `TETRAGON_GRPC_ADDRESS` in that mode is `tetragon-grpc.tetragon.svc.cluster.local:54321`. Set `TETRAGON_REQUIRED_FOR_READINESS=false` for dev clusters or nodes that cannot run Tetragon.
+      - Toleration block — current value runs on every node including control plane; trim if you want a smaller footprint.
+    - Apply `sentinella-dev-operator-policy.yaml` alongside `agent.yaml` so the operator policy ships with the install bundle.
+    - Apply:
+      ```bash
+      kubectl apply -f agent.yaml
+      kubectl apply -f sentinella-dev-operator-policy.yaml
+      ```
 
 4. Verify:
    ```bash

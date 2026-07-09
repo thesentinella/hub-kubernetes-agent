@@ -720,7 +720,7 @@ Known command kinds:
 - `preview_workload_resources` performs a Kubernetes strategic-merge dry-run patch with `dryRun=All` for `Deployment`, `StatefulSet`, and `DaemonSet` when actions are enabled.
 - Preview pre-flight checks are best-effort and non-fatal; check errors become warnings and do not fail the preview by themselves.
 - Implemented pre-flight warning code prefixes are: `preflight.hpa.targeted`, `preflight.vpa.auto_mode`, `preflight.limitrange.present`, `preflight.resourcequota.present`, `preflight.pdb.selector_overlap`, and `preflight.check.unavailable`.
-- If the agent lacks read permissions (or the VPA CRD is absent), checks return `preflight.check.unavailable` warnings and preview execution continues.
+- If the agent lacks read permissions for VPA or the VPA CRD is absent, checks return `preflight.check.unavailable` warnings and preview execution continues.
 - Successful previews return `status: "ok"`, `dry_run: true`, `applied_patch`, `observed_before`, `observed_after`, and `warnings`.
 - Failed previews return `status: "error"` and `dry_run: true`.
 - `apply_workload_resources` performs a Kubernetes strategic-merge patch for `Deployment`, `StatefulSet`, and `DaemonSet` when actions are enabled.
@@ -817,6 +817,8 @@ Known command kinds:
 ## Deployment Manifest
 
 - The deploy manifest is root `agent.yaml`.
+- The install bundle also includes `sentinella-dev-operator-policy.yaml` so the default action policy ships with the agent.
+- Installer validation uses server-side dry-run on the rendered workload manifest; avoid client-side dry-run against the full bundle because the CRD path is brittle.
 - Action Mode eligibility is policy-driven: the operator reconciles namespace RoleBindings for namespaces that are not in the fixed or configured exclude list, and the executor only allows commands in namespaces present in a `Ready` policy's `effectiveNamespaces`.
 - `ACTION_OPERATOR_ENABLED` controls the opt-in RoleBinding reconciler loop; `ACTION_OPERATOR_POLL_INTERVAL_SECS` sets its poll interval; `ACTION_OPERATOR_EXCLUDED_NAMESPACES` adds YAML-list exclusions to the fixed namespace denylist.
 - The `agent` container image is `us-east1-docker.pkg.dev/sentinella-hub/kubernetes-agent/sentinella-hub-k8s-agent:<tag>`.

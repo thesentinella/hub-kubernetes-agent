@@ -1,0 +1,21 @@
+apiVersion: sentinella.io/v1alpha1
+kind: SentinellaHubActionPolicy
+metadata:
+  name: sentinella-dev-operator-policy
+spec:
+  namespaceSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: sentinella
+  allowedActions:
+    - diagnose_postgresql
+    - preview_workload_resources
+    - apply_workload_resources
+    - get_resource_yaml
+    - rollout_restart
+    - scale
+    - self_update
+    - update_agent
+  allowedResources:
+    - Deployment
+    - StatefulSet
+    - DaemonSet
