@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.2](https://github.com/thesentinella/hub-kubernetes-agent/compare/v1.3.1...v1.3.2) (2026-07-09)
+
+
+### Bug Fixes
+
+* improve action compatibility and preflight RBAC ([#166](https://github.com/thesentinella/hub-kubernetes-agent/issues/166)) ([bb8bb10](https://github.com/thesentinella/hub-kubernetes-agent/commit/bb8bb1058ef6a12ab7fe9e6eb7b5313f31f6756a))
+
 ## [1.3.1](https://github.com/thesentinella/hub-kubernetes-agent/compare/v1.3.0...v1.3.1) (2026-07-08)
 
 
