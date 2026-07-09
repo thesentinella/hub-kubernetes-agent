@@ -5,30 +5,30 @@
 
 use crate::config::Config;
 use crate::model::{
-    ActionVerification, Command, CommandResult, ExecutionMode, PostgresqlDiagnosticSpec,
-    ResourceMap, ResourceYamlMetadata, ResourceYamlResult, ResourceYamlSpec, RolloutRestartSpec,
-    ScaleSpec, SelfUpdateSpec, SentinellaHubActionPolicy, SentinellaHubActionPolicyCondition,
-    SentinellaHubActionPolicyLimits, SentinellaHubActionPolicyStatus, UpdateAgentSpec,
-    WorkloadResourcesSpec, WorkloadTargetRef, parse_cpu_quantity, parse_memory_quantity,
-    policy_action_is_supported, policy_action_targets_workload, policy_resource_is_supported,
-    policy_status_is_stale, resource_yaml_target,
+    ActionVerification, Command, CommandResult, DrainNodeSpec, ExecutionMode,
+    PostgresqlDiagnosticSpec, ResourceMap, ResourceYamlMetadata, ResourceYamlResult,
+    ResourceYamlSpec, RolloutRestartSpec, ScaleSpec, SelfUpdateSpec, SentinellaHubActionPolicy,
+    SentinellaHubActionPolicyCondition, SentinellaHubActionPolicyLimits,
+    SentinellaHubActionPolicyStatus, UpdateAgentSpec, WorkloadResourcesSpec, WorkloadTargetRef,
+    parse_cpu_quantity, parse_memory_quantity, policy_action_is_supported,
+    policy_action_targets_workload, policy_resource_is_supported, policy_status_is_stale,
+    resource_yaml_target,
 };
 use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, StatefulSet};
 use k8s_openapi::api::autoscaling::v2::HorizontalPodAutoscaler;
-use k8s_openapi::api::core::v1::Namespace;
-use k8s_openapi::api::core::v1::ResourceRequirements;
 use k8s_openapi::api::core::v1::{LimitRange, ResourceQuota};
-use k8s_openapi::api::policy::v1::PodDisruptionBudget;
+use k8s_openapi::api::core::v1::{Namespace, Node, Pod, ResourceRequirements};
+use k8s_openapi::api::policy::v1::{Eviction, PodDisruptionBudget};
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector;
-use kube::api::{ApiResource, DynamicObject, ListParams, Patch, PatchParams};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
+use kube::api::{ApiResource, DynamicObject, ListParams, Patch, PatchParams, PostParams};
 use kube::core::GroupVersionKind;
 use kube::{Api, Client, Error as KubeError};
 use once_cell::sync::Lazy;
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Mutex;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use tokio::time::sleep;
@@ -166,6 +166,21 @@ impl Executor {
 
                 match parse_spec::<ScaleSpec>(cmd) {
                     Ok(spec) => self.scale_workload(&cmd.id, spec).await,
+                    Err(e) => spec_error(cmd, e),
+                }
+            }
+            "drain_node" => {
+                if !self.cfg.actions_enabled {
+                    warn!(command_id = %cmd.id, kind = %cmd.kind, "actions disabled; skipping");
+                    return CommandResult::simple(
+                        cmd.id.clone(),
+                        "skipped",
+                        Some("agent in read-only mode (ACTIONS_ENABLED=false)".into()),
+                    );
+                }
+
+                match parse_spec::<DrainNodeSpec>(cmd) {
+                    Ok(spec) => self.drain_node(&cmd.id, spec).await,
                     Err(e) => spec_error(cmd, e),
                 }
             }
@@ -990,6 +1005,266 @@ impl Executor {
         result
     }
 
+    async fn drain_node(&self, command_id: &str, spec: DrainNodeSpec) -> CommandResult {
+        fn classify_pods_on_node(
+            node_name: &str,
+            pods: Vec<Pod>,
+        ) -> (Vec<String>, Vec<String>, Vec<(String, String)>) {
+            let mut daemonset_pods = Vec::new();
+            let mut unmanaged_pods = Vec::new();
+            let mut drainable_pods = Vec::new();
+
+            for pod in pods {
+                let pod_node = pod.spec.as_ref().and_then(|s| s.node_name.as_deref());
+                if pod_node != Some(node_name) {
+                    continue;
+                }
+
+                let namespace = pod.metadata.namespace.clone().unwrap_or_default();
+                let name = pod.metadata.name.clone().unwrap_or_default();
+                let display_name = format!("{}/{}", namespace, name);
+
+                if pod
+                    .metadata
+                    .annotations
+                    .as_ref()
+                    .and_then(|annotations| annotations.get("kubernetes.io/config.mirror"))
+                    .is_some()
+                {
+                    daemonset_pods.push(format!("ignored mirror pod {}", display_name));
+                    continue;
+                }
+
+                let owner_kinds = pod
+                    .metadata
+                    .owner_references
+                    .as_ref()
+                    .map(|refs| {
+                        refs.iter()
+                            .map(|owner| owner.kind.as_str())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+
+                if owner_kinds.iter().any(|kind| *kind == "DaemonSet") {
+                    daemonset_pods.push(format!("ignored DaemonSet pod {}", display_name));
+                    continue;
+                }
+
+                if owner_kinds.is_empty() {
+                    unmanaged_pods.push(display_name);
+                    continue;
+                }
+
+                drainable_pods.push((namespace, name));
+            }
+
+            (daemonset_pods, unmanaged_pods, drainable_pods)
+        }
+
+        let node_name = spec.node_name.trim();
+        if node_name.is_empty() {
+            return CommandResult::simple(
+                command_id.to_string(),
+                "error",
+                Some("node_name is required".into()),
+            );
+        }
+
+        if let Err(message) = self.ensure_cluster_action_allowed("drain_node").await {
+            return CommandResult::simple(command_id.to_string(), "error", Some(message));
+        }
+
+        let nodes: Api<Node> = Api::all(self.client.clone());
+        let node = match nodes.get(node_name).await {
+            Ok(node) => node,
+            Err(err) => {
+                return CommandResult::simple(
+                    command_id.to_string(),
+                    "error",
+                    Some(format!("failed to get Node {}: {}", node_name, err)),
+                );
+            }
+        };
+
+        let before_unschedulable = node
+            .spec
+            .as_ref()
+            .and_then(|s| s.unschedulable)
+            .unwrap_or(false);
+
+        let field_selector = format!("spec.nodeName={}", node_name);
+
+        let pods: Api<Pod> = Api::all(self.client.clone());
+        let pod_list = match pods
+            .list(&ListParams::default().fields(&field_selector))
+            .await
+        {
+            Ok(list) => list,
+            Err(err) => {
+                return CommandResult::simple(
+                    command_id.to_string(),
+                    "error",
+                    Some(format!(
+                        "failed to list Pods for drain {}: {}",
+                        node_name, err
+                    )),
+                );
+            }
+        };
+
+        let (daemonset_pods, unmanaged_pods, drainable_pods) =
+            classify_pods_on_node(node_name, pod_list.items);
+
+        if !unmanaged_pods.is_empty() {
+            return CommandResult::simple(
+                command_id.to_string(),
+                "error",
+                Some(format!(
+                    "refusing to drain Node {} because unmanaged Pods require an explicit force path: {}",
+                    node_name,
+                    unmanaged_pods.join(", ")
+                )),
+            );
+        }
+
+        let cordon_patch = json!({"spec": {"unschedulable": true}});
+        if let Err(err) = nodes
+            .patch(
+                node_name,
+                &PatchParams::default(),
+                &Patch::Merge(&cordon_patch),
+            )
+            .await
+        {
+            return CommandResult::simple(
+                command_id.to_string(),
+                "error",
+                Some(format!("failed to cordon Node {}: {}", node_name, err)),
+            );
+        }
+
+        let mut evicted_pods = Vec::new();
+        for (namespace, name) in drainable_pods {
+            let api: Api<Pod> = Api::namespaced(self.client.clone(), &namespace);
+            let eviction = Eviction {
+                delete_options: None,
+                metadata: ObjectMeta {
+                    name: Some(name.clone()),
+                    namespace: Some(namespace.clone()),
+                    ..ObjectMeta::default()
+                },
+            };
+            if let Err(err) = api
+                .create_subresource::<Eviction, Value>(
+                    "eviction",
+                    &name,
+                    &PostParams::default(),
+                    &eviction,
+                )
+                .await
+            {
+                return CommandResult::simple(
+                    command_id.to_string(),
+                    "error",
+                    Some(format!(
+                        "failed to evict Pod {}/{} while draining Node {}: {}",
+                        namespace, name, node_name, err
+                    )),
+                );
+            }
+            evicted_pods.push(format!("{}/{}", namespace, name));
+        }
+
+        let timeout = Duration::from_secs(300);
+        let deadline = Instant::now() + timeout;
+        let mut remaining_pods = Vec::new();
+        loop {
+            let pod_list = match pods
+                .list(&ListParams::default().fields(&field_selector))
+                .await
+            {
+                Ok(list) => list,
+                Err(err) => {
+                    return CommandResult::simple(
+                        command_id.to_string(),
+                        "error",
+                        Some(format!(
+                            "failed to poll Pods while draining Node {}: {}",
+                            node_name, err
+                        )),
+                    );
+                }
+            };
+
+            let (_daemonset_warnings, still_unmanaged, still_drainable) =
+                classify_pods_on_node(node_name, pod_list.items);
+
+            if !still_unmanaged.is_empty() {
+                return CommandResult::simple(
+                    command_id.to_string(),
+                    "error",
+                    Some(format!(
+                        "Node {} gained unmanaged Pods during drain: {}",
+                        node_name,
+                        still_unmanaged.join(", ")
+                    )),
+                );
+            }
+
+            if still_drainable.is_empty() {
+                break;
+            }
+
+            remaining_pods = still_drainable
+                .iter()
+                .map(|(namespace, name)| format!("{}/{}", namespace, name))
+                .collect();
+
+            if Instant::now() >= deadline {
+                return CommandResult::simple(
+                    command_id.to_string(),
+                    "error",
+                    Some(format!(
+                        "timed out waiting for Node {} to drain; remaining Pods: {}",
+                        node_name,
+                        remaining_pods.join(", ")
+                    )),
+                );
+            }
+
+            sleep(Duration::from_secs(5)).await;
+        }
+
+        let warnings = daemonset_pods.clone();
+
+        let mut result = CommandResult::simple(command_id.to_string(), "ok", None);
+        result.dry_run = Some(false);
+        result.requested_state = Some(json!({"nodeName": node_name}));
+        result.observed_before = Some(json!({
+            "unschedulable": before_unschedulable,
+            "drainablePods": evicted_pods.len(),
+        }));
+        result.observed_after = Some(json!({
+            "unschedulable": true,
+            "evictedPods": evicted_pods,
+            "remainingPods": remaining_pods,
+            "warnings": warnings.clone(),
+        }));
+        if !warnings.is_empty() {
+            result.warnings = warnings;
+        }
+        result.verification = Some(ActionVerification {
+            status: "accepted".into(),
+            message: Some("node cordoned and pod eviction completed".into()),
+            observed_state: Some(json!({
+                "unschedulable": true,
+                "evictedPods": result.observed_after.as_ref().and_then(|v| v.get("evictedPods")).cloned().unwrap_or(Value::Null),
+            })),
+        });
+        result
+    }
+
     async fn ensure_effective_policy_ready(
         &self,
         namespace: &str,
@@ -1099,8 +1374,7 @@ impl Executor {
                 namespace,
                 command_kind,
                 &status.effective_namespaces,
-            )
-            {
+            ) {
                 continue;
             }
 
@@ -1132,12 +1406,80 @@ impl Executor {
         ))
     }
 
+    async fn ensure_cluster_action_allowed(
+        &self,
+        command_kind: &str,
+    ) -> Result<EffectivePolicy, String> {
+        let policies = self.list_action_policies().await?;
+        let stale_after = self
+            .cfg
+            .action_operator_poll_interval
+            .checked_mul(3)
+            .unwrap_or(self.cfg.action_operator_poll_interval);
+        let stale_after_ms = stale_after.as_millis();
+        let now = now_ms();
+
+        let mut reasons = Vec::new();
+        for policy in policies {
+            let Some(policy_name) = policy.metadata.name.clone() else {
+                continue;
+            };
+            let Some(status) = policy.status.clone() else {
+                reasons.push(format!("policy {} has no status", policy_name));
+                continue;
+            };
+
+            let Some(last_reconciled_at_ms) = status.last_reconciled_at_ms else {
+                reasons.push(format!(
+                    "policy {} status has no freshness timestamp",
+                    policy_name
+                ));
+                continue;
+            };
+
+            if policy_status_is_stale(Some(last_reconciled_at_ms), now, stale_after_ms) {
+                reasons.push(format!("policy {} status is stale", policy_name));
+                continue;
+            }
+
+            if !condition_true(&status.conditions, "Ready") {
+                reasons.push(format!("policy {} is not Ready", policy_name));
+                continue;
+            }
+
+            if let Some(reason) =
+                Self::policy_rejection_reason_for_command(&policy, command_kind, None, None)
+            {
+                reasons.push(format!("policy {} {}", policy_name, reason));
+                continue;
+            }
+
+            return Ok(EffectivePolicy {
+                name: policy_name,
+                policy,
+                status,
+            });
+        }
+
+        Err(format!(
+            "cluster action {} is not eligible: {}",
+            command_kind,
+            if reasons.is_empty() {
+                "no Ready policy matched the cluster action".into()
+            } else {
+                reasons.join("; ")
+            }
+        ))
+    }
+
     fn namespace_is_effective_for_command(
         namespace: &str,
         command_kind: &str,
         effective_namespaces: &[String],
     ) -> bool {
-        effective_namespaces.iter().any(|candidate| candidate == namespace)
+        effective_namespaces
+            .iter()
+            .any(|candidate| candidate == namespace)
             || (command_kind == "update_agent" && namespace == UPDATE_AGENT_NAMESPACE)
     }
 
@@ -2299,6 +2641,16 @@ mod tests {
                 Some(&spec)
             )
             .is_none()
+        );
+    }
+
+    #[test]
+    fn policy_rejection_reason_for_command_allows_cluster_action() {
+        let policy = policy_for_gating(vec!["drain_node"], vec![], None);
+
+        assert!(
+            Executor::policy_rejection_reason_for_command(&policy, "drain_node", None, None)
+                .is_none()
         );
     }
 

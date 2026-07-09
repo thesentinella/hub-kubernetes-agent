@@ -787,12 +787,12 @@ Known command kinds:
 ### 7.6 `drain_node`
 
 - Purpose: supports the main operation of the Drain node runbook.
-- Spec: `{ "name": "worker-01", "ignore_daemonsets": true, "delete_emptydir_data": true, "timeout_seconds": 300 }`
-- Behavioral equivalent: `kubectl drain worker-01 --ignore-daemonsets --delete-emptydir-data`
-- Required behavior: cordon the node if needed, identify evictable pods, reject or exclude unsupported pods, evict through the Eviction API, wait for completion or timeout, and return a summarized result.
-- Validation: `timeout_seconds > 0`; `ignore_daemonsets` and `delete_emptydir_data` must be explicit.
-- Safety requirement: this command should require an explicit destructive-action opt-in beyond `ACTIONS_ENABLED=true` before it is enabled in the Hub.
-- Required permissions: `get`, `list`, `watch` on `core/pods`; `get`, `patch` on `core/nodes`; `create` on `core/pods/eviction`.
+- Spec: `{ "nodeName": "worker-01" }`
+- Behavioral equivalent: cordon the node, then evict eligible pods on the node.
+- Required behavior: cordon the node, identify pods scheduled there, skip mirror and DaemonSet-managed pods, reject unmanaged pods, evict the eligible pods, and return a summarized result.
+- Validation: `nodeName` is required and must be non-empty.
+- Safety requirement: this command requires `ACTIONS_ENABLED=true` and a Ready `SentinellaHubActionPolicy` that allows `drain_node`.
+- Required permissions: `patch` on `core/nodes`; `create` on `core/pods/eviction`. Read permissions on pods are already covered by the bundled reader role.
 
 ### 7.7 `apply_manifest`
 

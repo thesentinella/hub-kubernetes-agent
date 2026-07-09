@@ -158,7 +158,7 @@ Example snapshot payload:
 
 ### Actions — designed for gradual rollout
 
-`src/executor.rs` keeps the agent in read-only mode while `ACTIONS_ENABLED=false`: mutating commands are skipped before parsing the command spec, but `get_resource_yaml` remains available as a read-only fetch. When actions are enabled, `preview_workload_resources` performs a server-side dry-run, `apply_workload_resources` performs a live strategic-merge patch, `self_update` triggers an immediate agent restart, and `update_agent` updates the fixed agent DaemonSet image.
+`src/executor.rs` keeps the agent in read-only mode while `ACTIONS_ENABLED=false`: mutating commands are skipped before parsing the command spec, but `get_resource_yaml` remains available as a read-only fetch. When actions are enabled, `preview_workload_resources` performs a server-side dry-run, `apply_workload_resources` performs a live strategic-merge patch, `drain_node` cordons a node and evicts eligible pods after action-policy approval, `self_update` triggers an immediate agent restart, and `update_agent` updates the fixed agent DaemonSet image.
 
 For Action Mode, the target namespace must also carry the label `sentinella.io/action-mode=enabled`; the executor rejects workload patch commands when the label is missing or set to another value.
 
@@ -247,6 +247,8 @@ Warning strings use stable code prefixes for Hub-side grouping:
 ```
 
 This must be a separate ClusterRole/Binding applied only when `ACTIONS_ENABLED=true`. The read-only ClusterRole stays untouched. **No `*` on `*/*`**. The root `agent.yaml` does not grant this workload patch RBAC by default. Eligible namespaces must also be labeled `sentinella.io/action-mode=enabled`; the agent checks that label before patching.
+
+`drain_node` is a separate apply-only command. It requires `ACTIONS_ENABLED=true`, a Ready `SentinellaHubActionPolicy` that allows `drain_node`, and its own cluster-wide node plus pod-eviction RBAC.
 
 Pre-flight warning checks are also best-effort. With the bundled reader RBAC, HPAs, VPAs, LimitRanges, ResourceQuotas, and PDBs are evaluated; preview still succeeds but may include `preflight.check.unavailable` warnings when a checked resource type is absent or unreadable.
 
@@ -635,7 +637,7 @@ No manual tagging required.
 
 1. Expand pre-flight safety checks from presence/target signals to full value validation (LimitRange bounds and ResourceQuota deltas).
 2. Add command-level policy controls for apply (for example allow/deny lists by namespace/workload kind).
-3. Add additional commands: `scale_workload`, `restart_workload` (rollout restart annotation), `cordon_node`, `drain_node`.
+3. Add additional commands: `scale_workload`, `restart_workload` (rollout restart annotation), `cordon_node`.
 4. Evaluate in-place pod resize via the `pods/resize` subresource (Kubernetes 1.33+) for containers with a compatible `resizePolicy`.
 5. Add incremental collection (watches instead of full lists every minute) once snapshots get costly on large clusters.
 6. Add node-local data collection (kubelet stats, host filesystem) using the existing per-node pod presence.

@@ -729,6 +729,14 @@ pub struct RolloutRestartSpec {
     pub target: WorkloadTargetRef,
 }
 
+/// Spec payload for `drain_node`.
+#[derive(Deserialize, Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
+pub struct DrainNodeSpec {
+    pub node_name: String,
+}
+
 /// Spec payload for `scale`.
 #[derive(Serialize, Debug, Clone)]
 #[allow(dead_code)]
@@ -1104,6 +1112,7 @@ pub fn policy_status_is_stale(
 pub const ACTION_POLICY_SUPPORTED_ACTIONS: &[&str] = &[
     "diagnose_postgresql",
     "get_resource_yaml",
+    "drain_node",
     "preview_workload_resources",
     "apply_workload_resources",
     "rollout_restart",
@@ -1571,6 +1580,14 @@ mod tests {
     }
 
     #[test]
+    fn drain_node_spec_deserializes() {
+        let json = r#"{"nodeName":"worker-1"}"#;
+        let spec: DrainNodeSpec = serde_json::from_str(json).unwrap();
+
+        assert_eq!(spec.node_name, "worker-1");
+    }
+
+    #[test]
     fn scale_spec_deserializes_legacy_flat_ui_shape() {
         let json = r#"{
             "kind": "Deployment",
@@ -1591,6 +1608,11 @@ mod tests {
     fn policy_action_is_supported_includes_get_resource_yaml() {
         assert!(policy_action_is_supported("get_resource_yaml"));
         assert!(!policy_action_is_supported("apply_manifest"));
+    }
+
+    #[test]
+    fn policy_action_is_supported_includes_drain_node() {
+        assert!(policy_action_is_supported("drain_node"));
     }
 
     #[test]
