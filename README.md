@@ -245,7 +245,7 @@ Warning strings use stable code prefixes for Hub-side grouping:
 
 This must be a separate ClusterRole/Binding applied only when `ACTIONS_ENABLED=true`. The read-only ClusterRole stays untouched. **No `*` on `*/*`**. The root `agent.yaml` does not grant this workload patch RBAC by default. Eligible namespaces must also be labeled `sentinella.io/action-mode=enabled`; the agent checks that label before patching.
 
-Pre-flight warning checks are also best-effort. Without additional read permissions for HPAs, VPAs, LimitRanges, ResourceQuotas, and PDBs, preview still succeeds but includes `preflight.check.unavailable` warnings for the checks the agent cannot evaluate.
+Pre-flight warning checks are also best-effort. With the bundled reader RBAC, HPAs, VPAs, LimitRanges, ResourceQuotas, and PDBs are evaluated; preview still succeeds but may include `preflight.check.unavailable` warnings when a checked resource type is absent or unreadable.
 
 Recommendation when enabling: only grant `patch` after the Hub has dashboard approval flow in place. The preview-then-apply pattern is the technical mechanism; the Hub-side approval workflow is what makes it safe for regulated clients.
 

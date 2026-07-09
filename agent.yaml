@@ -37,9 +37,22 @@ rules:
     resources:
       - pods
     verbs: ["get", "list", "watch"]
+  - apiGroups: ["autoscaling"]
+    resources:
+      - horizontalpodautoscalers
+    verbs: ["get", "list", "watch"]
   - apiGroups: ["autoscaling.k8s.io"]
     resources:
       - verticalpodautoscalers
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources:
+      - limitranges
+      - resourcequotas
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["policy"]
+    resources:
+      - poddisruptionbudgets
     verbs: ["get", "list", "watch"]
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources:

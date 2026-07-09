@@ -720,7 +720,7 @@ Known command kinds:
 - `preview_workload_resources` performs a Kubernetes strategic-merge dry-run patch with `dryRun=All` for `Deployment`, `StatefulSet`, and `DaemonSet` when actions are enabled.
 - Preview pre-flight checks are best-effort and non-fatal; check errors become warnings and do not fail the preview by themselves.
 - Implemented pre-flight warning code prefixes are: `preflight.hpa.targeted`, `preflight.vpa.auto_mode`, `preflight.limitrange.present`, `preflight.resourcequota.present`, `preflight.pdb.selector_overlap`, and `preflight.check.unavailable`.
-- If the agent lacks read permissions (or the VPA CRD is absent), checks return `preflight.check.unavailable` warnings and preview execution continues.
+- If the agent lacks read permissions for VPA or the VPA CRD is absent, checks return `preflight.check.unavailable` warnings and preview execution continues.
 - Successful previews return `status: "ok"`, `dry_run: true`, `applied_patch`, `observed_before`, `observed_after`, and `warnings`.
 - Failed previews return `status: "error"` and `dry_run: true`.
 - `apply_workload_resources` performs a Kubernetes strategic-merge patch for `Deployment`, `StatefulSet`, and `DaemonSet` when actions are enabled.
