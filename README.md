@@ -240,7 +240,10 @@ Warning strings use stable code prefixes for Hub-side grouping:
 ```yaml
 - apiGroups: ["apps"]
   resources: ["deployments", "statefulsets", "daemonsets"]
-  verbs: ["patch"]
+  verbs: ["get", "list", "watch", "patch"]
+- apiGroups: ["apps"]
+  resources: ["deployments/scale", "statefulsets/scale", "daemonsets/scale"]
+  verbs: ["get", "patch"]
 ```
 
 This must be a separate ClusterRole/Binding applied only when `ACTIONS_ENABLED=true`. The read-only ClusterRole stays untouched. **No `*` on `*/*`**. The root `agent.yaml` does not grant this workload patch RBAC by default. Eligible namespaces must also be labeled `sentinella.io/action-mode=enabled`; the agent checks that label before patching.
