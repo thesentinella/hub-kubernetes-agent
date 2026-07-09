@@ -58,6 +58,7 @@ static COMMAND_DEDUP: Lazy<Mutex<CommandDedupState>> =
     Lazy::new(|| Mutex::new(CommandDedupState::default()));
 
 #[allow(dead_code)]
+#[derive(Debug)]
 struct EffectivePolicy {
     name: String,
     policy: SentinellaHubActionPolicy,
@@ -1418,7 +1419,15 @@ impl Executor {
             .unwrap_or(self.cfg.action_operator_poll_interval);
         let stale_after_ms = stale_after.as_millis();
         let now = now_ms();
+        Self::select_cluster_action_policy(policies, command_kind, now, stale_after_ms)
+    }
 
+    fn select_cluster_action_policy(
+        policies: Vec<SentinellaHubActionPolicy>,
+        command_kind: &str,
+        now: u128,
+        stale_after_ms: u128,
+    ) -> Result<EffectivePolicy, String> {
         let mut reasons = Vec::new();
         for policy in policies {
             let Some(policy_name) = policy.metadata.name.clone() else {
@@ -2620,6 +2629,99 @@ mod tests {
             last_reconciled_at_ms,
             stale,
         }
+    }
+
+    #[test]
+    fn select_cluster_action_policy_rejects_when_no_policies_match() {
+        let err = Executor::select_cluster_action_policy(Vec::new(), "drain_node", 1000, 300)
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            "cluster action drain_node is not eligible: no Ready policy matched the cluster action"
+        );
+    }
+
+    #[test]
+    fn select_cluster_action_policy_rejects_missing_status() {
+        let mut policy = policy_for_gating(vec!["drain_node"], vec![], None);
+        policy.status = None;
+
+        let err = Executor::select_cluster_action_policy(vec![policy], "drain_node", 1000, 300)
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            "cluster action drain_node is not eligible: policy policy has no status"
+        );
+    }
+
+    #[test]
+    fn select_cluster_action_policy_rejects_missing_freshness_timestamp() {
+        let mut policy = policy_for_gating(vec!["drain_node"], vec![], None);
+        policy.status = Some(policy_status(false, None, true));
+
+        let err = Executor::select_cluster_action_policy(vec![policy], "drain_node", 1000, 300)
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            "cluster action drain_node is not eligible: policy policy status has no freshness timestamp"
+        );
+    }
+
+    #[test]
+    fn select_cluster_action_policy_rejects_stale_policy() {
+        let mut policy = policy_for_gating(vec!["drain_node"], vec![], None);
+        policy.status = Some(policy_status(true, Some(1), true));
+
+        let err = Executor::select_cluster_action_policy(vec![policy], "drain_node", 1000, 300)
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            "cluster action drain_node is not eligible: policy policy status is stale"
+        );
+    }
+
+    #[test]
+    fn select_cluster_action_policy_rejects_not_ready_policy() {
+        let mut policy = policy_for_gating(vec!["drain_node"], vec![], None);
+        policy.status = Some(policy_status(false, Some(1000), false));
+
+        let err = Executor::select_cluster_action_policy(vec![policy], "drain_node", 1000, 300)
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            "cluster action drain_node is not eligible: policy policy is not Ready"
+        );
+    }
+
+    #[test]
+    fn select_cluster_action_policy_rejects_unsupported_action() {
+        let mut policy = policy_for_gating(vec!["scale"], vec!["Deployment"], None);
+        policy.status = Some(policy_status(false, Some(1000), true));
+
+        let err = Executor::select_cluster_action_policy(vec![policy], "drain_node", 1000, 300)
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            "cluster action drain_node is not eligible: policy policy does not allow action drain_node"
+        );
+    }
+
+    #[test]
+    fn select_cluster_action_policy_allows_drain_node() {
+        let mut policy = policy_for_gating(vec!["drain_node"], vec![], None);
+        policy.status = Some(policy_status(false, Some(1000), true));
+
+        let effective =
+            Executor::select_cluster_action_policy(vec![policy], "drain_node", 1000, 300)
+                .expect("expected cluster action to be allowed");
+
+        assert_eq!(effective.name, "policy");
     }
 
     #[test]
