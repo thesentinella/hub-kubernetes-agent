@@ -4,6 +4,8 @@ set -euo pipefail
 NAMESPACE="sentinella"
 MANIFEST_URL="https://raw.githubusercontent.com/thesentinella/hub-kubernetes-agent/main/agent.yaml"
 MANIFEST_SHA256="82ea2b350181d2d25639a4d2ac1eb65c8502814d9016381b8d8a596704e32331"
+POLICY_URL="https://raw.githubusercontent.com/thesentinella/hub-kubernetes-agent/main/sentinella-dev-operator-policy.yaml"
+POLICY_SHA256="db6945c787735cac6d2d1809cb01bf599a43ca8b9f75fe76d2f48847e05f7235"
 HUB_URL="https://api.hub.sentinel.la"
 INSTALL_PLATFORM="${INSTALL_PLATFORM:-}"
 PLATFORM_OVERRIDE=""
@@ -21,7 +23,7 @@ Usage: install.sh [--platform kubernetes|openshift]
 
 Environment:
   INSTALL_PLATFORM   Override platform detection (kubernetes|openshift)
-  VERIFY_MANIFEST_CHECKSUM  Set to true/1 to verify downloaded agent.yaml
+  VERIFY_MANIFEST_CHECKSUM  Set to true/1 to verify downloaded agent.yaml and policy manifest
   COLLECT_DEPENDENCIES_TETRAGON  Set to true/1 when the Tetragon gRPC service is installed
   CLUSTER_ID         Required cluster identifier
   HUB_API_KEY        Required Hub API key
@@ -118,6 +120,7 @@ BASE_MANIFEST="$TMPDIR/agent.yaml"
 RENDERED_MANIFEST="$TMPDIR/agent.rendered.yaml"
 NAMESPACE_MANIFEST="$TMPDIR/agent.namespace.yaml"
 WORKLOAD_MANIFEST="$TMPDIR/agent.workload.yaml"
+POLICY_MANIFEST="$TMPDIR/sentinella-dev-operator-policy.yaml"
 
 split_namespace_manifest() {
   awk -v ns="$NAMESPACE_MANIFEST" -v rest="$WORKLOAD_MANIFEST" '
@@ -213,8 +216,9 @@ case "$VERIFY_MANIFEST_CHECKSUM" in
     ;;
 esac
 
-# Apply manifest (namespace + RBAC + ConfigMap + DaemonSet)
+# Apply manifests (namespace + RBAC + ConfigMap + DaemonSet + action policy)
 curl -sfL "$MANIFEST_URL" > "$BASE_MANIFEST"
+curl -sfL "$POLICY_URL" > "$POLICY_MANIFEST"
 
 case "$VERIFY_MANIFEST_CHECKSUM" in
   true|1)
@@ -224,6 +228,10 @@ case "$VERIFY_MANIFEST_CHECKSUM" in
     fi
     if ! echo "${MANIFEST_SHA256}  ${BASE_MANIFEST}" | $SHA256_CMD -c - >/dev/null 2>&1; then
       echo "Error: downloaded manifest checksum mismatch (expected ${MANIFEST_SHA256})." >&2
+      exit 1
+    fi
+    if ! echo "${POLICY_SHA256}  ${POLICY_MANIFEST}" | $SHA256_CMD -c - >/dev/null 2>&1; then
+      echo "Error: downloaded policy checksum mismatch (expected ${POLICY_SHA256})." >&2
       exit 1
     fi
     ;;
@@ -271,6 +279,8 @@ if ! kubectl apply --dry-run=server -f "$WORKLOAD_MANIFEST" >/dev/null; then
 fi
 
 kubectl apply -f "$WORKLOAD_MANIFEST"
+
+kubectl apply -f "$POLICY_MANIFEST"
 
 # Create secret separately (not in agent.yaml)
 printf '%s' "$HUB_API_KEY" | kubectl create secret generic sentinella-hub-k8s-agent-auth \
