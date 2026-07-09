@@ -20,13 +20,14 @@ use k8s_openapi::api::core::v1::{LimitRange, ResourceQuota};
 use k8s_openapi::api::core::v1::{Namespace, Node, Pod, ResourceRequirements};
 use k8s_openapi::api::policy::v1::{Eviction, PodDisruptionBudget};
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::{DeleteOptions, LabelSelector, ObjectMeta};
 use kube::api::{ApiResource, DynamicObject, ListParams, Patch, PatchParams, PostParams};
 use kube::core::GroupVersionKind;
 use kube::{Api, Client, Error as KubeError};
 use once_cell::sync::Lazy;
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::convert::TryFrom;
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use time::OffsetDateTime;
@@ -38,6 +39,8 @@ const UPDATE_AGENT_ALLOWED_PREFIX: &str =
     "us-east1-docker.pkg.dev/sentinella-hub/kubernetes-agent/";
 const UPDATE_AGENT_NAMESPACE: &str = "sentinella";
 const UPDATE_AGENT_DAEMONSET: &str = "sentinella-hub-k8s-agent";
+const DRAIN_NODE_DEFAULT_TIMEOUT_SECONDS: u64 = 300;
+const DRAIN_NODE_MAX_TIMEOUT_SECONDS: u64 = 3600;
 const UPDATE_AGENT_CONTAINER: &str = "agent";
 const ACTION_POLICY_GROUP: &str = "sentinella.io";
 const ACTION_POLICY_VERSION: &str = "v1alpha1";
@@ -1076,6 +1079,19 @@ impl Executor {
             return CommandResult::simple(command_id.to_string(), "error", Some(message));
         }
 
+        let timeout = match Self::drain_timeout_duration(&spec) {
+            Ok(timeout) => timeout,
+            Err(message) => {
+                return CommandResult::simple(command_id.to_string(), "error", Some(message));
+            }
+        };
+        let delete_options = match Self::drain_delete_options(&spec) {
+            Ok(delete_options) => delete_options,
+            Err(message) => {
+                return CommandResult::simple(command_id.to_string(), "error", Some(message));
+            }
+        };
+
         let nodes: Api<Node> = Api::all(self.client.clone());
         let node = match nodes.get(node_name).await {
             Ok(node) => node,
@@ -1149,7 +1165,7 @@ impl Executor {
         for (namespace, name) in drainable_pods {
             let api: Api<Pod> = Api::namespaced(self.client.clone(), &namespace);
             let eviction = Eviction {
-                delete_options: None,
+                delete_options: delete_options.clone(),
                 metadata: ObjectMeta {
                     name: Some(name.clone()),
                     namespace: Some(namespace.clone()),
@@ -1177,7 +1193,6 @@ impl Executor {
             evicted_pods.push(format!("{}/{}", namespace, name));
         }
 
-        let timeout = Duration::from_secs(300);
         let deadline = Instant::now() + timeout;
         let mut remaining_pods = Vec::new();
         loop {
@@ -1479,6 +1494,39 @@ impl Executor {
                 reasons.join("; ")
             }
         ))
+    }
+
+    fn drain_timeout_duration(spec: &DrainNodeSpec) -> Result<Duration, String> {
+        let timeout_seconds = spec
+            .timeout_seconds
+            .unwrap_or(DRAIN_NODE_DEFAULT_TIMEOUT_SECONDS);
+        if timeout_seconds == 0 {
+            return Err("timeout_seconds must be greater than 0".into());
+        }
+        if timeout_seconds > DRAIN_NODE_MAX_TIMEOUT_SECONDS {
+            return Err(format!(
+                "timeout_seconds must be less than or equal to {}",
+                DRAIN_NODE_MAX_TIMEOUT_SECONDS
+            ));
+        }
+
+        Ok(Duration::from_secs(timeout_seconds))
+    }
+
+    fn drain_delete_options(spec: &DrainNodeSpec) -> Result<Option<DeleteOptions>, String> {
+        match spec.grace_period_seconds {
+            None => Ok(None),
+            Some(0) => Err("grace_period_seconds must be greater than 0".into()),
+            Some(grace_period_seconds) => {
+                let grace_period_seconds = i64::try_from(grace_period_seconds)
+                    .map_err(|_| "grace_period_seconds is too large".to_string())?;
+
+                Ok(Some(DeleteOptions {
+                    grace_period_seconds: Some(grace_period_seconds),
+                    ..DeleteOptions::default()
+                }))
+            }
+        }
     }
 
     fn namespace_is_effective_for_command(
@@ -2631,6 +2679,18 @@ mod tests {
         }
     }
 
+    fn drain_spec(
+        node_name: &str,
+        timeout_seconds: Option<u64>,
+        grace_period_seconds: Option<u64>,
+    ) -> DrainNodeSpec {
+        DrainNodeSpec {
+            node_name: node_name.into(),
+            timeout_seconds,
+            grace_period_seconds,
+        }
+    }
+
     #[test]
     fn select_cluster_action_policy_rejects_when_no_policies_match() {
         let err = Executor::select_cluster_action_policy(Vec::new(), "drain_node", 1000, 300)
@@ -2722,6 +2782,72 @@ mod tests {
                 .expect("expected cluster action to be allowed");
 
         assert_eq!(effective.name, "policy");
+    }
+
+    #[test]
+    fn drain_timeout_duration_defaults_to_300_seconds() {
+        let spec = drain_spec("worker-1", None, None);
+
+        assert_eq!(
+            Executor::drain_timeout_duration(&spec).unwrap(),
+            Duration::from_secs(300)
+        );
+    }
+
+    #[test]
+    fn drain_timeout_duration_uses_specified_value() {
+        let spec = drain_spec("worker-1", Some(900), None);
+
+        assert_eq!(
+            Executor::drain_timeout_duration(&spec).unwrap(),
+            Duration::from_secs(900)
+        );
+    }
+
+    #[test]
+    fn drain_timeout_duration_rejects_too_large_values() {
+        let spec = drain_spec("worker-1", Some(3601), None);
+
+        assert_eq!(
+            Executor::drain_timeout_duration(&spec).unwrap_err(),
+            "timeout_seconds must be less than or equal to 3600"
+        );
+    }
+
+    #[test]
+    fn drain_timeout_duration_rejects_zero() {
+        let spec = drain_spec("worker-1", Some(0), None);
+
+        assert_eq!(
+            Executor::drain_timeout_duration(&spec).unwrap_err(),
+            "timeout_seconds must be greater than 0"
+        );
+    }
+
+    #[test]
+    fn drain_delete_options_defaults_to_none() {
+        let spec = drain_spec("worker-1", None, None);
+
+        assert!(Executor::drain_delete_options(&spec).unwrap().is_none());
+    }
+
+    #[test]
+    fn drain_delete_options_sets_grace_period() {
+        let spec = drain_spec("worker-1", None, Some(45));
+
+        let delete_options = Executor::drain_delete_options(&spec).unwrap().unwrap();
+
+        assert_eq!(delete_options.grace_period_seconds, Some(45));
+    }
+
+    #[test]
+    fn drain_delete_options_rejects_zero() {
+        let spec = drain_spec("worker-1", None, Some(0));
+
+        assert_eq!(
+            Executor::drain_delete_options(&spec).unwrap_err(),
+            "grace_period_seconds must be greater than 0"
+        );
     }
 
     #[test]
