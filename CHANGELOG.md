@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.5](https://github.com/thesentinella/hub-kubernetes-agent/compare/v1.3.4...v1.3.5) (2026-07-10)
+
+
+### Bug Fixes
+
+* harden drain_node controls ([#172](https://github.com/thesentinella/hub-kubernetes-agent/issues/172)) ([7be2b4f](https://github.com/thesentinella/hub-kubernetes-agent/commit/7be2b4f98761a8383a38dc40e1fe98aff6aa6f38))
+
 ## [1.3.4](https://github.com/thesentinella/hub-kubernetes-agent/compare/v1.3.3...v1.3.4) (2026-07-09)
 
 
