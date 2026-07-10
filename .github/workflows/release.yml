@@ -40,11 +40,17 @@ jobs:
           OWNER="${GITHUB_REPOSITORY_OWNER,,}"
           BASE="${REGISTRY}/${OWNER}/${IMAGE}"
 
-          VERSION="${GITHUB_REF_NAME#sentinella-hub-k8s-agent-}"
-          VERSION="${VERSION#v}"
+          VERSION_V="${GITHUB_REF_NAME#sentinella-hub-k8s-agent-}"
+          VERSION="${VERSION_V#v}"
+          SHA_SHORT="${GITHUB_SHA::7}"
 
+          echo "version_v=${VERSION_V}" >> "$GITHUB_OUTPUT"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "sha_short=${SHA_SHORT}" >> "$GITHUB_OUTPUT"
+
+          echo "image_version_v=${BASE}:${VERSION_V}-amd64" >> "$GITHUB_OUTPUT"
           echo "image_version=${BASE}:${VERSION}-amd64" >> "$GITHUB_OUTPUT"
+          echo "image_sha=${BASE}:${SHA_SHORT}-amd64" >> "$GITHUB_OUTPUT"
           echo "image_latest=${BASE}:latest-amd64" >> "$GITHUB_OUTPUT"
 
       - name: Build and push (linux/amd64)
@@ -54,8 +60,11 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: |
+            ${{ steps.vars.outputs.image_version_v }}
             ${{ steps.vars.outputs.image_version }}
+            ${{ steps.vars.outputs.image_sha }}
             ${{ steps.vars.outputs.image_latest }}
+
           cache-from: type=registry,ref=${{ steps.vars.outputs.image_latest }}
           cache-to: type=inline
 
@@ -89,11 +98,17 @@ jobs:
           OWNER="${GITHUB_REPOSITORY_OWNER,,}"
           BASE="${REGISTRY}/${OWNER}/${IMAGE}"
 
-          VERSION="${GITHUB_REF_NAME#sentinella-hub-k8s-agent-}"
-          VERSION="${VERSION#v}"
+          VERSION_V="${GITHUB_REF_NAME#sentinella-hub-k8s-agent-}"
+          VERSION="${VERSION_V#v}"
+          SHA_SHORT="${GITHUB_SHA::7}"
 
+          echo "version_v=${VERSION_V}" >> "$GITHUB_OUTPUT"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "sha_short=${SHA_SHORT}" >> "$GITHUB_OUTPUT"
+
+          echo "image_version_v=${BASE}:${VERSION_V}-arm64" >> "$GITHUB_OUTPUT"
           echo "image_version=${BASE}:${VERSION}-arm64" >> "$GITHUB_OUTPUT"
+          echo "image_sha=${BASE}:${SHA_SHORT}-arm64" >> "$GITHUB_OUTPUT"
           echo "image_latest=${BASE}:latest-arm64" >> "$GITHUB_OUTPUT"
 
       - name: Build and push (linux/arm64)
@@ -103,8 +118,11 @@ jobs:
           platforms: linux/arm64
           push: true
           tags: |
+            ${{ steps.vars.outputs.image_version_v }}
             ${{ steps.vars.outputs.image_version }}
+            ${{ steps.vars.outputs.image_sha }}
             ${{ steps.vars.outputs.image_latest }}
+
           cache-from: type=registry,ref=${{ steps.vars.outputs.image_latest }}
           cache-to: type=inline
 
@@ -139,25 +157,47 @@ jobs:
           OWNER="${GITHUB_REPOSITORY_OWNER,,}"
           BASE="${REGISTRY}/${OWNER}/${IMAGE}"
 
-          VERSION="${GITHUB_REF_NAME#sentinella-hub-k8s-agent-}"
-          VERSION="${VERSION#v}"
+          VERSION_V="${GITHUB_REF_NAME#sentinella-hub-k8s-agent-}"
+          VERSION="${VERSION_V#v}"
+          SHA_SHORT="${GITHUB_SHA::7}"
 
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "base=${BASE}" >> "$GITHUB_OUTPUT"
+          echo "version_v=${VERSION_V}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "sha_short=${SHA_SHORT}" >> "$GITHUB_OUTPUT"
+
+          echo "image_version_v=${BASE}:${VERSION_V}" >> "$GITHUB_OUTPUT"
           echo "image_version=${BASE}:${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "image_sha=${BASE}:${SHA_SHORT}" >> "$GITHUB_OUTPUT"
           echo "image_latest=${BASE}:latest" >> "$GITHUB_OUTPUT"
 
-      - name: Merge per-arch images into multi-arch manifests
+      - name: Create multi-arch manifests
         shell: bash
         run: |
           BASE="${{ steps.vars.outputs.base }}"
+          VERSION_V="${{ steps.vars.outputs.version_v }}"
           VERSION="${{ steps.vars.outputs.version }}"
+          SHA_SHORT="${{ steps.vars.outputs.sha_short }}"
 
+          echo "Creating ${BASE}:${VERSION_V}"
+          docker buildx imagetools create \
+            --tag "${BASE}:${VERSION_V}" \
+            "${BASE}:${VERSION_V}-amd64" \
+            "${BASE}:${VERSION_V}-arm64"
+
+          echo "Creating ${BASE}:${VERSION}"
           docker buildx imagetools create \
             --tag "${BASE}:${VERSION}" \
             "${BASE}:${VERSION}-amd64" \
             "${BASE}:${VERSION}-arm64"
 
+          echo "Creating ${BASE}:${SHA_SHORT}"
+          docker buildx imagetools create \
+            --tag "${BASE}:${SHA_SHORT}" \
+            "${BASE}:${SHA_SHORT}-amd64" \
+            "${BASE}:${SHA_SHORT}-arm64"
+
+          echo "Creating ${BASE}:latest"
           docker buildx imagetools create \
             --tag "${BASE}:latest" \
             "${BASE}:latest-amd64" \
@@ -166,7 +206,12 @@ jobs:
       - name: Inspect versioned image
         run: |
           docker buildx imagetools inspect \
-            "${{ steps.vars.outputs.image_version }}"
+            "${{ steps.vars.outputs.image_version_v }}"
+
+      - name: Inspect SHA image
+        run: |
+          docker buildx imagetools inspect \
+            "${{ steps.vars.outputs.image_sha }}"
 
       - name: Inspect latest image
         run: |
@@ -181,16 +226,24 @@ jobs:
           token: ${{ secrets.SLACK_BOT_TOKEN }}
           payload: |
             channel: "${{ secrets.SLACK_CHANNEL_ID }}"
-            text: ":rocket: *${{ github.repository }}* released ${{ steps.vars.outputs.version }}"
+            text: ":rocket: *${{ github.repository }}* released ${{ steps.vars.outputs.version_v }}"
             attachments:
               - color: "good"
                 fields:
                   - title: "Version"
-                    value: "${{ steps.vars.outputs.version }}"
+                    value: "${{ steps.vars.outputs.version_v }}"
+                    short: true
+
+                  - title: "SHA"
+                    value: "${{ steps.vars.outputs.sha_short }}"
                     short: true
 
                   - title: "Image"
-                    value: "`${{ steps.vars.outputs.image_version }}`"
+                    value: "`${{ steps.vars.outputs.image_version_v }}`"
+                    short: false
+
+                  - title: "SHA image"
+                    value: "`${{ steps.vars.outputs.image_sha }}`"
                     short: false
 
                   - title: "Latest"
