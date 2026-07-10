@@ -287,7 +287,7 @@ On successful inventory ingest, when the Hub responds with `{"already_existed":t
 
 `InventorySnapshot.configuration` includes `configmaps` and `secrets` entries. Secret entries are populated only when `COLLECT_SECRETS=true`. Secret and generic ConfigMap payloads include metadata and key names only; values are intentionally excluded.
 
-`InventorySnapshot.configuration.agent_runtime_env` and `InventorySnapshot.configuration.agent_configured_env` are special-case allowlisted views for the agent's own non-secret configuration only. They are used to compare the running agent's applied settings against values present in `sentinella-hub-k8s-agent-config`. They do not expose arbitrary ConfigMap values.
+`InventorySnapshot.configuration.agent_runtime_env` and `InventorySnapshot.configuration.agent_configured_env` are special-case allowlisted views for the agent's own non-secret configuration only. They are used to compare the running agent's applied settings against values present in `sentinella-hub-k8s-agent-config`, `sentinella-hub-app-metrics-config`, and `sentinella-hub-workload-monitoring-config`. They do not expose arbitrary ConfigMap values.
 
 `InventorySnapshot.security` includes summarized `NetworkPolicy` coverage, non-`system:*` `ClusterRoleBinding` summaries, and Pod Security Admission posture derived from namespace labels. The agent does not export full RBAC rule bodies, excludes well-known `system:*` ClusterRole bindings from the summary, and still reports namespaces with missing PSA labels.
 
@@ -356,7 +356,7 @@ The PostgreSQL plugin is opt-in, namespace-scoped, and discovery-first. It deriv
 | `POSTGRESQL_MONITORING_PORT` | empty | Env fallback port override. Defaults to the discovered PostgreSQL port. |
 | `POSTGRESQL_MONITORING_USER` | empty | Env fallback user override. Defaults to `postgres`. |
 | `POSTGRESQL_MONITORING_DATABASE` | empty | Env fallback database override. Defaults to `postgres`. |
-| `POSTGRESQL_MONITORING_SSLMODE` | `disable` | Env fallback TLS mode. `disable` skips TLS; any other value enables TLS. |
+| `POSTGRESQL_MONITORING_SSLMODE` | `require` | Env fallback TLS mode. `disable` skips TLS; any other value enables TLS. |
 | `POSTGRESQL_READONLY_COMMANDS_ENABLED` | `false` | Enables the read-only PostgreSQL diagnostic command `diagnose_postgresql` without enabling mutating actions. |
 
 When a Secret is configured, the probe reads `host`, `port`, `user`, `password`, `database`, `sslmode`, and `sslrootcert`. Env vars fill gaps.

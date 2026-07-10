@@ -827,7 +827,7 @@ Known command kinds:
 - Action Mode eligibility is policy-driven: the operator reconciles namespace RoleBindings for namespaces that are not in the fixed or configured exclude list, and the executor only allows commands in namespaces present in a `Ready` policy's `effectiveNamespaces`.
 - `ACTION_OPERATOR_ENABLED` controls whether the agent leader dynamically creates the operator `Deployment`/`ServiceAccount` (when `true`) or removes them (when `false`); `ACTION_OPERATOR_POLL_INTERVAL_SECS` sets the operator's reconciler poll interval; `ACTION_OPERATOR_EXCLUDED_NAMESPACES` adds YAML-list exclusions to the fixed namespace denylist.
 - The `agent` container image is `us-east1-docker.pkg.dev/sentinella-hub/kubernetes-agent/sentinella-hub-k8s-agent:<tag>`.
-- `agent.yaml` stores runtime config in ConfigMap `sentinella-hub-k8s-agent-config` and auth in Secret `sentinella-hub-k8s-agent-auth` key `api-key`.
+- `agent.yaml` stores core runtime config in ConfigMap `sentinella-hub-k8s-agent-config`, app-metrics config in `sentinella-hub-app-metrics-config`, workload-monitoring config in `sentinella-hub-workload-monitoring-config`, and auth in Secret `sentinella-hub-k8s-agent-auth` key `api-key`.
 - The DaemonSet injects `HUB_API_KEY` from Secret key `api-key`, optionally.
 - The pod runs as non-root UID/GID `65532`, with `readOnlyRootFilesystem: true`, no privilege escalation, all capabilities dropped, and `RuntimeDefault` seccomp.
 - The DaemonSet tolerates all `NoSchedule` and `NoExecute` taints, so it schedules on control-plane and tainted nodes by default.
@@ -836,7 +836,7 @@ Known command kinds:
 - `configmaps`: array of `ConfigMapInfo`.
 - `secrets`: array of `SecretInfo`.
 - `agent_runtime_env`: array of `KV` entries representing the running agent's applied non-secret config values.
-- `agent_configured_env`: array of `KV` entries representing allowlisted non-secret values from `sentinella-hub-k8s-agent-config`.
+- `agent_configured_env`: array of `KV` entries representing allowlisted non-secret values from `sentinella-hub-k8s-agent-config`, `sentinella-hub-app-metrics-config`, and `sentinella-hub-workload-monitoring-config`.
 
 `agent_runtime_env` and `agent_configured_env` are intentionally limited to the agent config allowlist:
 

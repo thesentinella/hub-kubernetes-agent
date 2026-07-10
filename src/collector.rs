@@ -29,6 +29,8 @@ use tokio::task::JoinSet;
 use tracing::warn;
 
 const AGENT_CONFIGMAP_NAME: &str = "sentinella-hub-k8s-agent-config";
+const APP_METRICS_CONFIGMAP_NAME: &str = "sentinella-hub-app-metrics-config";
+const WORKLOAD_MONITORING_CONFIGMAP_NAME: &str = "sentinella-hub-workload-monitoring-config";
 const PSA_ENFORCE_LABEL: &str = "pod-security.kubernetes.io/enforce";
 const PSA_AUDIT_LABEL: &str = "pod-security.kubernetes.io/audit";
 const PSA_WARN_LABEL: &str = "pod-security.kubernetes.io/warn";
@@ -1791,12 +1793,23 @@ fn map_configmap(cm: ConfigMap) -> ConfigMapInfo {
 }
 
 fn collect_agent_configured_env(configmaps: &[ConfigMap]) -> Vec<KV> {
-    configmaps
-        .iter()
-        .find(|cm| cm.metadata.name.as_deref() == Some(AGENT_CONFIGMAP_NAME))
-        .and_then(|cm| cm.data.as_ref())
-        .map(config::agent_configured_env)
-        .unwrap_or_default()
+    let mut values = BTreeMap::new();
+
+    for name in [
+        AGENT_CONFIGMAP_NAME,
+        APP_METRICS_CONFIGMAP_NAME,
+        WORKLOAD_MONITORING_CONFIGMAP_NAME,
+    ] {
+        if let Some(data) = configmaps
+            .iter()
+            .find(|cm| cm.metadata.name.as_deref() == Some(name))
+            .and_then(|cm| cm.data.as_ref())
+        {
+            values.extend(data.clone());
+        }
+    }
+
+    config::agent_configured_env(&values)
 }
 
 fn map_secret(secret: Secret) -> SecretInfo {
@@ -3417,6 +3430,32 @@ mod tests {
                 "apiVersion": "v1",
                 "kind": "ConfigMap",
                 "metadata": {
+                    "namespace": "sentinella",
+                    "name": "sentinella-hub-app-metrics-config"
+                },
+                "data": {
+                    "APP_METRICS_ENABLED": "true",
+                    "APP_METRICS_NAMESPACES": "metrics-a,metrics-b"
+                }
+            }))
+            .unwrap(),
+            serde_json::from_value(json!({
+                "apiVersion": "v1",
+                "kind": "ConfigMap",
+                "metadata": {
+                    "namespace": "sentinella",
+                    "name": "sentinella-hub-workload-monitoring-config"
+                },
+                "data": {
+                    "WORKLOAD_MONITORING_ENABLED": "true",
+                    "WORKLOAD_MONITORING_NAMESPACES": "customer-app,customer-db"
+                }
+            }))
+            .unwrap(),
+            serde_json::from_value(json!({
+                "apiVersion": "v1",
+                "kind": "ConfigMap",
+                "metadata": {
                     "namespace": "default",
                     "name": "other"
                 },
@@ -3438,6 +3477,22 @@ mod tests {
                 KV {
                     key: "HUB_URL".into(),
                     value: "https://hub.example.com".into(),
+                },
+                KV {
+                    key: "APP_METRICS_ENABLED".into(),
+                    value: "true".into(),
+                },
+                KV {
+                    key: "APP_METRICS_NAMESPACES".into(),
+                    value: "metrics-a,metrics-b".into(),
+                },
+                KV {
+                    key: "WORKLOAD_MONITORING_ENABLED".into(),
+                    value: "true".into(),
+                },
+                KV {
+                    key: "WORKLOAD_MONITORING_NAMESPACES".into(),
+                    value: "customer-app,customer-db".into(),
                 },
             ]
         );
