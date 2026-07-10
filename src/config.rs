@@ -22,7 +22,7 @@ pub const AGENT_CONFIG_ENV_ALLOWLIST: &[&str] = &[
     "LEASE_NAME",
     "LEASE_TTL_SECS",
     "POLL_WAIT_SECS",
-    "READONLY_COMMANDS_ENABLED",
+    "POSTGRESQL_READONLY_COMMANDS_ENABLED",
     "POSTGRESQL_MONITORING_DATABASE",
     "POSTGRESQL_MONITORING_ENABLED",
     "POSTGRESQL_MONITORING_HOST",
@@ -265,7 +265,7 @@ impl Config {
         let action_operator_poll_interval = parse_secs("ACTION_OPERATOR_POLL_INTERVAL_SECS", 60);
         let action_operator_excluded_namespaces =
             parse_yaml_list_env("ACTION_OPERATOR_EXCLUDED_NAMESPACES");
-        let readonly_commands_enabled = env_flag("READONLY_COMMANDS_ENABLED");
+        let readonly_commands_enabled = env_flag("POSTGRESQL_READONLY_COMMANDS_ENABLED");
         let collect_secrets = env_flag("COLLECT_SECRETS");
         let collect_dependencies_tetragon = env_flag("COLLECT_DEPENDENCIES_TETRAGON");
         let tetragon_endpoint_discovery_enabled =
@@ -427,7 +427,7 @@ fn runtime_env_value(cfg: &Config, key: &str) -> Option<String> {
         "ACTION_OPERATOR_EXCLUDED_NAMESPACES" => {
             Some(yaml_list_string(&cfg.action_operator_excluded_namespaces))
         }
-        "READONLY_COMMANDS_ENABLED" => Some(bool_string(cfg.readonly_commands_enabled)),
+        "POSTGRESQL_READONLY_COMMANDS_ENABLED" => Some(bool_string(cfg.readonly_commands_enabled)),
         "AGENT_HTTP_DEBUG" => Some(bool_string(cfg.http_debug)),
         "AGENT_HTTP_DEBUG_BODIES" => Some(bool_string(cfg.http_debug_bodies)),
         "AGENT_LOG" => Some(cfg.agent_log.clone()),
@@ -484,7 +484,7 @@ fn configured_env_value(key: &str, value: &str) -> Option<String> {
         | "TETRAGON_ENDPOINT_DISCOVERY_ENABLED"
         | "COLLECT_SECRETS"
         | "FULL_DEBUG"
-        | "READONLY_COMMANDS_ENABLED"
+        | "POSTGRESQL_READONLY_COMMANDS_ENABLED"
         | "POSTGRESQL_MONITORING_ENABLED"
         | "APP_METRICS_ENABLED"
         | "APP_METRICS_DISCOVERY_ENABLED"
@@ -896,14 +896,14 @@ mod tests {
             reset_env();
             set_required("https://hub.example.com", "cluster-1");
             for val in ["true", "1"] {
-                env::set_var("READONLY_COMMANDS_ENABLED", val);
+                env::set_var("POSTGRESQL_READONLY_COMMANDS_ENABLED", val);
                 let cfg = Config::from_env().unwrap();
                 assert!(
                     cfg.readonly_commands_enabled,
-                    "expected true for READONLY_COMMANDS_ENABLED={val}"
+                    "expected true for POSTGRESQL_READONLY_COMMANDS_ENABLED={val}"
                 );
             }
-            env::remove_var("READONLY_COMMANDS_ENABLED");
+            env::remove_var("POSTGRESQL_READONLY_COMMANDS_ENABLED");
             clear_required();
         }
     }

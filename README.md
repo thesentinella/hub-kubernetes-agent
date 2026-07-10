@@ -357,7 +357,7 @@ The PostgreSQL plugin is opt-in, namespace-scoped, and discovery-first. It deriv
 | `POSTGRESQL_MONITORING_USER` | empty | Env fallback user override. Defaults to `postgres`. |
 | `POSTGRESQL_MONITORING_DATABASE` | empty | Env fallback database override. Defaults to `postgres`. |
 | `POSTGRESQL_MONITORING_SSLMODE` | `disable` | Env fallback TLS mode. `disable` skips TLS; any other value enables TLS. |
-| `READONLY_COMMANDS_ENABLED` | `false` | Enables read-only Hub commands such as `diagnose_postgresql` without enabling mutating actions. |
+| `POSTGRESQL_READONLY_COMMANDS_ENABLED` | `false` | Enables the read-only PostgreSQL diagnostic command `diagnose_postgresql` without enabling mutating actions. |
 
 When a Secret is configured, the probe reads `host`, `port`, `user`, `password`, `database`, `sslmode`, and `sslrootcert`. Env vars fill gaps.
 

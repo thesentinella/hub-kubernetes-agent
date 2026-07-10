@@ -41,7 +41,7 @@
 | `LEASE_TTL_SECS` | no | `30` | Lease validity window; renew interval is `ttl / 3`. |
 | `LEASE_NAME` | no | `sentinella-hub-k8s-agent-leader` | Lease object name. |
 | `ACTION_OPERATOR_ENABLED` | no | `false` | When `true`, the agent leader dynamically creates and manages the operator `Deployment` and `ServiceAccount` and enables mutating actions; when `false`, they are removed and mutating actions are skipped. |
-| `READONLY_COMMANDS_ENABLED` | no | `false` | Enables read-only commands such as `diagnose_postgresql` without enabling mutating actions. |
+| `POSTGRESQL_READONLY_COMMANDS_ENABLED` | no | `false` | Enables the read-only PostgreSQL diagnostic command `diagnose_postgresql` without enabling mutating actions. |
 | `ACTION_OPERATOR_ENABLED` | no | `false` | When `true`, the agent leader dynamically creates and manages the operator `Deployment` and `ServiceAccount`; when `false`, they are removed. |
 | `ACTION_OPERATOR_POLL_INTERVAL_SECS` | no | `60` | Reconciler poll interval. |
 | `ACTION_OPERATOR_EXCLUDED_NAMESPACES` | no | `[]` | YAML list of additional namespaces excluded from action RoleBinding reconciliation. |
@@ -72,7 +72,7 @@
 - If configured, Secret keys are `host`, `port`, `user`, `password`, `database`, `sslmode`, and `sslrootcert`.
 - Missing probe values fall back to the discovered Service DNS name, discovered Service port, `postgres` user, `postgres` database, and `sslmode=disable`.
 - `sslmode=disable` uses `NoTls`; any other `sslmode` value enables TLS with `native-tls`.
-- `diagnose_postgresql` is a separate read-only command. It reuses the PostgreSQL discovery/probe path, returns a structured diagnostic payload, and only runs when `READONLY_COMMANDS_ENABLED=true`.
+- `diagnose_postgresql` is a separate read-only command. It reuses the PostgreSQL discovery/probe path, returns a structured diagnostic payload, and only runs when `POSTGRESQL_READONLY_COMMANDS_ENABLED=true`.
 
 ## Agent Endpoints
 

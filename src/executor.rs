@@ -102,7 +102,7 @@ impl Executor {
                         cmd.id.clone(),
                         "skipped",
                         Some(
-                            "agent read-only commands disabled (READONLY_COMMANDS_ENABLED=false)"
+                            "agent read-only commands disabled (POSTGRESQL_READONLY_COMMANDS_ENABLED=false)"
                                 .into(),
                         ),
                     );
