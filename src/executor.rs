@@ -20,13 +20,14 @@ use k8s_openapi::api::core::v1::{LimitRange, ResourceQuota};
 use k8s_openapi::api::core::v1::{Namespace, Node, Pod, ResourceRequirements};
 use k8s_openapi::api::policy::v1::{Eviction, PodDisruptionBudget};
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::{DeleteOptions, LabelSelector, ObjectMeta};
 use kube::api::{ApiResource, DynamicObject, ListParams, Patch, PatchParams, PostParams};
 use kube::core::GroupVersionKind;
 use kube::{Api, Client, Error as KubeError};
 use once_cell::sync::Lazy;
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::convert::TryFrom;
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use time::OffsetDateTime;
@@ -38,6 +39,8 @@ const UPDATE_AGENT_ALLOWED_PREFIX: &str =
     "us-east1-docker.pkg.dev/sentinella-hub/kubernetes-agent/";
 const UPDATE_AGENT_NAMESPACE: &str = "sentinella";
 const UPDATE_AGENT_DAEMONSET: &str = "sentinella-hub-k8s-agent";
+const DRAIN_NODE_DEFAULT_TIMEOUT_SECONDS: u64 = 300;
+const DRAIN_NODE_MAX_TIMEOUT_SECONDS: u64 = 3600;
 const UPDATE_AGENT_CONTAINER: &str = "agent";
 const ACTION_POLICY_GROUP: &str = "sentinella.io";
 const ACTION_POLICY_VERSION: &str = "v1alpha1";
@@ -58,6 +61,7 @@ static COMMAND_DEDUP: Lazy<Mutex<CommandDedupState>> =
     Lazy::new(|| Mutex::new(CommandDedupState::default()));
 
 #[allow(dead_code)]
+#[derive(Debug)]
 struct EffectivePolicy {
     name: String,
     policy: SentinellaHubActionPolicy,
@@ -1006,62 +1010,6 @@ impl Executor {
     }
 
     async fn drain_node(&self, command_id: &str, spec: DrainNodeSpec) -> CommandResult {
-        fn classify_pods_on_node(
-            node_name: &str,
-            pods: Vec<Pod>,
-        ) -> (Vec<String>, Vec<String>, Vec<(String, String)>) {
-            let mut daemonset_pods = Vec::new();
-            let mut unmanaged_pods = Vec::new();
-            let mut drainable_pods = Vec::new();
-
-            for pod in pods {
-                let pod_node = pod.spec.as_ref().and_then(|s| s.node_name.as_deref());
-                if pod_node != Some(node_name) {
-                    continue;
-                }
-
-                let namespace = pod.metadata.namespace.clone().unwrap_or_default();
-                let name = pod.metadata.name.clone().unwrap_or_default();
-                let display_name = format!("{}/{}", namespace, name);
-
-                if pod
-                    .metadata
-                    .annotations
-                    .as_ref()
-                    .and_then(|annotations| annotations.get("kubernetes.io/config.mirror"))
-                    .is_some()
-                {
-                    daemonset_pods.push(format!("ignored mirror pod {}", display_name));
-                    continue;
-                }
-
-                let owner_kinds = pod
-                    .metadata
-                    .owner_references
-                    .as_ref()
-                    .map(|refs| {
-                        refs.iter()
-                            .map(|owner| owner.kind.as_str())
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
-
-                if owner_kinds.iter().any(|kind| *kind == "DaemonSet") {
-                    daemonset_pods.push(format!("ignored DaemonSet pod {}", display_name));
-                    continue;
-                }
-
-                if owner_kinds.is_empty() {
-                    unmanaged_pods.push(display_name);
-                    continue;
-                }
-
-                drainable_pods.push((namespace, name));
-            }
-
-            (daemonset_pods, unmanaged_pods, drainable_pods)
-        }
-
         let node_name = spec.node_name.trim();
         if node_name.is_empty() {
             return CommandResult::simple(
@@ -1074,6 +1022,19 @@ impl Executor {
         if let Err(message) = self.ensure_cluster_action_allowed("drain_node").await {
             return CommandResult::simple(command_id.to_string(), "error", Some(message));
         }
+
+        let timeout = match Self::drain_timeout_duration(&spec) {
+            Ok(timeout) => timeout,
+            Err(message) => {
+                return CommandResult::simple(command_id.to_string(), "error", Some(message));
+            }
+        };
+        let delete_options = match Self::drain_delete_options(&spec) {
+            Ok(delete_options) => delete_options,
+            Err(message) => {
+                return CommandResult::simple(command_id.to_string(), "error", Some(message));
+            }
+        };
 
         let nodes: Api<Node> = Api::all(self.client.clone());
         let node = match nodes.get(node_name).await {
@@ -1114,9 +1075,18 @@ impl Executor {
         };
 
         let (daemonset_pods, unmanaged_pods, drainable_pods) =
-            classify_pods_on_node(node_name, pod_list.items);
+            Self::classify_pods_on_node(node_name, pod_list.items, spec.force);
 
-        if !unmanaged_pods.is_empty() {
+        let mut warnings = daemonset_pods.clone();
+        if spec.force && !unmanaged_pods.is_empty() {
+            warnings.extend(
+                unmanaged_pods
+                    .iter()
+                    .map(|pod| format!("forced unmanaged pod {}", pod)),
+            );
+        }
+
+        if !spec.force && !unmanaged_pods.is_empty() {
             return CommandResult::simple(
                 command_id.to_string(),
                 "error",
@@ -1148,7 +1118,7 @@ impl Executor {
         for (namespace, name) in drainable_pods {
             let api: Api<Pod> = Api::namespaced(self.client.clone(), &namespace);
             let eviction = Eviction {
-                delete_options: None,
+                delete_options: delete_options.clone(),
                 metadata: ObjectMeta {
                     name: Some(name.clone()),
                     namespace: Some(namespace.clone()),
@@ -1176,7 +1146,6 @@ impl Executor {
             evicted_pods.push(format!("{}/{}", namespace, name));
         }
 
-        let timeout = Duration::from_secs(300);
         let deadline = Instant::now() + timeout;
         let mut remaining_pods = Vec::new();
         loop {
@@ -1198,18 +1167,26 @@ impl Executor {
             };
 
             let (_daemonset_warnings, still_unmanaged, still_drainable) =
-                classify_pods_on_node(node_name, pod_list.items);
+                Self::classify_pods_on_node(node_name, pod_list.items, spec.force);
 
             if !still_unmanaged.is_empty() {
-                return CommandResult::simple(
-                    command_id.to_string(),
-                    "error",
-                    Some(format!(
-                        "Node {} gained unmanaged Pods during drain: {}",
-                        node_name,
-                        still_unmanaged.join(", ")
-                    )),
-                );
+                if spec.force {
+                    warnings.extend(
+                        still_unmanaged
+                            .iter()
+                            .map(|pod| format!("forced unmanaged pod {}", pod)),
+                    );
+                } else {
+                    return CommandResult::simple(
+                        command_id.to_string(),
+                        "error",
+                        Some(format!(
+                            "Node {} gained unmanaged Pods during drain: {}",
+                            node_name,
+                            still_unmanaged.join(", ")
+                        )),
+                    );
+                }
             }
 
             if still_drainable.is_empty() {
@@ -1235,8 +1212,6 @@ impl Executor {
 
             sleep(Duration::from_secs(5)).await;
         }
-
-        let warnings = daemonset_pods.clone();
 
         let mut result = CommandResult::simple(command_id.to_string(), "ok", None);
         result.dry_run = Some(false);
@@ -1418,7 +1393,15 @@ impl Executor {
             .unwrap_or(self.cfg.action_operator_poll_interval);
         let stale_after_ms = stale_after.as_millis();
         let now = now_ms();
+        Self::select_cluster_action_policy(policies, command_kind, now, stale_after_ms)
+    }
 
+    fn select_cluster_action_policy(
+        policies: Vec<SentinellaHubActionPolicy>,
+        command_kind: &str,
+        now: u128,
+        stale_after_ms: u128,
+    ) -> Result<EffectivePolicy, String> {
         let mut reasons = Vec::new();
         for policy in policies {
             let Some(policy_name) = policy.metadata.name.clone() else {
@@ -1470,6 +1453,100 @@ impl Executor {
                 reasons.join("; ")
             }
         ))
+    }
+
+    fn drain_timeout_duration(spec: &DrainNodeSpec) -> Result<Duration, String> {
+        let timeout_seconds = spec
+            .timeout_seconds
+            .unwrap_or(DRAIN_NODE_DEFAULT_TIMEOUT_SECONDS);
+        if timeout_seconds == 0 {
+            return Err("timeout_seconds must be greater than 0".into());
+        }
+        if timeout_seconds > DRAIN_NODE_MAX_TIMEOUT_SECONDS {
+            return Err(format!(
+                "timeout_seconds must be less than or equal to {}",
+                DRAIN_NODE_MAX_TIMEOUT_SECONDS
+            ));
+        }
+
+        Ok(Duration::from_secs(timeout_seconds))
+    }
+
+    fn drain_delete_options(spec: &DrainNodeSpec) -> Result<Option<DeleteOptions>, String> {
+        match spec.grace_period_seconds {
+            None => Ok(None),
+            Some(0) => Err("grace_period_seconds must be greater than 0".into()),
+            Some(grace_period_seconds) => {
+                let grace_period_seconds = i64::try_from(grace_period_seconds)
+                    .map_err(|_| "grace_period_seconds is too large".to_string())?;
+
+                Ok(Some(DeleteOptions {
+                    grace_period_seconds: Some(grace_period_seconds),
+                    ..DeleteOptions::default()
+                }))
+            }
+        }
+    }
+
+    fn pod_is_mirror(pod: &Pod) -> bool {
+        pod.metadata
+            .annotations
+            .as_ref()
+            .and_then(|annotations| annotations.get("kubernetes.io/config.mirror"))
+            .is_some()
+    }
+
+    fn pod_owner_kinds(pod: &Pod) -> Vec<&str> {
+        pod.metadata
+            .owner_references
+            .as_ref()
+            .map(|refs| refs.iter().map(|owner| owner.kind.as_str()).collect())
+            .unwrap_or_default()
+    }
+
+    fn classify_pods_on_node(
+        node_name: &str,
+        pods: Vec<Pod>,
+        force: bool,
+    ) -> (Vec<String>, Vec<String>, Vec<(String, String)>) {
+        let mut daemonset_pods = Vec::new();
+        let mut unmanaged_pods = Vec::new();
+        let mut drainable_pods = Vec::new();
+
+        for pod in pods {
+            let pod_node = pod.spec.as_ref().and_then(|s| s.node_name.as_deref());
+            if pod_node != Some(node_name) {
+                continue;
+            }
+
+            let namespace = pod.metadata.namespace.clone().unwrap_or_default();
+            let name = pod.metadata.name.clone().unwrap_or_default();
+            let display_name = format!("{}/{}", namespace, name);
+
+            if Self::pod_is_mirror(&pod) {
+                daemonset_pods.push(format!("ignored mirror pod {}", display_name));
+                continue;
+            }
+
+            let owner_kinds = Self::pod_owner_kinds(&pod);
+
+            if owner_kinds.iter().any(|kind| *kind == "DaemonSet") {
+                daemonset_pods.push(format!("ignored DaemonSet pod {}", display_name));
+                continue;
+            }
+
+            if owner_kinds.is_empty() {
+                unmanaged_pods.push(display_name.clone());
+                if force {
+                    drainable_pods.push((namespace, name));
+                }
+                continue;
+            }
+
+            drainable_pods.push((namespace, name));
+        }
+
+        (daemonset_pods, unmanaged_pods, drainable_pods)
     }
 
     fn namespace_is_effective_for_command(
@@ -2620,6 +2697,245 @@ mod tests {
             last_reconciled_at_ms,
             stale,
         }
+    }
+
+    fn drain_spec(
+        node_name: &str,
+        timeout_seconds: Option<u64>,
+        grace_period_seconds: Option<u64>,
+        force: bool,
+    ) -> DrainNodeSpec {
+        DrainNodeSpec {
+            node_name: node_name.into(),
+            timeout_seconds,
+            grace_period_seconds,
+            force,
+        }
+    }
+
+    fn drain_pod(
+        namespace: &str,
+        name: &str,
+        node_name: &str,
+        owner_kind: Option<&str>,
+        mirror: bool,
+    ) -> Pod {
+        let mut metadata = serde_json::Map::new();
+        metadata.insert("namespace".into(), json!(namespace));
+        metadata.insert("name".into(), json!(name));
+
+        if mirror {
+            metadata.insert(
+                "annotations".into(),
+                json!({"kubernetes.io/config.mirror": "true"}),
+            );
+        }
+
+        if let Some(kind) = owner_kind {
+            metadata.insert("ownerReferences".into(), json!([{ "kind": kind }]));
+        }
+
+        serde_json::from_value(json!({
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": metadata,
+            "spec": { "nodeName": node_name }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn select_cluster_action_policy_rejects_when_no_policies_match() {
+        let err = Executor::select_cluster_action_policy(Vec::new(), "drain_node", 1000, 300)
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            "cluster action drain_node is not eligible: no Ready policy matched the cluster action"
+        );
+    }
+
+    #[test]
+    fn select_cluster_action_policy_rejects_missing_status() {
+        let mut policy = policy_for_gating(vec!["drain_node"], vec![], None);
+        policy.status = None;
+
+        let err = Executor::select_cluster_action_policy(vec![policy], "drain_node", 1000, 300)
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            "cluster action drain_node is not eligible: policy policy has no status"
+        );
+    }
+
+    #[test]
+    fn select_cluster_action_policy_rejects_missing_freshness_timestamp() {
+        let mut policy = policy_for_gating(vec!["drain_node"], vec![], None);
+        policy.status = Some(policy_status(false, None, true));
+
+        let err = Executor::select_cluster_action_policy(vec![policy], "drain_node", 1000, 300)
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            "cluster action drain_node is not eligible: policy policy status has no freshness timestamp"
+        );
+    }
+
+    #[test]
+    fn select_cluster_action_policy_rejects_stale_policy() {
+        let mut policy = policy_for_gating(vec!["drain_node"], vec![], None);
+        policy.status = Some(policy_status(true, Some(1), true));
+
+        let err = Executor::select_cluster_action_policy(vec![policy], "drain_node", 1000, 300)
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            "cluster action drain_node is not eligible: policy policy status is stale"
+        );
+    }
+
+    #[test]
+    fn select_cluster_action_policy_rejects_not_ready_policy() {
+        let mut policy = policy_for_gating(vec!["drain_node"], vec![], None);
+        policy.status = Some(policy_status(false, Some(1000), false));
+
+        let err = Executor::select_cluster_action_policy(vec![policy], "drain_node", 1000, 300)
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            "cluster action drain_node is not eligible: policy policy is not Ready"
+        );
+    }
+
+    #[test]
+    fn select_cluster_action_policy_rejects_unsupported_action() {
+        let mut policy = policy_for_gating(vec!["scale"], vec!["Deployment"], None);
+        policy.status = Some(policy_status(false, Some(1000), true));
+
+        let err = Executor::select_cluster_action_policy(vec![policy], "drain_node", 1000, 300)
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            "cluster action drain_node is not eligible: policy policy does not allow action drain_node"
+        );
+    }
+
+    #[test]
+    fn select_cluster_action_policy_allows_drain_node() {
+        let mut policy = policy_for_gating(vec!["drain_node"], vec![], None);
+        policy.status = Some(policy_status(false, Some(1000), true));
+
+        let effective =
+            Executor::select_cluster_action_policy(vec![policy], "drain_node", 1000, 300)
+                .expect("expected cluster action to be allowed");
+
+        assert_eq!(effective.name, "policy");
+    }
+
+    #[test]
+    fn classify_pods_on_node_rejects_unmanaged_without_force() {
+        let pods = vec![drain_pod("default", "bare", "worker-1", None, false)];
+
+        let (_, unmanaged, drainable) = Executor::classify_pods_on_node("worker-1", pods, false);
+
+        assert_eq!(unmanaged, vec!["default/bare"]);
+        assert!(drainable.is_empty());
+    }
+
+    #[test]
+    fn classify_pods_on_node_allows_unmanaged_with_force() {
+        let pods = vec![drain_pod("default", "bare", "worker-1", None, false)];
+
+        let (_, unmanaged, drainable) = Executor::classify_pods_on_node("worker-1", pods, true);
+
+        assert_eq!(unmanaged, vec!["default/bare"]);
+        assert_eq!(drainable, vec![("default".into(), "bare".into())]);
+    }
+
+    #[test]
+    fn classify_pods_on_node_keeps_daemonset_and_mirror_ignored() {
+        let pods = vec![
+            drain_pod("kube-system", "ds", "worker-1", Some("DaemonSet"), false),
+            drain_pod("kube-system", "mirror", "worker-1", None, true),
+        ];
+
+        let (warnings, unmanaged, drainable) =
+            Executor::classify_pods_on_node("worker-1", pods, true);
+
+        assert_eq!(warnings.len(), 2);
+        assert!(unmanaged.is_empty());
+        assert!(drainable.is_empty());
+    }
+
+    #[test]
+    fn drain_timeout_duration_defaults_to_300_seconds() {
+        let spec = drain_spec("worker-1", None, None, false);
+
+        assert_eq!(
+            Executor::drain_timeout_duration(&spec).unwrap(),
+            Duration::from_secs(300)
+        );
+    }
+
+    #[test]
+    fn drain_timeout_duration_uses_specified_value() {
+        let spec = drain_spec("worker-1", Some(900), None, false);
+
+        assert_eq!(
+            Executor::drain_timeout_duration(&spec).unwrap(),
+            Duration::from_secs(900)
+        );
+    }
+
+    #[test]
+    fn drain_timeout_duration_rejects_too_large_values() {
+        let spec = drain_spec("worker-1", Some(3601), None, false);
+
+        assert_eq!(
+            Executor::drain_timeout_duration(&spec).unwrap_err(),
+            "timeout_seconds must be less than or equal to 3600"
+        );
+    }
+
+    #[test]
+    fn drain_timeout_duration_rejects_zero() {
+        let spec = drain_spec("worker-1", Some(0), None, false);
+
+        assert_eq!(
+            Executor::drain_timeout_duration(&spec).unwrap_err(),
+            "timeout_seconds must be greater than 0"
+        );
+    }
+
+    #[test]
+    fn drain_delete_options_defaults_to_none() {
+        let spec = drain_spec("worker-1", None, None, false);
+
+        assert!(Executor::drain_delete_options(&spec).unwrap().is_none());
+    }
+
+    #[test]
+    fn drain_delete_options_sets_grace_period() {
+        let spec = drain_spec("worker-1", None, Some(45), false);
+
+        let delete_options = Executor::drain_delete_options(&spec).unwrap().unwrap();
+
+        assert_eq!(delete_options.grace_period_seconds, Some(45));
+    }
+
+    #[test]
+    fn drain_delete_options_rejects_zero() {
+        let spec = drain_spec("worker-1", None, Some(0), false);
+
+        assert_eq!(
+            Executor::drain_delete_options(&spec).unwrap_err(),
+            "grace_period_seconds must be greater than 0"
+        );
     }
 
     #[test]
