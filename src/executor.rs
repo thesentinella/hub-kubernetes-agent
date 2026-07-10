@@ -119,7 +119,7 @@ impl Executor {
                     return CommandResult::simple(
                         cmd.id.clone(),
                         "skipped",
-                        Some("agent in read-only mode (ACTIONS_ENABLED=false)".into()),
+                        Some("agent in read-only mode (ACTION_OPERATOR_ENABLED=false)".into()),
                     );
                 }
 
@@ -134,7 +134,7 @@ impl Executor {
                     return CommandResult::simple(
                         cmd.id.clone(),
                         "skipped",
-                        Some("agent in read-only mode (ACTIONS_ENABLED=false)".into()),
+                        Some("agent in read-only mode (ACTION_OPERATOR_ENABLED=false)".into()),
                     );
                 }
 
@@ -149,7 +149,7 @@ impl Executor {
                     return CommandResult::simple(
                         cmd.id.clone(),
                         "skipped",
-                        Some("agent in read-only mode (ACTIONS_ENABLED=false)".into()),
+                        Some("agent in read-only mode (ACTION_OPERATOR_ENABLED=false)".into()),
                     );
                 }
 
@@ -164,7 +164,7 @@ impl Executor {
                     return CommandResult::simple(
                         cmd.id.clone(),
                         "skipped",
-                        Some("agent in read-only mode (ACTIONS_ENABLED=false)".into()),
+                        Some("agent in read-only mode (ACTION_OPERATOR_ENABLED=false)".into()),
                     );
                 }
 
@@ -179,7 +179,7 @@ impl Executor {
                     return CommandResult::simple(
                         cmd.id.clone(),
                         "skipped",
-                        Some("agent in read-only mode (ACTIONS_ENABLED=false)".into()),
+                        Some("agent in read-only mode (ACTION_OPERATOR_ENABLED=false)".into()),
                     );
                 }
 
@@ -194,7 +194,7 @@ impl Executor {
                     return CommandResult::simple(
                         cmd.id.clone(),
                         "skipped",
-                        Some("agent in read-only mode (ACTIONS_ENABLED=false)".into()),
+                        Some("agent in read-only mode (ACTION_OPERATOR_ENABLED=false)".into()),
                     );
                 }
 
@@ -209,7 +209,7 @@ impl Executor {
                     return CommandResult::simple(
                         cmd.id.clone(),
                         "skipped",
-                        Some("agent in read-only mode (ACTIONS_ENABLED=false)".into()),
+                        Some("agent in read-only mode (ACTION_OPERATOR_ENABLED=false)".into()),
                     );
                 }
 

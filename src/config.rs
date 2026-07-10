@@ -5,7 +5,6 @@ use std::env;
 use std::time::Duration;
 
 pub const AGENT_CONFIG_ENV_ALLOWLIST: &[&str] = &[
-    "ACTIONS_ENABLED",
     "ACTION_OPERATOR_ENABLED",
     "ACTION_OPERATOR_POLL_INTERVAL_SECS",
     "ACTION_OPERATOR_EXCLUDED_NAMESPACES",
@@ -261,11 +260,8 @@ impl Config {
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| "info".to_string());
 
-        let actions_enabled = env::var("ACTIONS_ENABLED")
-            .ok()
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(false);
         let action_operator_enabled = env_flag("ACTION_OPERATOR_ENABLED");
+        let actions_enabled = action_operator_enabled;
         let action_operator_poll_interval = parse_secs("ACTION_OPERATOR_POLL_INTERVAL_SECS", 60);
         let action_operator_excluded_namespaces =
             parse_yaml_list_env("ACTION_OPERATOR_EXCLUDED_NAMESPACES");
@@ -425,7 +421,6 @@ pub fn agent_configured_env(values: &BTreeMap<String, String>) -> Vec<KV> {
 
 fn runtime_env_value(cfg: &Config, key: &str) -> Option<String> {
     match key {
-        "ACTIONS_ENABLED" => Some(bool_string(cfg.actions_enabled)),
         "ACTION_OPERATOR_ENABLED" => Some(bool_string(cfg.action_operator_enabled)),
         "ACTION_OPERATOR_POLL_INTERVAL_SECS" => {
             Some(cfg.action_operator_poll_interval.as_secs().to_string())
@@ -486,8 +481,7 @@ fn runtime_env_value(cfg: &Config, key: &str) -> Option<String> {
 fn configured_env_value(key: &str, value: &str) -> Option<String> {
     let trimmed = value.trim();
     match key {
-        "ACTIONS_ENABLED"
-        | "ACTION_OPERATOR_ENABLED"
+        "ACTION_OPERATOR_ENABLED"
         | "ACTION_OPERATOR_EXCLUDED_NAMESPACES"
         | "AGENT_HTTP_DEBUG"
         | "AGENT_HTTP_DEBUG_BODIES"
@@ -659,7 +653,6 @@ mod tests {
             "FULL_DEBUG",
             "AGENT_HTTP_DEBUG",
             "AGENT_HTTP_DEBUG_BODIES",
-            "ACTIONS_ENABLED",
             "COLLECT_SECRETS",
             "COLLECT_DEPENDENCIES_TETRAGON",
             "TETRAGON_REQUIRED_FOR_READINESS",
@@ -848,27 +841,28 @@ mod tests {
     }
 
     #[test]
-    fn actions_enabled_true_values() {
+    fn action_operator_enabled_true_values() {
         let _lock = ENV_LOCK.lock().unwrap();
         unsafe {
             reset_env();
             set_required("https://hub.example.com", "cluster-1");
             for val in ["true", "1"] {
-                env::set_var("ACTIONS_ENABLED", val);
+                env::set_var("ACTION_OPERATOR_ENABLED", val);
                 let cfg = Config::from_env().unwrap();
                 assert!(
                     cfg.actions_enabled,
-                    "expected true for ACTIONS_ENABLED={val}"
+                    "expected true for ACTION_OPERATOR_ENABLED={val}"
                 );
+                assert!(cfg.action_operator_enabled);
                 assert!(!cfg.collect_secrets);
             }
-            env::remove_var("ACTIONS_ENABLED");
+            env::remove_var("ACTION_OPERATOR_ENABLED");
             clear_required();
         }
     }
 
     #[test]
-    fn actions_enabled_defaults_false() {
+    fn action_operator_enabled_defaults_false() {
         let _lock = ENV_LOCK.lock().unwrap();
         unsafe {
             reset_env();
@@ -987,7 +981,7 @@ mod tests {
             collect_interval: Duration::from_secs(60),
             poll_wait: Duration::from_secs(30),
             actions_enabled: true,
-            action_operator_enabled: false,
+            action_operator_enabled: true,
             action_operator_poll_interval: Duration::from_secs(60),
             action_operator_excluded_namespaces: vec![],
             readonly_commands_enabled: true,
@@ -1043,7 +1037,7 @@ mod tests {
         assert!(!keys.contains(&"NODE_NAME"));
         assert_eq!(
             env.iter()
-                .find(|entry| entry.key == "ACTIONS_ENABLED")
+                .find(|entry| entry.key == "ACTION_OPERATOR_ENABLED")
                 .unwrap()
                 .value,
             "true"

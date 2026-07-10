@@ -40,7 +40,7 @@
 | `AGENT_HTTP_DEBUG_BODIES` | no | `false` | Enables bounded (`200` chars) HTTP response body previews and POST request body previews in debug/error logs. |
 | `LEASE_TTL_SECS` | no | `30` | Lease validity window; renew interval is `ttl / 3`. |
 | `LEASE_NAME` | no | `sentinella-hub-k8s-agent-leader` | Lease object name. |
-| `ACTIONS_ENABLED` | no | `false` | Only `true` or `1` enables action dispatch. |
+| `ACTION_OPERATOR_ENABLED` | no | `false` | When `true`, the agent leader dynamically creates and manages the operator `Deployment` and `ServiceAccount` and enables mutating actions; when `false`, they are removed and mutating actions are skipped. |
 | `READONLY_COMMANDS_ENABLED` | no | `false` | Enables read-only commands such as `diagnose_postgresql` without enabling mutating actions. |
 | `ACTION_OPERATOR_ENABLED` | no | `false` | When `true`, the agent leader dynamically creates and manages the operator `Deployment` and `ServiceAccount`; when `false`, they are removed. |
 | `ACTION_OPERATOR_POLL_INTERVAL_SECS` | no | `60` | Reconciler poll interval. |
@@ -711,7 +711,7 @@ Known command kinds:
 
 ## Action Execution Contract
 
-- `ACTIONS_ENABLED=false` keeps the agent in read-only mode and is the default. Mutating commands are skipped before parsing `spec`, but `get_resource_yaml` remains available.
+- `ACTION_OPERATOR_ENABLED=false` keeps the agent in read-only mode and is the default. Mutating commands are skipped before parsing `spec`, but `get_resource_yaml` remains available.
 - Unknown command kinds return `status: "unknown"` when actions are enabled.
 - Recognized command kinds are `preview_workload_resources`, `apply_workload_resources`, `get_resource_yaml`, `rollout_restart`, `scale`, `delete_pod`, `cordon_node`, `uncordon_node`, `drain_node`, `apply_manifest`, `rollout_undo`, `self_update`, and `update_agent`.
 - `get_resource_yaml` reads an allowlisted Kubernetes object, returns manifest-like YAML with server-managed metadata stripped, and rejects `Secret` requests.
@@ -770,7 +770,7 @@ Known command kinds:
 - Behavioral equivalent: `kubectl delete pod {name} -n {namespace} --grace-period={grace_period_seconds} [--force]`
 - Validation: `grace_period_seconds >= 0`, `name` required, `namespace` required.
 - When `force=true`, the request semantics must be explicit and must not be silently converted to a graceful deletion.
-- Safety requirement: this command should require an explicit destructive-action opt-in beyond `ACTIONS_ENABLED=true` before it is enabled in the Hub.
+- Safety requirement: this command should require an explicit destructive-action opt-in beyond `ACTION_OPERATOR_ENABLED=true` before it is enabled in the Hub.
 - Required permissions: `get`, `delete` on `core/pods`.
 
 ### 7.4 `cordon_node`
@@ -796,7 +796,7 @@ Known command kinds:
 - Behavioral equivalent: cordon the node, then evict eligible pods on the node.
 - Required behavior: cordon the node, identify pods scheduled there, skip mirror and DaemonSet-managed pods, reject unmanaged pods, evict the eligible pods, and return a summarized result.
 - Validation: `nodeName` is required and must be non-empty; `timeoutSeconds` defaults to `300`, must be greater than `0` when provided, and is capped at `3600`; `force` defaults to `false` and, when `true`, allows unmanaged Pods to be evicted through the eviction API.
-- Safety requirement: this command requires `ACTIONS_ENABLED=true` and a Ready `SentinellaHubActionPolicy` that allows `drain_node`.
+- Safety requirement: this command requires `ACTION_OPERATOR_ENABLED=true` and a Ready `SentinellaHubActionPolicy` that allows `drain_node`.
 - Required permissions: `patch` on `core/nodes`; `create` on `core/pods/eviction`. Read permissions on pods are already covered by the bundled reader role. If `gracePeriodSeconds` is set, it is passed to the eviction delete options and must be greater than `0`.
 
 ### 7.7 `apply_manifest`
@@ -849,7 +849,6 @@ Known command kinds:
 - `ACTION_OPERATOR_ENABLED`
 - `ACTION_OPERATOR_POLL_INTERVAL_SECS`
 - `ACTION_OPERATOR_EXCLUDED_NAMESPACES`
-- `ACTIONS_ENABLED`
 - `COLLECT_SECRETS`
 - `COLLECT_DEPENDENCIES_TETRAGON`
 - `TETRAGON_REQUIRED_FOR_READINESS`

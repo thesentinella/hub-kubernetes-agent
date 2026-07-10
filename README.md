@@ -18,7 +18,7 @@ Inventory collector and (future) action executor for Kubernetes and OpenShift cl
   - **Dependencies (optional)**: bounded pod/service dependency edges derived from Tetragon gRPC (`source=tetragon_grpc`), including unresolved `unknown` edges when endpoint mapping is unavailable.
   - **Storage**: StorageClasses (name/provisioner/safe parameter subset), PersistentVolumes, PersistentVolumeClaims, VolumeSnapshotClasses, and VolumeSnapshots.
   - **Events**: Kubernetes `Warning` and `Normal` events with bounded payload (max 500 events per snapshot, event message truncated to 500 chars).
-- Maintains an open long-poll against the Hub for command delivery. **Action execution is disabled by default** (`ACTIONS_ENABLED=false`); the agent replies with `skipped` and an explanatory message to any command received. When actions are explicitly enabled, the agent can preview workload resource patches with a Kubernetes server-side dry-run.
+- Maintains an open long-poll against the Hub for command delivery. **Action execution is disabled by default** (`ACTION_OPERATOR_ENABLED=false`); the agent replies with `skipped` and an explanatory message to any command received. When actions are explicitly enabled, the agent can preview workload resource patches with a Kubernetes server-side dry-run.
 - Snapshot agent metadata includes whether actions are enabled (`agent.actions_enabled`) and whether Tetragon dependency collection is enabled (`agent.collect_dependencies_tetragon`) so the Hub can accurately reflect agent execution capability.
 
 ## Architecture
@@ -158,7 +158,7 @@ Example snapshot payload:
 
 ### Actions — designed for gradual rollout
 
-`src/executor.rs` keeps the agent in read-only mode while `ACTIONS_ENABLED=false`: mutating commands are skipped before parsing the command spec, but `get_resource_yaml` remains available as a read-only fetch. When actions are enabled, `preview_workload_resources` performs a server-side dry-run, `apply_workload_resources` performs a live strategic-merge patch, `drain_node` cordons a node and evicts eligible pods after action-policy approval, `self_update` triggers an immediate agent restart, and `update_agent` updates the fixed agent DaemonSet image.
+`src/executor.rs` keeps the agent in read-only mode while `ACTION_OPERATOR_ENABLED=false`: mutating commands are skipped before parsing the command spec, but `get_resource_yaml` remains available as a read-only fetch. When actions are enabled, `preview_workload_resources` performs a server-side dry-run, `apply_workload_resources` performs a live strategic-merge patch, `drain_node` cordons a node and evicts eligible pods after action-policy approval, `self_update` triggers an immediate agent restart, and `update_agent` updates the fixed agent DaemonSet image.
 
 The binary now supports `--mode agent|operator`. The default is `agent`. The DaemonSet runs `--mode agent`. The operator Deployment is **not** installed statically — the agent leader dynamically creates and removes it based on `ACTION_OPERATOR_ENABLED` in the ConfigMap. When the flag is `true`, the leader creates the operator `ServiceAccount` and `Deployment` (running `--mode operator`); when `false`, it removes them. The operator is fully independent of Hub connectivity.
 
@@ -250,9 +250,9 @@ Warning strings use stable code prefixes for Hub-side grouping:
   verbs: ["get", "patch"]
 ```
 
-This must be a separate ClusterRole/Binding applied only when `ACTIONS_ENABLED=true`. The read-only ClusterRole stays untouched. **No `*` on `*/*`**. The root `agent.yaml` does not grant this workload patch RBAC by default. Eligible namespaces must also be labeled `sentinella.io/action-mode=enabled`; the agent checks that label before patching.
+This must be a separate ClusterRole/Binding applied only when `ACTION_OPERATOR_ENABLED=true`. The read-only ClusterRole stays untouched. **No `*` on `*/*`**. The root `agent.yaml` does not grant this workload patch RBAC by default. Eligible namespaces must also be labeled `sentinella.io/action-mode=enabled`; the agent checks that label before patching.
 
-`drain_node` is a separate apply-only command. It requires `ACTIONS_ENABLED=true`, a Ready `SentinellaHubActionPolicy` that allows `drain_node`, and its own cluster-wide node plus pod-eviction RBAC. The spec supports `timeoutSeconds` (default `300`, max `3600`), optional `gracePeriodSeconds` for pod eviction, and `force` to allow unmanaged pods while still using the eviction API.
+`drain_node` is a separate apply-only command. It requires `ACTION_OPERATOR_ENABLED=true`, a Ready `SentinellaHubActionPolicy` that allows `drain_node`, and its own cluster-wide node plus pod-eviction RBAC. The spec supports `timeoutSeconds` (default `300`, max `3600`), optional `gracePeriodSeconds` for pod eviction, and `force` to allow unmanaged pods while still using the eviction API.
 
 Pre-flight warning checks are also best-effort. With the bundled reader RBAC, HPAs, VPAs, LimitRanges, ResourceQuotas, and PDBs are evaluated; preview still succeeds but may include `preflight.check.unavailable` warnings when a checked resource type is absent or unreadable.
 
@@ -487,7 +487,7 @@ Recommended `HUB_URL` is `https://api.hub.sentinel.la`.
 | `HTTP_TIMEOUT_SECS` | ConfigMap | `20` |
 | `LEASE_TTL_SECS` | ConfigMap | `30` |
 | `LEASE_NAME` | ConfigMap | `sentinella-hub-k8s-agent-leader` |
-| `ACTIONS_ENABLED` | ConfigMap | `false` |
+| `ACTION_OPERATOR_ENABLED` | ConfigMap | `false` |
 | `COLLECT_SECRETS` | ConfigMap | `false` |
 | `COLLECT_DEPENDENCIES_TETRAGON` | ConfigMap | `false` |
 | `TETRAGON_REQUIRED_FOR_READINESS` | ConfigMap | `true` |
