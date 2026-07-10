@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.6](https://github.com/thesentinella/hub-kubernetes-agent/compare/v1.3.5...v1.3.6) (2026-07-10)
+
+
+### Bug Fixes
+
+* update agent policy bypass ([#174](https://github.com/thesentinella/hub-kubernetes-agent/issues/174)) ([aaf7edf](https://github.com/thesentinella/hub-kubernetes-agent/commit/aaf7edf3fb8f0025e974bd44f3be74994e60311d))
+
 ## [1.3.5](https://github.com/thesentinella/hub-kubernetes-agent/compare/v1.3.4...v1.3.5) (2026-07-10)
 
 
