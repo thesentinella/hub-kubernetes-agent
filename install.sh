@@ -7,6 +7,13 @@ MANIFEST_SHA256="82ea2b350181d2d25639a4d2ac1eb65c8502814d9016381b8d8a596704e3233
 POLICY_URL="https://raw.githubusercontent.com/thesentinella/hub-kubernetes-agent/main/sentinella-dev-operator-policy.yaml"
 POLICY_SHA256="db6945c787735cac6d2d1809cb01bf599a43ca8b9f75fe76d2f48847e05f7235"
 HUB_URL="https://api.hub.sentinel.la"
+
+# Public GHCR image repository.
+IMAGE_REPOSITORY="${IMAGE_REPOSITORY:-ghcr.io/thesentinella/sentinella-hub-k8s-agent}"
+# Optional override. When empty, the installer derives the version from agent.yaml
+# and normalizes v1.2.3 -> 1.2.3 to match GHCR release tags.
+IMAGE_TAG="${IMAGE_TAG:-}"
+
 INSTALL_PLATFORM="${INSTALL_PLATFORM:-}"
 PLATFORM_OVERRIDE=""
 SHA256_CMD=""
@@ -25,6 +32,8 @@ Environment:
   INSTALL_PLATFORM   Override platform detection (kubernetes|openshift)
   VERIFY_MANIFEST_CHECKSUM  Set to true/1 to verify downloaded agent.yaml and policy manifest
   COLLECT_DEPENDENCIES_TETRAGON  Set to true/1 when the Tetragon gRPC service is installed
+  IMAGE_REPOSITORY   Container repository (default: ghcr.io/thesentinella/sentinella-hub-k8s-agent)
+  IMAGE_TAG          Optional image tag override (default: derive from agent.yaml)
   CLUSTER_ID         Required cluster identifier
   HUB_API_KEY        Required Hub API key
 EOF
@@ -207,6 +216,7 @@ echo "Installing Sentinella Hub Agent..."
 echo "  Cluster ID : $CLUSTER_ID"
 echo "  Namespace  : $NAMESPACE"
 echo "  Platform   : $PLATFORM"
+echo "  Image repo : $IMAGE_REPOSITORY"
 echo ""
 
 case "$VERIFY_MANIFEST_CHECKSUM" in
@@ -243,7 +253,60 @@ case "$VERIFY_MANIFEST_CHECKSUM" in
     ;;
 esac
 
-sed "s|REPLACE_ME|${CLUSTER_ID}|g" "$BASE_MANIFEST" > "$RENDERED_MANIFEST"
+# Resolve the image tag.
+#
+# The source manifest currently carries a release tag such as v1.4.1, while the
+# GHCR release workflow publishes 1.4.1. Strip one leading "v" unless IMAGE_TAG
+# was explicitly provided.
+if [ -z "$IMAGE_TAG" ]; then
+  MANIFEST_IMAGE_TAG=$(
+    awk '
+      /^[[:space:]]*image:[[:space:]]+/ &&
+      /sentinella-hub-k8s-agent:/ {
+        ref=$2
+        sub(/^.*:/, "", ref)
+        print ref
+        exit
+      }
+    ' "$BASE_MANIFEST"
+  )
+
+  if [ -z "$MANIFEST_IMAGE_TAG" ]; then
+    echo "Error: could not derive the agent image tag from agent.yaml." >&2
+    exit 1
+  fi
+
+  IMAGE_TAG="${MANIFEST_IMAGE_TAG#v}"
+fi
+
+case "$IMAGE_TAG" in
+  ""|*[!A-Za-z0-9_.-]*)
+    echo "Error: invalid IMAGE_TAG '$IMAGE_TAG'." >&2
+    exit 1
+    ;;
+esac
+
+AGENT_IMAGE="${IMAGE_REPOSITORY}:${IMAGE_TAG}"
+
+echo "Resolved image: $AGENT_IMAGE"
+echo ""
+
+# Render CLUSTER_ID and replace all agent/operator image references with GHCR.
+awk -v cluster_id="$CLUSTER_ID" -v agent_image="$AGENT_IMAGE" '
+  {
+    gsub(/REPLACE_ME/, cluster_id)
+
+    if ($0 ~ /^[[:space:]]*image:[[:space:]]+/ &&
+        $0 ~ /sentinella-hub-k8s-agent:/) {
+      prefix=$0
+      sub(/image:.*/, "image: ", prefix)
+      print prefix agent_image
+      next
+    }
+
+    print
+  }
+' "$BASE_MANIFEST" > "$RENDERED_MANIFEST"
 
 if [ "$PLATFORM" = "openshift" ]; then
   # OpenShift rejects fixed UID/GID settings under default SCCs.
@@ -267,6 +330,12 @@ if [ ! -s "$WORKLOAD_MANIFEST" ]; then
 fi
 
 kubectl apply -f "$NAMESPACE_MANIFEST"
+
+# Fail early if any Sentinella workload image was not rewritten.
+if grep -Eq '^[[:space:]]*image:[[:space:]]+.*(docker\.pkg\.dev|gcr\.io)/' "$WORKLOAD_MANIFEST"; then
+  echo "Error: rendered manifest still contains a Google registry image reference." >&2
+  exit 1
+fi
 
 echo "Validating manifest with server-side dry-run..."
 if ! kubectl apply --dry-run=server -f "$WORKLOAD_MANIFEST" >/dev/null; then
