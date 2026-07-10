@@ -10,8 +10,8 @@ HUB_URL="https://api.hub.sentinel.la"
 
 # Public GHCR image repository.
 IMAGE_REPOSITORY="${IMAGE_REPOSITORY:-ghcr.io/thesentinella/sentinella-hub-k8s-agent}"
-# Optional override. When empty, the installer derives the version from agent.yaml
-# and normalizes v1.2.3 -> 1.2.3 to match GHCR release tags.
+# Optional override. When empty, the installer preserves the exact tag from agent.yaml.
+# Explicit overrides may use vX.Y.Z, X.Y.Z, or a short Git SHA.
 IMAGE_TAG="${IMAGE_TAG:-}"
 
 INSTALL_PLATFORM="${INSTALL_PLATFORM:-}"
@@ -255,9 +255,9 @@ esac
 
 # Resolve the image tag.
 #
-# The source manifest currently carries a release tag such as v1.4.1, while the
-# GHCR release workflow publishes 1.4.1. Strip one leading "v" unless IMAGE_TAG
-# was explicitly provided.
+# By default, preserve the exact tag declared in agent.yaml. This allows the
+# release manifest to use vX.Y.Z while still supporting explicit IMAGE_TAG
+# overrides such as X.Y.Z or a short Git SHA.
 if [ -z "$IMAGE_TAG" ]; then
   MANIFEST_IMAGE_TAG=$(
     awk '
@@ -276,7 +276,7 @@ if [ -z "$IMAGE_TAG" ]; then
     exit 1
   fi
 
-  IMAGE_TAG="${MANIFEST_IMAGE_TAG#v}"
+  IMAGE_TAG="$MANIFEST_IMAGE_TAG"
 fi
 
 case "$IMAGE_TAG" in
