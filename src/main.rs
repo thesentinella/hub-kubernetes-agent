@@ -10,12 +10,12 @@ mod plugins;
 mod tech;
 mod tetragon;
 
-use crate::config::Config;
+use crate::config::{Config, RuntimeMode};
 use crate::executor::Executor;
 use crate::hub::HubClient;
 use crate::leader::LeaderState;
 use crate::model::*;
-use anyhow::Result;
+use anyhow::{Result, bail};
 use kube::Client as KubeClient;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
@@ -44,27 +44,32 @@ struct SuppressionState {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let mode = parse_runtime_mode(std::env::args().skip(1))?;
     init_tracing();
 
-    let cfg = Config::from_env()?;
-    info!(
-        agent = AGENT_NAME,
-        version = env!("CARGO_PKG_VERSION"),
-        cluster_id = %cfg.cluster_id,
-        hub_url = %cfg.hub_url,
-        node = %cfg.node_name,
-        actions_enabled = cfg.actions_enabled,
-        "starting"
-    );
+    let cfg = Config::from_env_for_mode(mode)?;
+
+    match mode {
+        RuntimeMode::Agent => info!(
+            agent = AGENT_NAME,
+            version = env!("CARGO_PKG_VERSION"),
+            mode = mode.as_str(),
+            cluster_id = %cfg.cluster_id,
+            hub_url = %cfg.hub_url,
+            node = %cfg.node_name,
+            actions_enabled = cfg.actions_enabled,
+            "starting"
+        ),
+        RuntimeMode::Operator => info!(
+            agent = AGENT_NAME,
+            version = env!("CARGO_PKG_VERSION"),
+            mode = mode.as_str(),
+            namespace = %cfg.pod_namespace,
+            "starting"
+        ),
+    }
 
     let kube_client = KubeClient::try_default().await?;
-    let hub = Arc::new(HubClient::new(cfg.clone())?);
-    let executor = Arc::new(Executor::new(cfg.clone(), kube_client.clone()));
-    let leader_state = LeaderState::new();
-
-    startup_duplicate_cluster_check(&cfg, hub.as_ref()).await;
-
-    tetragon::init(kube_client.clone(), &cfg);
 
     // Health/metrics server
     tokio::spawn(async {
@@ -72,6 +77,21 @@ async fn main() -> Result<()> {
             error!("health server crashed: {}", e);
         }
     });
+
+    match mode {
+        RuntimeMode::Agent => run_agent_mode(cfg, kube_client).await,
+        RuntimeMode::Operator => run_operator_mode(cfg, kube_client).await,
+    }
+}
+
+async fn run_agent_mode(cfg: Config, kube_client: KubeClient) -> Result<()> {
+    let hub = Arc::new(HubClient::new(cfg.clone())?);
+    let executor = Arc::new(Executor::new(cfg.clone(), kube_client.clone()));
+    let leader_state = LeaderState::new();
+
+    startup_duplicate_cluster_check(&cfg, hub.as_ref()).await;
+
+    tetragon::init(kube_client.clone(), &cfg);
 
     // Leader election loop. Holder identity = node name, so the elected pod
     // is the one running on the node that won. The lease lives in the agent's
@@ -84,15 +104,6 @@ async fn main() -> Result<()> {
         cfg.lease_ttl,
         leader_state.clone(),
     ));
-
-    let operator_handle = if cfg.action_operator_enabled {
-        Some(tokio::spawn(operator::run_action_operator(
-            cfg.clone(),
-            kube_client.clone(),
-        )))
-    } else {
-        None
-    };
 
     // Collector loop — only sends when this pod is the leader.
     let collect_handle = tokio::spawn(collector_loop(
@@ -109,12 +120,45 @@ async fn main() -> Result<()> {
     wait_for_shutdown().await;
     info!("shutdown signal received; aborting workers");
     leader_handle.abort();
-    if let Some(handle) = operator_handle {
-        handle.abort();
-    }
     collect_handle.abort();
     poll_handle.abort();
     Ok(())
+}
+
+async fn run_operator_mode(cfg: Config, kube_client: KubeClient) -> Result<()> {
+    let operator_handle = tokio::spawn(operator::run_action_operator(cfg, kube_client));
+
+    wait_for_shutdown().await;
+    info!("shutdown signal received; aborting workers");
+    operator_handle.abort();
+    Ok(())
+}
+
+fn parse_runtime_mode<I>(args: I) -> Result<RuntimeMode>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut mode = RuntimeMode::Agent;
+    let mut args = args.into_iter();
+
+    while let Some(arg) = args.next() {
+        if arg == "--mode" {
+            let Some(value) = args.next() else {
+                bail!("--mode requires a value: agent or operator");
+            };
+            mode = RuntimeMode::parse(&value)?;
+            continue;
+        }
+
+        if let Some(value) = arg.strip_prefix("--mode=") {
+            mode = RuntimeMode::parse(value)?;
+            continue;
+        }
+
+        bail!("unknown argument: {}", arg);
+    }
+
+    Ok(mode)
 }
 
 fn init_tracing() {
@@ -588,5 +632,33 @@ mod tests {
     #[test]
     fn last_seen_age_seconds_rejects_invalid_values() {
         assert!(last_seen_age_seconds("not-a-timestamp").is_none());
+    }
+
+    #[test]
+    fn parse_runtime_mode_defaults_to_agent() {
+        let mode = parse_runtime_mode(Vec::<String>::new()).unwrap();
+
+        assert_eq!(mode, RuntimeMode::Agent);
+    }
+
+    #[test]
+    fn parse_runtime_mode_accepts_separate_flag_value() {
+        let mode = parse_runtime_mode(vec!["--mode".into(), "operator".into()]).unwrap();
+
+        assert_eq!(mode, RuntimeMode::Operator);
+    }
+
+    #[test]
+    fn parse_runtime_mode_accepts_equals_syntax() {
+        let mode = parse_runtime_mode(vec!["--mode=operator".into()]).unwrap();
+
+        assert_eq!(mode, RuntimeMode::Operator);
+    }
+
+    #[test]
+    fn parse_runtime_mode_rejects_invalid_value() {
+        let err = parse_runtime_mode(vec!["--mode".into(), "invalid".into()]).unwrap_err();
+
+        assert!(err.to_string().contains("invalid runtime mode"));
     }
 }

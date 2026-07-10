@@ -160,9 +160,13 @@ Example snapshot payload:
 
 `src/executor.rs` keeps the agent in read-only mode while `ACTIONS_ENABLED=false`: mutating commands are skipped before parsing the command spec, but `get_resource_yaml` remains available as a read-only fetch. When actions are enabled, `preview_workload_resources` performs a server-side dry-run, `apply_workload_resources` performs a live strategic-merge patch, `drain_node` cordons a node and evicts eligible pods after action-policy approval, `self_update` triggers an immediate agent restart, and `update_agent` updates the fixed agent DaemonSet image.
 
+The binary now supports `--mode agent|operator`. The default is `agent`. The DaemonSet runs `--mode agent`; the separate operator Deployment runs `--mode operator` and is fully independent of Hub connectivity.
+
 For Action Mode, the target namespace must also carry the label `sentinella.io/action-mode=enabled`; the executor rejects workload patch commands when the label is missing or set to another value.
 
-The Phase 3 operator path is opt-in via `ACTION_OPERATOR_ENABLED=true`. When enabled, the agent reconciles namespace-scoped `RoleBinding`s and updates policy status for namespaces that are both labeled `sentinella.io/action-mode=enabled` and selected by a matching cluster-scoped `SentinellaHubActionPolicy`.
+The Phase 3 operator path now runs in a separate Deployment using `--mode operator`. That workload reconciles namespace-scoped `RoleBinding`s and updates policy status for namespaces that are both labeled `sentinella.io/action-mode=enabled` and selected by a matching cluster-scoped `SentinellaHubActionPolicy`.
+
+`HUB_URL`, `CLUSTER_ID`, and `HUB_API_KEY` are required only in `--mode agent`. `--mode operator` is fully Hub-independent.
 
 The operator manifest must include the `sentinellahubactionpolicies/status` subresource permission; without it, status freshness cannot be written and the operator will fail closed.
 

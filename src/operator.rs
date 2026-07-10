@@ -36,10 +36,6 @@ const SYSTEM_EXCLUDED_NAMESPACES: &[&str] = &[
 ];
 
 pub async fn run_action_operator(cfg: Config, client: Client) {
-    if !cfg.action_operator_enabled {
-        return;
-    }
-
     info!(
         poll_interval_secs = cfg.action_operator_poll_interval.as_secs(),
         "action operator enabled"
@@ -264,8 +260,9 @@ where
             continue;
         };
         let name = name.to_string();
+        let action_mode_enabled = namespace_action_mode_enabled(namespace);
 
-        if !namespace_is_excluded(&name, excluded_namespaces) {
+        if !namespace_is_excluded(&name, excluded_namespaces) && action_mode_enabled {
             if let Err(err) = ensure(name).await {
                 errors.push(err.to_string());
             }
@@ -282,6 +279,16 @@ where
             Some(errors.join("; "))
         },
     })
+}
+
+fn namespace_action_mode_enabled(namespace: &Namespace) -> bool {
+    namespace
+        .metadata
+        .labels
+        .as_ref()
+        .and_then(|labels| labels.get(ACTION_MODE_NAMESPACE_LABEL))
+        .map(String::as_str)
+        == Some(ACTION_MODE_NAMESPACE_LABEL_ENABLED)
 }
 
 async fn ensure_action_role_binding(client: &Client, namespace: String) -> Result<()> {
