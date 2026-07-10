@@ -787,10 +787,10 @@ Known command kinds:
 ### 7.6 `drain_node`
 
 - Purpose: supports the main operation of the Drain node runbook.
-- Spec: `{ "nodeName": "worker-01", "timeoutSeconds": 300, "gracePeriodSeconds": 30 }`
+- Spec: `{ "nodeName": "worker-01", "timeoutSeconds": 300, "gracePeriodSeconds": 30, "force": false }`
 - Behavioral equivalent: cordon the node, then evict eligible pods on the node.
 - Required behavior: cordon the node, identify pods scheduled there, skip mirror and DaemonSet-managed pods, reject unmanaged pods, evict the eligible pods, and return a summarized result.
-- Validation: `nodeName` is required and must be non-empty; `timeoutSeconds` defaults to `300`, must be greater than `0` when provided, and is capped at `3600`.
+- Validation: `nodeName` is required and must be non-empty; `timeoutSeconds` defaults to `300`, must be greater than `0` when provided, and is capped at `3600`; `force` defaults to `false` and, when `true`, allows unmanaged Pods to be evicted through the eviction API.
 - Safety requirement: this command requires `ACTIONS_ENABLED=true` and a Ready `SentinellaHubActionPolicy` that allows `drain_node`.
 - Required permissions: `patch` on `core/nodes`; `create` on `core/pods/eviction`. Read permissions on pods are already covered by the bundled reader role. If `gracePeriodSeconds` is set, it is passed to the eviction delete options and must be greater than `0`.
 

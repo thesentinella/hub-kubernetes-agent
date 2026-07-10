@@ -739,6 +739,8 @@ pub struct DrainNodeSpec {
     pub timeout_seconds: Option<u64>,
     #[serde(default)]
     pub grace_period_seconds: Option<u64>,
+    #[serde(default)]
+    pub force: bool,
 }
 
 /// Spec payload for `scale`.
@@ -1585,12 +1587,14 @@ mod tests {
 
     #[test]
     fn drain_node_spec_deserializes() {
-        let json = r#"{"nodeName":"worker-1","timeoutSeconds":900,"gracePeriodSeconds":45}"#;
+        let json =
+            r#"{"nodeName":"worker-1","timeoutSeconds":900,"gracePeriodSeconds":45,"force":true}"#;
         let spec: DrainNodeSpec = serde_json::from_str(json).unwrap();
 
         assert_eq!(spec.node_name, "worker-1");
         assert_eq!(spec.timeout_seconds, Some(900));
         assert_eq!(spec.grace_period_seconds, Some(45));
+        assert!(spec.force);
     }
 
     #[test]
@@ -1601,6 +1605,7 @@ mod tests {
         assert_eq!(spec.node_name, "worker-1");
         assert_eq!(spec.timeout_seconds, None);
         assert_eq!(spec.grace_period_seconds, None);
+        assert!(!spec.force);
     }
 
     #[test]

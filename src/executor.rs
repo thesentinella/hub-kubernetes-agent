@@ -1010,62 +1010,6 @@ impl Executor {
     }
 
     async fn drain_node(&self, command_id: &str, spec: DrainNodeSpec) -> CommandResult {
-        fn classify_pods_on_node(
-            node_name: &str,
-            pods: Vec<Pod>,
-        ) -> (Vec<String>, Vec<String>, Vec<(String, String)>) {
-            let mut daemonset_pods = Vec::new();
-            let mut unmanaged_pods = Vec::new();
-            let mut drainable_pods = Vec::new();
-
-            for pod in pods {
-                let pod_node = pod.spec.as_ref().and_then(|s| s.node_name.as_deref());
-                if pod_node != Some(node_name) {
-                    continue;
-                }
-
-                let namespace = pod.metadata.namespace.clone().unwrap_or_default();
-                let name = pod.metadata.name.clone().unwrap_or_default();
-                let display_name = format!("{}/{}", namespace, name);
-
-                if pod
-                    .metadata
-                    .annotations
-                    .as_ref()
-                    .and_then(|annotations| annotations.get("kubernetes.io/config.mirror"))
-                    .is_some()
-                {
-                    daemonset_pods.push(format!("ignored mirror pod {}", display_name));
-                    continue;
-                }
-
-                let owner_kinds = pod
-                    .metadata
-                    .owner_references
-                    .as_ref()
-                    .map(|refs| {
-                        refs.iter()
-                            .map(|owner| owner.kind.as_str())
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
-
-                if owner_kinds.iter().any(|kind| *kind == "DaemonSet") {
-                    daemonset_pods.push(format!("ignored DaemonSet pod {}", display_name));
-                    continue;
-                }
-
-                if owner_kinds.is_empty() {
-                    unmanaged_pods.push(display_name);
-                    continue;
-                }
-
-                drainable_pods.push((namespace, name));
-            }
-
-            (daemonset_pods, unmanaged_pods, drainable_pods)
-        }
-
         let node_name = spec.node_name.trim();
         if node_name.is_empty() {
             return CommandResult::simple(
@@ -1131,9 +1075,18 @@ impl Executor {
         };
 
         let (daemonset_pods, unmanaged_pods, drainable_pods) =
-            classify_pods_on_node(node_name, pod_list.items);
+            Self::classify_pods_on_node(node_name, pod_list.items, spec.force);
 
-        if !unmanaged_pods.is_empty() {
+        let mut warnings = daemonset_pods.clone();
+        if spec.force && !unmanaged_pods.is_empty() {
+            warnings.extend(
+                unmanaged_pods
+                    .iter()
+                    .map(|pod| format!("forced unmanaged pod {}", pod)),
+            );
+        }
+
+        if !spec.force && !unmanaged_pods.is_empty() {
             return CommandResult::simple(
                 command_id.to_string(),
                 "error",
@@ -1214,18 +1167,26 @@ impl Executor {
             };
 
             let (_daemonset_warnings, still_unmanaged, still_drainable) =
-                classify_pods_on_node(node_name, pod_list.items);
+                Self::classify_pods_on_node(node_name, pod_list.items, spec.force);
 
             if !still_unmanaged.is_empty() {
-                return CommandResult::simple(
-                    command_id.to_string(),
-                    "error",
-                    Some(format!(
-                        "Node {} gained unmanaged Pods during drain: {}",
-                        node_name,
-                        still_unmanaged.join(", ")
-                    )),
-                );
+                if spec.force {
+                    warnings.extend(
+                        still_unmanaged
+                            .iter()
+                            .map(|pod| format!("forced unmanaged pod {}", pod)),
+                    );
+                } else {
+                    return CommandResult::simple(
+                        command_id.to_string(),
+                        "error",
+                        Some(format!(
+                            "Node {} gained unmanaged Pods during drain: {}",
+                            node_name,
+                            still_unmanaged.join(", ")
+                        )),
+                    );
+                }
             }
 
             if still_drainable.is_empty() {
@@ -1251,8 +1212,6 @@ impl Executor {
 
             sleep(Duration::from_secs(5)).await;
         }
-
-        let warnings = daemonset_pods.clone();
 
         let mut result = CommandResult::simple(command_id.to_string(), "ok", None);
         result.dry_run = Some(false);
@@ -1527,6 +1486,67 @@ impl Executor {
                 }))
             }
         }
+    }
+
+    fn pod_is_mirror(pod: &Pod) -> bool {
+        pod.metadata
+            .annotations
+            .as_ref()
+            .and_then(|annotations| annotations.get("kubernetes.io/config.mirror"))
+            .is_some()
+    }
+
+    fn pod_owner_kinds(pod: &Pod) -> Vec<&str> {
+        pod.metadata
+            .owner_references
+            .as_ref()
+            .map(|refs| refs.iter().map(|owner| owner.kind.as_str()).collect())
+            .unwrap_or_default()
+    }
+
+    fn classify_pods_on_node(
+        node_name: &str,
+        pods: Vec<Pod>,
+        force: bool,
+    ) -> (Vec<String>, Vec<String>, Vec<(String, String)>) {
+        let mut daemonset_pods = Vec::new();
+        let mut unmanaged_pods = Vec::new();
+        let mut drainable_pods = Vec::new();
+
+        for pod in pods {
+            let pod_node = pod.spec.as_ref().and_then(|s| s.node_name.as_deref());
+            if pod_node != Some(node_name) {
+                continue;
+            }
+
+            let namespace = pod.metadata.namespace.clone().unwrap_or_default();
+            let name = pod.metadata.name.clone().unwrap_or_default();
+            let display_name = format!("{}/{}", namespace, name);
+
+            if Self::pod_is_mirror(&pod) {
+                daemonset_pods.push(format!("ignored mirror pod {}", display_name));
+                continue;
+            }
+
+            let owner_kinds = Self::pod_owner_kinds(&pod);
+
+            if owner_kinds.iter().any(|kind| *kind == "DaemonSet") {
+                daemonset_pods.push(format!("ignored DaemonSet pod {}", display_name));
+                continue;
+            }
+
+            if owner_kinds.is_empty() {
+                unmanaged_pods.push(display_name.clone());
+                if force {
+                    drainable_pods.push((namespace, name));
+                }
+                continue;
+            }
+
+            drainable_pods.push((namespace, name));
+        }
+
+        (daemonset_pods, unmanaged_pods, drainable_pods)
     }
 
     fn namespace_is_effective_for_command(
@@ -2683,12 +2703,45 @@ mod tests {
         node_name: &str,
         timeout_seconds: Option<u64>,
         grace_period_seconds: Option<u64>,
+        force: bool,
     ) -> DrainNodeSpec {
         DrainNodeSpec {
             node_name: node_name.into(),
             timeout_seconds,
             grace_period_seconds,
+            force,
         }
+    }
+
+    fn drain_pod(
+        namespace: &str,
+        name: &str,
+        node_name: &str,
+        owner_kind: Option<&str>,
+        mirror: bool,
+    ) -> Pod {
+        let mut metadata = serde_json::Map::new();
+        metadata.insert("namespace".into(), json!(namespace));
+        metadata.insert("name".into(), json!(name));
+
+        if mirror {
+            metadata.insert(
+                "annotations".into(),
+                json!({"kubernetes.io/config.mirror": "true"}),
+            );
+        }
+
+        if let Some(kind) = owner_kind {
+            metadata.insert("ownerReferences".into(), json!([{ "kind": kind }]));
+        }
+
+        serde_json::from_value(json!({
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": metadata,
+            "spec": { "nodeName": node_name }
+        }))
+        .unwrap()
     }
 
     #[test]
@@ -2785,8 +2838,43 @@ mod tests {
     }
 
     #[test]
+    fn classify_pods_on_node_rejects_unmanaged_without_force() {
+        let pods = vec![drain_pod("default", "bare", "worker-1", None, false)];
+
+        let (_, unmanaged, drainable) = Executor::classify_pods_on_node("worker-1", pods, false);
+
+        assert_eq!(unmanaged, vec!["default/bare"]);
+        assert!(drainable.is_empty());
+    }
+
+    #[test]
+    fn classify_pods_on_node_allows_unmanaged_with_force() {
+        let pods = vec![drain_pod("default", "bare", "worker-1", None, false)];
+
+        let (_, unmanaged, drainable) = Executor::classify_pods_on_node("worker-1", pods, true);
+
+        assert_eq!(unmanaged, vec!["default/bare"]);
+        assert_eq!(drainable, vec![("default".into(), "bare".into())]);
+    }
+
+    #[test]
+    fn classify_pods_on_node_keeps_daemonset_and_mirror_ignored() {
+        let pods = vec![
+            drain_pod("kube-system", "ds", "worker-1", Some("DaemonSet"), false),
+            drain_pod("kube-system", "mirror", "worker-1", None, true),
+        ];
+
+        let (warnings, unmanaged, drainable) =
+            Executor::classify_pods_on_node("worker-1", pods, true);
+
+        assert_eq!(warnings.len(), 2);
+        assert!(unmanaged.is_empty());
+        assert!(drainable.is_empty());
+    }
+
+    #[test]
     fn drain_timeout_duration_defaults_to_300_seconds() {
-        let spec = drain_spec("worker-1", None, None);
+        let spec = drain_spec("worker-1", None, None, false);
 
         assert_eq!(
             Executor::drain_timeout_duration(&spec).unwrap(),
@@ -2796,7 +2884,7 @@ mod tests {
 
     #[test]
     fn drain_timeout_duration_uses_specified_value() {
-        let spec = drain_spec("worker-1", Some(900), None);
+        let spec = drain_spec("worker-1", Some(900), None, false);
 
         assert_eq!(
             Executor::drain_timeout_duration(&spec).unwrap(),
@@ -2806,7 +2894,7 @@ mod tests {
 
     #[test]
     fn drain_timeout_duration_rejects_too_large_values() {
-        let spec = drain_spec("worker-1", Some(3601), None);
+        let spec = drain_spec("worker-1", Some(3601), None, false);
 
         assert_eq!(
             Executor::drain_timeout_duration(&spec).unwrap_err(),
@@ -2816,7 +2904,7 @@ mod tests {
 
     #[test]
     fn drain_timeout_duration_rejects_zero() {
-        let spec = drain_spec("worker-1", Some(0), None);
+        let spec = drain_spec("worker-1", Some(0), None, false);
 
         assert_eq!(
             Executor::drain_timeout_duration(&spec).unwrap_err(),
@@ -2826,14 +2914,14 @@ mod tests {
 
     #[test]
     fn drain_delete_options_defaults_to_none() {
-        let spec = drain_spec("worker-1", None, None);
+        let spec = drain_spec("worker-1", None, None, false);
 
         assert!(Executor::drain_delete_options(&spec).unwrap().is_none());
     }
 
     #[test]
     fn drain_delete_options_sets_grace_period() {
-        let spec = drain_spec("worker-1", None, Some(45));
+        let spec = drain_spec("worker-1", None, Some(45), false);
 
         let delete_options = Executor::drain_delete_options(&spec).unwrap().unwrap();
 
@@ -2842,7 +2930,7 @@ mod tests {
 
     #[test]
     fn drain_delete_options_rejects_zero() {
-        let spec = drain_spec("worker-1", None, Some(0));
+        let spec = drain_spec("worker-1", None, Some(0), false);
 
         assert_eq!(
             Executor::drain_delete_options(&spec).unwrap_err(),

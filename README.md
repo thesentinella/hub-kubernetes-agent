@@ -248,7 +248,7 @@ Warning strings use stable code prefixes for Hub-side grouping:
 
 This must be a separate ClusterRole/Binding applied only when `ACTIONS_ENABLED=true`. The read-only ClusterRole stays untouched. **No `*` on `*/*`**. The root `agent.yaml` does not grant this workload patch RBAC by default. Eligible namespaces must also be labeled `sentinella.io/action-mode=enabled`; the agent checks that label before patching.
 
-`drain_node` is a separate apply-only command. It requires `ACTIONS_ENABLED=true`, a Ready `SentinellaHubActionPolicy` that allows `drain_node`, and its own cluster-wide node plus pod-eviction RBAC. The spec supports `timeoutSeconds` (default `300`, max `3600`) and optional `gracePeriodSeconds` for pod eviction.
+`drain_node` is a separate apply-only command. It requires `ACTIONS_ENABLED=true`, a Ready `SentinellaHubActionPolicy` that allows `drain_node`, and its own cluster-wide node plus pod-eviction RBAC. The spec supports `timeoutSeconds` (default `300`, max `3600`), optional `gracePeriodSeconds` for pod eviction, and `force` to allow unmanaged pods while still using the eviction API.
 
 Pre-flight warning checks are also best-effort. With the bundled reader RBAC, HPAs, VPAs, LimitRanges, ResourceQuotas, and PDBs are evaluated; preview still succeeds but may include `preflight.check.unavailable` warnings when a checked resource type is absent or unreadable.
 
