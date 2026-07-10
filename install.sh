@@ -4,7 +4,7 @@ set -euo pipefail
 NAMESPACE="sentinella"
 MANIFEST_URL="https://raw.githubusercontent.com/thesentinella/hub-kubernetes-agent/main/agent.yaml"
 MANIFEST_SHA256="82ea2b350181d2d25639a4d2ac1eb65c8502814d9016381b8d8a596704e32331"
-POLICY_URL="https://raw.githubusercontent.com/thesentinella/hub-kubernetes-agent/main/sentinella-dev-operator-policy.yaml"
+POLICY_URL="https://raw.githubusercontent.com/thesentinella/hub-kubernetes-agent/main/sentinella-default-action-policy.yaml"
 POLICY_SHA256="db6945c787735cac6d2d1809cb01bf599a43ca8b9f75fe76d2f48847e05f7235"
 HUB_URL="https://api.hub.sentinel.la"
 
@@ -129,7 +129,7 @@ BASE_MANIFEST="$TMPDIR/agent.yaml"
 RENDERED_MANIFEST="$TMPDIR/agent.rendered.yaml"
 NAMESPACE_MANIFEST="$TMPDIR/agent.namespace.yaml"
 WORKLOAD_MANIFEST="$TMPDIR/agent.workload.yaml"
-POLICY_MANIFEST="$TMPDIR/sentinella-dev-operator-policy.yaml"
+POLICY_MANIFEST="$TMPDIR/sentinella-default-action-policy.yaml"
 
 split_namespace_manifest() {
   awk -v ns="$NAMESPACE_MANIFEST" -v rest="$WORKLOAD_MANIFEST" '

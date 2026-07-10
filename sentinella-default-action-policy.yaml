@@ -1,7 +1,7 @@
 apiVersion: sentinella.io/v1alpha1
 kind: SentinellaHubActionPolicy
 metadata:
-  name: sentinella-dev-operator-policy
+  name: sentinella-default-action-policy
 spec:
   namespaceSelector:
     matchLabels:

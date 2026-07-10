@@ -822,7 +822,7 @@ Known command kinds:
 ## Deployment Manifest
 
 - The deploy manifest is root `agent.yaml`.
-- The install bundle also includes `sentinella-dev-operator-policy.yaml` so the default action policy ships with the agent.
+- The install bundle also includes `sentinella-default-action-policy.yaml` so the default action policy ships with the agent.
 - Installer validation uses server-side dry-run on the rendered workload manifest; avoid client-side dry-run against the full bundle because the CRD path is brittle.
 - Action Mode eligibility is policy-driven: the operator reconciles namespace RoleBindings for namespaces that are not in the fixed or configured exclude list, and the executor only allows commands in namespaces present in a `Ready` policy's `effectiveNamespaces`.
 - `ACTION_OPERATOR_ENABLED` controls whether the agent leader dynamically creates the operator `Deployment`/`ServiceAccount` (when `true`) or removes them (when `false`); `ACTION_OPERATOR_POLL_INTERVAL_SECS` sets the operator's reconciler poll interval; `ACTION_OPERATOR_EXCLUDED_NAMESPACES` adds YAML-list exclusions to the fixed namespace denylist.
