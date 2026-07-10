@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v1.4.4...v1.5.0) (2026-07-10)
+
+
+### Features
+
+* dynamic operator lifecycle via ConfigMap watch ([#186](https://github.com/thesentinella/hub-kubernetes-agent/issues/186)) ([7bba057](https://github.com/thesentinella/hub-kubernetes-agent/commit/7bba057abcf97729f249c0f01da8bebdf6ba88bd))
+
 ## [1.4.4](https://github.com/thesentinella/hub-kubernetes-agent/compare/v1.4.3...v1.4.4) (2026-07-10)
 
 
