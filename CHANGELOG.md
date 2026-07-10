@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.4](https://github.com/thesentinella/hub-kubernetes-agent/compare/v1.3.3...v1.3.4) (2026-07-09)
+
+
+### Bug Fixes
+
+* gate drain_node by action policy ([#170](https://github.com/thesentinella/hub-kubernetes-agent/issues/170)) ([24efcc6](https://github.com/thesentinella/hub-kubernetes-agent/commit/24efcc6442c3e2ccc815767ff2a390d1393e16e7))
+
 ## [1.3.3](https://github.com/thesentinella/hub-kubernetes-agent/compare/v1.3.2...v1.3.3) (2026-07-09)
 
 
