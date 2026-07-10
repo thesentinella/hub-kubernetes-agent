@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.2](https://github.com/thesentinella/hub-kubernetes-agent/compare/v1.4.1...v1.4.2) (2026-07-10)
+
+
+### Bug Fixes
+
+* Enhance install.sh with image repository and tag ([#180](https://github.com/thesentinella/hub-kubernetes-agent/issues/180)) ([92518fb](https://github.com/thesentinella/hub-kubernetes-agent/commit/92518fba105552a685e00dba6187d237dcf5bf3e))
+
 ## [1.4.1](https://github.com/thesentinella/hub-kubernetes-agent/compare/v1.4.0...v1.4.1) (2026-07-10)
 
 
