@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.3](https://github.com/thesentinella/hub-kubernetes-agent/compare/v1.4.2...v1.4.3) (2026-07-10)
+
+
+### Bug Fixes
+
+* Refactor release workflow to handle versioning updates ([#182](https://github.com/thesentinella/hub-kubernetes-agent/issues/182)) ([b4e7366](https://github.com/thesentinella/hub-kubernetes-agent/commit/b4e7366a443740e4302cdff362f062eb1160031e))
+
 ## [1.4.2](https://github.com/thesentinella/hub-kubernetes-agent/compare/v1.4.1...v1.4.2) (2026-07-10)
 
 
