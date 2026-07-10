@@ -1530,7 +1530,7 @@ impl Executor {
 
             let owner_kinds = Self::pod_owner_kinds(&pod);
 
-            if owner_kinds.iter().any(|kind| *kind == "DaemonSet") {
+            if owner_kinds.contains(&"DaemonSet") {
                 daemonset_pods.push(format!("ignored DaemonSet pod {}", display_name));
                 continue;
             }

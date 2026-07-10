@@ -4,7 +4,7 @@
 
 - The binary supports `--mode agent|operator`; the default is `agent`.
 - `agent` mode runs as a Kubernetes `DaemonSet` using the `sentinella-hub-k8s-agent` `ServiceAccount` in namespace `sentinella`.
-- `operator` mode runs as a separate `Deployment` using the `sentinella-hub-k8s-operator` `ServiceAccount` in namespace `sentinella`.
+- `operator` mode runs as a dynamically-created `Deployment` using the `sentinella-hub-k8s-operator` `ServiceAccount` in namespace `sentinella`. The agent leader creates this Deployment when `ACTION_OPERATOR_ENABLED=true` and removes it when `false`.
 - `agent` mode starts health/metrics, leader election, inventory collection, and command polling.
 - `operator` mode starts health/metrics and the action-policy reconciler loop only; it does not talk to Hub.
 - Inventory collection is leader-only. Non-leader pods skip collection but still poll commands.
@@ -42,7 +42,7 @@
 | `LEASE_NAME` | no | `sentinella-hub-k8s-agent-leader` | Lease object name. |
 | `ACTIONS_ENABLED` | no | `false` | Only `true` or `1` enables action dispatch. |
 | `READONLY_COMMANDS_ENABLED` | no | `false` | Enables read-only commands such as `diagnose_postgresql` without enabling mutating actions. |
-| `ACTION_OPERATOR_ENABLED` | no | `false` | Enables the action-policy reconciler loop. |
+| `ACTION_OPERATOR_ENABLED` | no | `false` | When `true`, the agent leader dynamically creates and manages the operator `Deployment` and `ServiceAccount`; when `false`, they are removed. |
 | `ACTION_OPERATOR_POLL_INTERVAL_SECS` | no | `60` | Reconciler poll interval. |
 | `ACTION_OPERATOR_EXCLUDED_NAMESPACES` | no | `[]` | YAML list of additional namespaces excluded from action RoleBinding reconciliation. |
 | `COLLECT_SECRETS` | no | `false` | When `true`, collect Secret metadata and key names only; requires separate `secrets` read RBAC. |
@@ -825,7 +825,7 @@ Known command kinds:
 - The install bundle also includes `sentinella-dev-operator-policy.yaml` so the default action policy ships with the agent.
 - Installer validation uses server-side dry-run on the rendered workload manifest; avoid client-side dry-run against the full bundle because the CRD path is brittle.
 - Action Mode eligibility is policy-driven: the operator reconciles namespace RoleBindings for namespaces that are not in the fixed or configured exclude list, and the executor only allows commands in namespaces present in a `Ready` policy's `effectiveNamespaces`.
-- `ACTION_OPERATOR_ENABLED` controls the opt-in RoleBinding reconciler loop; `ACTION_OPERATOR_POLL_INTERVAL_SECS` sets its poll interval; `ACTION_OPERATOR_EXCLUDED_NAMESPACES` adds YAML-list exclusions to the fixed namespace denylist.
+- `ACTION_OPERATOR_ENABLED` controls whether the agent leader dynamically creates the operator `Deployment`/`ServiceAccount` (when `true`) or removes them (when `false`); `ACTION_OPERATOR_POLL_INTERVAL_SECS` sets the operator's reconciler poll interval; `ACTION_OPERATOR_EXCLUDED_NAMESPACES` adds YAML-list exclusions to the fixed namespace denylist.
 - The `agent` container image is `us-east1-docker.pkg.dev/sentinella-hub/kubernetes-agent/sentinella-hub-k8s-agent:<tag>`.
 - `agent.yaml` stores runtime config in ConfigMap `sentinella-hub-k8s-agent-config` and auth in Secret `sentinella-hub-k8s-agent-auth` key `api-key`.
 - The DaemonSet injects `HUB_API_KEY` from Secret key `api-key`, optionally.

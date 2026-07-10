@@ -229,6 +229,7 @@ impl RuntimeMode {
 }
 
 impl Config {
+    #[allow(dead_code)]
     pub fn from_env() -> Result<Self> {
         Self::from_env_for_mode(RuntimeMode::Agent)
     }

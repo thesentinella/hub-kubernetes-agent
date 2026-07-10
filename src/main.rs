@@ -6,6 +6,7 @@ mod hub;
 mod leader;
 mod model;
 mod operator;
+mod operator_lifecycle;
 mod plugins;
 mod tech;
 mod tetragon;
@@ -117,11 +118,21 @@ async fn run_agent_mode(cfg: Config, kube_client: KubeClient) -> Result<()> {
     // picked up by the right pod when actions are enabled.
     let poll_handle = tokio::spawn(command_loop(hub.clone(), executor.clone()));
 
+    // Operator lifecycle watcher — watches the ConfigMap for
+    // ACTION_OPERATOR_ENABLED and creates/removes the operator Deployment.
+    let lifecycle_handle = tokio::spawn(operator_lifecycle::run_operator_lifecycle(
+        kube_client.clone(),
+        cfg.pod_namespace.clone(),
+        cfg.pod_name.clone(),
+        leader_state.clone(),
+    ));
+
     wait_for_shutdown().await;
     info!("shutdown signal received; aborting workers");
     leader_handle.abort();
     collect_handle.abort();
     poll_handle.abort();
+    lifecycle_handle.abort();
     Ok(())
 }
 

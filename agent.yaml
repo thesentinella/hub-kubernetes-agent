@@ -12,12 +12,6 @@ metadata:
   name: sentinella-hub-k8s-agent
   namespace: sentinella
 ---
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: sentinella-hub-k8s-operator
-  namespace: sentinella
----
 # Cluster-wide READ-ONLY permissions for inventory collection.
 # Action Mode eligibility is namespace-label driven: namespaces must carry
 # sentinella.io/action-mode=enabled, and action RBAC is granted separately via
@@ -290,6 +284,36 @@ subjects:
     name: sentinella-hub-k8s-agent
     namespace: sentinella
 ---
+# Namespace-scoped RBAC for the agent to dynamically manage the operator
+# ServiceAccount and Deployment. The agent leader creates these resources
+# when ACTION_OPERATOR_ENABLED=true and removes them when false.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sentinella-hub-k8s-agent-operator-lifecycle
+  namespace: sentinella
+rules:
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sentinella-hub-k8s-agent-operator-lifecycle
+  namespace: sentinella
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: sentinella-hub-k8s-agent-operator-lifecycle
+subjects:
+  - kind: ServiceAccount
+    name: sentinella-hub-k8s-agent
+    namespace: sentinella
+---
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -303,7 +327,7 @@ data:
   HTTP_TIMEOUT_SECS: "20"
   LEASE_TTL_SECS: "30"
   ACTIONS_ENABLED: "false"           # read-only by default
-  ACTION_OPERATOR_ENABLED: "false"    # legacy compatibility flag; separate operator Deployment uses --mode operator
+  ACTION_OPERATOR_ENABLED: "false"    # when true, the agent leader dynamically creates the operator Deployment
   ACTION_OPERATOR_POLL_INTERVAL_SECS: "60"  # reconcile interval when operator mode is enabled
   READONLY_COMMANDS_ENABLED: "false"  # opt-in; enables read-only diagnostic commands
   COLLECT_SECRETS: "false"           # requires separate secrets-reader RBAC when true
@@ -437,92 +461,6 @@ spec:
             limits:
               cpu: 200m
               memory: 256Mi
-          securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities:
-              drop: ["ALL"]
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: sentinella-hub-k8s-operator
-  namespace: sentinella
-  labels:
-    app.kubernetes.io/name: sentinella-hub-k8s-operator
-    app.kubernetes.io/part-of: sentinella
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: sentinella-hub-k8s-operator
-  template:
-    metadata:
-      labels:
-        app.kubernetes.io/name: sentinella-hub-k8s-operator
-        app.kubernetes.io/part-of: sentinella
-      annotations:
-        prometheus.io/scrape: "true"
-        prometheus.io/port: "9090"
-        prometheus.io/path: "/metrics"
-    spec:
-      serviceAccountName: sentinella-hub-k8s-operator
-      securityContext:
-        runAsNonRoot: true
-        runAsUser: 65532
-        runAsGroup: 65532
-        seccompProfile:
-          type: RuntimeDefault
-      containers:
-        - name: operator
-          image: us-east1-docker.pkg.dev/sentinella-hub/kubernetes-agent/sentinella-hub-k8s-agent:v1.4.4  # x-release-please-version
-          imagePullPolicy: IfNotPresent
-          args: ["--mode", "operator"]
-          envFrom:
-            - configMapRef:
-                name: sentinella-hub-k8s-agent-config
-          env:
-            - name: POD_NAME
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.name
-            - name: POD_NAMESPACE
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.namespace
-          ports:
-            - name: metrics
-              containerPort: 9090
-              protocol: TCP
-          startupProbe:
-            httpGet:
-              path: /livez
-              port: metrics
-            periodSeconds: 5
-            timeoutSeconds: 2
-            failureThreshold: 12
-          livenessProbe:
-            httpGet:
-              path: /livez
-              port: metrics
-            periodSeconds: 30
-            timeoutSeconds: 2
-            failureThreshold: 3
-          readinessProbe:
-            httpGet:
-              path: /readyz
-              port: metrics
-            initialDelaySeconds: 5
-            periodSeconds: 10
-            timeoutSeconds: 2
-            failureThreshold: 3
-          resources:
-            requests:
-              cpu: 10m
-              memory: 32Mi
-            limits:
-              cpu: 100m
-              memory: 128Mi
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
