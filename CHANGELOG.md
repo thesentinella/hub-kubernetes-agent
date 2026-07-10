@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v1.3.6...v1.4.0) (2026-07-10)
+
+
+### Features
+
+* Update GitHub Actions workflow for GHCR integration ([#176](https://github.com/thesentinella/hub-kubernetes-agent/issues/176)) ([b0adf13](https://github.com/thesentinella/hub-kubernetes-agent/commit/b0adf1363da3a45b8ad46546e7e952c4fac01ef0))
+
 ## [1.3.6](https://github.com/thesentinella/hub-kubernetes-agent/compare/v1.3.5...v1.3.6) (2026-07-10)
 
 
