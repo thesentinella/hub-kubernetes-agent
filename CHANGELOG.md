@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.4](https://github.com/thesentinella/hub-kubernetes-agent/compare/v1.4.3...v1.4.4) (2026-07-10)
+
+
+### Bug Fixes
+
+* Update IMAGE_TAG handling in install.sh ([#184](https://github.com/thesentinella/hub-kubernetes-agent/issues/184)) ([d9647be](https://github.com/thesentinella/hub-kubernetes-agent/commit/d9647be553364f54f8049879d2b96e8b8f168f77))
+
 ## [1.4.3](https://github.com/thesentinella/hub-kubernetes-agent/compare/v1.4.2...v1.4.3) (2026-07-10)
 
 
