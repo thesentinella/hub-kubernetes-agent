@@ -2,8 +2,11 @@
 
 ## Runtime Model
 
-- The agent runs as a Kubernetes `DaemonSet` using the `sentinella-hub-k8s-agent` `ServiceAccount` in namespace `sentinella`.
-- Every pod starts health/metrics, leader election, inventory collection, and command polling.
+- The binary supports `--mode agent|operator`; the default is `agent`.
+- `agent` mode runs as a Kubernetes `DaemonSet` using the `sentinella-hub-k8s-agent` `ServiceAccount` in namespace `sentinella`.
+- `operator` mode runs as a separate `Deployment` using the `sentinella-hub-k8s-operator` `ServiceAccount` in namespace `sentinella`.
+- `agent` mode starts health/metrics, leader election, inventory collection, and command polling.
+- `operator` mode starts health/metrics and the action-policy reconciler loop only; it does not talk to Hub.
 - Inventory collection is leader-only. Non-leader pods skip collection but still poll commands.
 - Leader election uses a namespace-scoped `coordination.k8s.io/Lease` named by `LEASE_NAME`, default `sentinella-hub-k8s-agent-leader`.
 - Lease holder identity is `NODE_NAME`, not pod name.
@@ -62,6 +65,8 @@
 | `POD_NAMESPACE` | no | `default` | Usually set by downward API. |
 | `NODE_NAME` | no | `unknown-node` | Usually set by downward API; used for lease holder identity. |
 
+- `HUB_URL`, `CLUSTER_ID`, and `HUB_API_KEY` are required only in `--mode agent`.
+- `--mode operator` does not require Hub connectivity settings.
 - PostgreSQL monitoring is opt-in and namespace-scoped. When enabled, the plugin probes only clear PostgreSQL service matches.
 - Probe settings come from `POSTGRESQL_MONITORING_SECRET_NAME` first, then `POSTGRESQL_MONITORING_*` env vars.
 - If configured, Secret keys are `host`, `port`, `user`, `password`, `database`, `sslmode`, and `sslrootcert`.
@@ -711,7 +716,7 @@ Known command kinds:
 - Recognized command kinds are `preview_workload_resources`, `apply_workload_resources`, `get_resource_yaml`, `rollout_restart`, `scale`, `delete_pod`, `cordon_node`, `uncordon_node`, `drain_node`, `apply_manifest`, `rollout_undo`, `self_update`, and `update_agent`.
 - `get_resource_yaml` reads an allowlisted Kubernetes object, returns manifest-like YAML with server-managed metadata stripped, and rejects `Secret` requests.
 - Workload resource commands are gated by the current effective policy for the target namespace; the executor rejects commands when the namespace is not present in a `Ready` policy's `effectiveNamespaces`.
-- The Phase 3 operator path is opt-in via `ACTION_OPERATOR_ENABLED=true`; when enabled, it reconciles namespace-scoped `RoleBinding`s and patches policy status using the global namespace exclude-list model.
+- The Phase 3 operator path runs in `--mode operator`; it reconciles namespace-scoped `RoleBinding`s and patches policy status using the global namespace exclude-list model.
 - The operator ClusterRole must include `sentinellahubactionpolicies/status` with `get`, `patch`, and `update`; without that subresource permission, status freshness cannot be recorded and policy gating fails closed.
 - `SentinellaHubActionPolicy` enforces `namespaceSelector`, `allowedActions`, `allowedResources`, and `limits`, and marks policies stale when the freshness timestamp is missing or older than the operator freshness window.
 - Resource commands target workload controllers, not Pods.

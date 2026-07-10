@@ -1,5 +1,5 @@
 use crate::model::KV;
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use std::collections::BTreeMap;
 use std::env;
 use std::time::Duration;
@@ -205,10 +205,43 @@ pub struct Config {
     pub app_metrics_max_samples: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuntimeMode {
+    Agent,
+    Operator,
+}
+
+impl RuntimeMode {
+    pub fn parse(value: &str) -> Result<Self> {
+        match value {
+            "agent" => Ok(Self::Agent),
+            "operator" => Ok(Self::Operator),
+            other => bail!("invalid runtime mode: {}", other),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Agent => "agent",
+            Self::Operator => "operator",
+        }
+    }
+}
+
 impl Config {
     pub fn from_env() -> Result<Self> {
-        let hub_url = env::var("HUB_URL").context("HUB_URL not set")?;
-        let cluster_id = env::var("CLUSTER_ID").context("CLUSTER_ID not set")?;
+        Self::from_env_for_mode(RuntimeMode::Agent)
+    }
+
+    pub fn from_env_for_mode(mode: RuntimeMode) -> Result<Self> {
+        let hub_url = match mode {
+            RuntimeMode::Agent => env::var("HUB_URL").context("HUB_URL not set")?,
+            RuntimeMode::Operator => env::var("HUB_URL").unwrap_or_default(),
+        };
+        let cluster_id = match mode {
+            RuntimeMode::Agent => env::var("CLUSTER_ID").context("CLUSTER_ID not set")?,
+            RuntimeMode::Operator => env::var("CLUSTER_ID").unwrap_or_default(),
+        };
 
         let api_key = env::var("HUB_API_KEY").ok().filter(|s| !s.is_empty());
         let agent_version_override = parse_non_empty_env("AGENT_VERSION_OVERRIDE");
@@ -702,6 +735,31 @@ mod tests {
             reset_env();
             env::set_var("HUB_URL", "https://hub.example.com");
             assert!(Config::from_env().is_err());
+            clear_required();
+        }
+    }
+
+    #[test]
+    fn from_env_for_operator_mode_does_not_require_hub_settings() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        unsafe {
+            reset_env();
+            let cfg = Config::from_env_for_mode(RuntimeMode::Operator).unwrap();
+            assert_eq!(cfg.hub_url, "");
+            assert_eq!(cfg.cluster_id, "");
+            clear_required();
+        }
+    }
+
+    #[test]
+    fn from_env_for_operator_mode_preserves_hub_values_when_present() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        unsafe {
+            reset_env();
+            set_required("https://hub.example.com", "cluster-1");
+            let cfg = Config::from_env_for_mode(RuntimeMode::Operator).unwrap();
+            assert_eq!(cfg.hub_url, "https://hub.example.com");
+            assert_eq!(cfg.cluster_id, "cluster-1");
             clear_required();
         }
     }
