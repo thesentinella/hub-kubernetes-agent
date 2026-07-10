@@ -342,16 +342,16 @@ data:
   AGENT_HTTP_DEBUG_BODIES: "false"
   AGENT_LOG: "info"
   WORKLOAD_MONITORING_ENABLED: "false"      # opt-in; namespace-scoped plugin
-  WORKLOAD_MONITORING_NAMESPACES: "[]"       # YAML list allowlist; empty disables the plugin
+  WORKLOAD_MONITORING_NAMESPACES: ""         # comma-separated allowlist; empty disables the plugin
   WORKLOAD_MONITORING_TARGETS: "angular,spring_boot,oracle_database"
   APP_METRICS_ENABLED: "false"               # opt-in; app-level Prometheus scrape projection
   APP_METRICS_DISCOVERY_ENABLED: "true"      # discover Services via Prometheus / sentinella annotations
-  APP_METRICS_NAMESPACES: "[]"               # YAML list allowlist; empty disables app metrics
+  APP_METRICS_NAMESPACES: ""                 # comma-separated allowlist; empty disables app metrics
   APP_METRICS_ALLOWLIST: "demo_usuarios_activos,demo_cola_tramites_pendientes,demo_operaciones_negocio_total,demo_lecturas_bd_total,demo_escrituras_bd_total,http_server_requests_seconds_*,jvm_memory_used_bytes,jvm_gc_pause_seconds_*,process_cpu_usage,system_cpu_usage,hikaricp_connections_*,jdbc_connections_*,tomcat_threads_*,tomcat_sessions_active_current"  # metric name allowlist / prefix filter
   APP_METRICS_TIMEOUT_SECS: "3"              # per-target scrape timeout
   APP_METRICS_MAX_SAMPLES: "500"             # max parsed samples per target
   POSTGRESQL_MONITORING_ENABLED: "false"     # opt-in; discovery-only namespace-scoped plugin
-  POSTGRESQL_MONITORING_NAMESPACES: "[]"     # YAML list allowlist; empty disables the plugin
+  POSTGRESQL_MONITORING_NAMESPACES: ""       # comma-separated allowlist; empty disables the plugin
   POSTGRESQL_MONITORING_SECRET_NAME: ""      # optional Secret name in target namespaces
   POSTGRESQL_MONITORING_HOST: ""             # env fallback; defaults to discovered Service DNS
   POSTGRESQL_MONITORING_PORT: ""             # env fallback; defaults to the discovered Service port

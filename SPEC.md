@@ -49,7 +49,7 @@
 | `COLLECT_DEPENDENCIES_TETRAGON` | no | `false` | When `true`, collect dependency edges from Tetragon gRPC. |
 | `APP_METRICS_ENABLED` | no | `false` | Collect app Prometheus samples from annotated Services. |
 | `APP_METRICS_DISCOVERY_ENABLED` | no | `true` | Discover targets from Service annotations. |
-| `APP_METRICS_NAMESPACES` | no | `[]` | YAML allowlist for discovery. |
+| `APP_METRICS_NAMESPACES` | no | `""` | Comma-separated allowlist for discovery. |
 | `APP_METRICS_ALLOWLIST` | no | bundled demo + Spring/JVM/Hikari/Tomcat allowlist | Metric name allowlist. |
 | `APP_METRICS_TIMEOUT_SECS` | no | `3` | Per-target scrape timeout. |
 | `APP_METRICS_MAX_SAMPLES` | no | `500` | Max samples per target. |

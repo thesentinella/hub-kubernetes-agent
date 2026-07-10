@@ -304,16 +304,16 @@ When enabled, workload monitoring can also scrape app metrics from annotated Ser
 | Variable | Default | Notes |
 |---|---|---|
 | `WORKLOAD_MONITORING_ENABLED` | `false` | Master switch. When `false`, the plugin block is omitted. |
-| `WORKLOAD_MONITORING_NAMESPACES` | `[]` | YAML list allowlist. Empty disables the plugin regardless of `ENABLED`. |
+| `WORKLOAD_MONITORING_NAMESPACES` | `""` | Comma-separated allowlist. Empty disables the plugin regardless of `ENABLED`. |
 | `WORKLOAD_MONITORING_TARGETS` | `angular,spring_boot,oracle_database` | Tech detection targets enabled for the plugin. |
 | `APP_METRICS_ENABLED` | `false` | Master switch for app metrics. |
 | `APP_METRICS_DISCOVERY_ENABLED` | `true` | Service annotation discovery. |
-| `APP_METRICS_NAMESPACES` | `[]` | YAML allowlist for discovery. |
+| `APP_METRICS_NAMESPACES` | `""` | Comma-separated allowlist for discovery. |
 | `APP_METRICS_ALLOWLIST` | demo + Spring/JVM/Hikari/Tomcat allowlist | Metric name allowlist. |
 | `APP_METRICS_TIMEOUT_SECS` | `3` | Per-target scrape timeout. |
 | `APP_METRICS_MAX_SAMPLES` | `500` | Max samples per target. |
 | `POSTGRESQL_MONITORING_ENABLED` | `false` | Master switch. When `false`, the plugin block is omitted. |
-| `POSTGRESQL_MONITORING_NAMESPACES` | `[]` | YAML list allowlist. Empty disables the plugin regardless of `ENABLED`. |
+| `POSTGRESQL_MONITORING_NAMESPACES` | `""` | Comma-separated allowlist. Empty disables the plugin regardless of `ENABLED`. |
 
 When enabled with a non-empty allowlist, the snapshot gains:
 
@@ -350,7 +350,7 @@ The PostgreSQL plugin is opt-in, namespace-scoped, and discovery-first. It deriv
 | Variable | Default | Notes |
 |---|---|---|
 | `POSTGRESQL_MONITORING_ENABLED` | `false` | Master switch. When `false`, the plugin block is omitted. |
-| `POSTGRESQL_MONITORING_NAMESPACES` | `[]` | YAML list allowlist. Empty disables the plugin regardless of `ENABLED`. |
+| `POSTGRESQL_MONITORING_NAMESPACES` | `""` | Comma-separated allowlist. Empty disables the plugin regardless of `ENABLED`. |
 | `POSTGRESQL_MONITORING_SECRET_NAME` | empty | Optional Secret name to read in the discovered service namespace. |
 | `POSTGRESQL_MONITORING_HOST` | empty | Env fallback host override. Defaults to the discovered Service DNS name. |
 | `POSTGRESQL_MONITORING_PORT` | empty | Env fallback port override. Defaults to the discovered PostgreSQL port. |
@@ -493,16 +493,16 @@ Recommended `HUB_URL` is `https://api.hub.sentinel.la`.
 | `TETRAGON_REQUIRED_FOR_READINESS` | ConfigMap | `true` |
 | `TETRAGON_GRPC_ADDRESS` | ConfigMap | when `COLLECT_DEPENDENCIES_TETRAGON=true`, default `tetragon-grpc.tetragon.svc.cluster.local:54321` |
 | `WORKLOAD_MONITORING_ENABLED` | ConfigMap | `false` |
-| `WORKLOAD_MONITORING_NAMESPACES` | ConfigMap | empty YAML list (`[]`) |
+| `WORKLOAD_MONITORING_NAMESPACES` | ConfigMap | empty string (`""`) |
 | `WORKLOAD_MONITORING_TARGETS` | ConfigMap | `angular,spring_boot,oracle_database` |
 | `APP_METRICS_ENABLED` | ConfigMap | `false` |
 | `APP_METRICS_DISCOVERY_ENABLED` | ConfigMap | `true` |
-| `APP_METRICS_NAMESPACES` | ConfigMap | empty YAML list (`[]`) |
+| `APP_METRICS_NAMESPACES` | ConfigMap | empty string (`""`) |
 | `APP_METRICS_ALLOWLIST` | ConfigMap | `process_.*` |
 | `APP_METRICS_TIMEOUT_SECS` | ConfigMap | `3` |
 | `APP_METRICS_MAX_SAMPLES` | ConfigMap | `500` |
 | `POSTGRESQL_MONITORING_ENABLED` | ConfigMap | `false` |
-| `POSTGRESQL_MONITORING_NAMESPACES` | ConfigMap | empty YAML list (`[]`) |
+| `POSTGRESQL_MONITORING_NAMESPACES` | ConfigMap | empty string (`""`) |
 | `FULL_DEBUG` | ConfigMap | `false` |
 | `AGENT_HTTP_DEBUG` | ConfigMap | `false` |
 | `AGENT_HTTP_DEBUG_BODIES` | ConfigMap | `false` |
