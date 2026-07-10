@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.1](https://github.com/thesentinella/hub-kubernetes-agent/compare/v1.4.0...v1.4.1) (2026-07-10)
+
+
+### Bug Fixes
+
+* Refactor release workflow for multi-arch builds ([#178](https://github.com/thesentinella/hub-kubernetes-agent/issues/178)) ([224d081](https://github.com/thesentinella/hub-kubernetes-agent/commit/224d081641a505f9c34ad79c467f31128ef3d3a5))
+
 ## [1.4.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v1.3.6...v1.4.0) (2026-07-10)
 
 
