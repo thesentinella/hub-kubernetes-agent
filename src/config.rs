@@ -5,7 +5,6 @@ use std::env;
 use std::time::Duration;
 
 pub const AGENT_CONFIG_ENV_ALLOWLIST: &[&str] = &[
-    "ACTIONS_ENABLED",
     "ACTION_OPERATOR_ENABLED",
     "ACTION_OPERATOR_POLL_INTERVAL_SECS",
     "ACTION_OPERATOR_EXCLUDED_NAMESPACES",
@@ -23,7 +22,7 @@ pub const AGENT_CONFIG_ENV_ALLOWLIST: &[&str] = &[
     "LEASE_NAME",
     "LEASE_TTL_SECS",
     "POLL_WAIT_SECS",
-    "READONLY_COMMANDS_ENABLED",
+    "POSTGRESQL_READONLY_COMMANDS_ENABLED",
     "POSTGRESQL_MONITORING_DATABASE",
     "POSTGRESQL_MONITORING_ENABLED",
     "POSTGRESQL_MONITORING_HOST",
@@ -261,15 +260,12 @@ impl Config {
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| "info".to_string());
 
-        let actions_enabled = env::var("ACTIONS_ENABLED")
-            .ok()
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(false);
         let action_operator_enabled = env_flag("ACTION_OPERATOR_ENABLED");
+        let actions_enabled = action_operator_enabled;
         let action_operator_poll_interval = parse_secs("ACTION_OPERATOR_POLL_INTERVAL_SECS", 60);
         let action_operator_excluded_namespaces =
             parse_yaml_list_env("ACTION_OPERATOR_EXCLUDED_NAMESPACES");
-        let readonly_commands_enabled = env_flag("READONLY_COMMANDS_ENABLED");
+        let readonly_commands_enabled = env_flag("POSTGRESQL_READONLY_COMMANDS_ENABLED");
         let collect_secrets = env_flag("COLLECT_SECRETS");
         let collect_dependencies_tetragon = env_flag("COLLECT_DEPENDENCIES_TETRAGON");
         let tetragon_endpoint_discovery_enabled =
@@ -293,7 +289,7 @@ impl Config {
             .unwrap_or_else(|_| "sentinella-hub-k8s-agent-leader".to_string());
 
         let workload_monitoring_enabled = env_flag("WORKLOAD_MONITORING_ENABLED");
-        let workload_monitoring_namespaces = parse_yaml_list_env("WORKLOAD_MONITORING_NAMESPACES");
+        let workload_monitoring_namespaces = parse_csv_env("WORKLOAD_MONITORING_NAMESPACES");
         let workload_monitoring_targets = parse_csv_env_or(
             "WORKLOAD_MONITORING_TARGETS",
             vec![
@@ -303,8 +299,7 @@ impl Config {
             ],
         );
         let postgresql_monitoring_enabled = env_flag("POSTGRESQL_MONITORING_ENABLED");
-        let postgresql_monitoring_namespaces =
-            parse_yaml_list_env("POSTGRESQL_MONITORING_NAMESPACES");
+        let postgresql_monitoring_namespaces = parse_csv_env("POSTGRESQL_MONITORING_NAMESPACES");
         let postgresql_monitoring_secret_name =
             parse_non_empty_env("POSTGRESQL_MONITORING_SECRET_NAME");
         let postgresql_monitoring_host = parse_non_empty_env("POSTGRESQL_MONITORING_HOST");
@@ -318,7 +313,7 @@ impl Config {
         let app_metrics_enabled = env_flag("APP_METRICS_ENABLED");
         let app_metrics_discovery_enabled =
             env_flag_with_default("APP_METRICS_DISCOVERY_ENABLED", true);
-        let app_metrics_namespaces = parse_yaml_list_env("APP_METRICS_NAMESPACES");
+        let app_metrics_namespaces = parse_csv_env("APP_METRICS_NAMESPACES");
         let app_metrics_allowlist = parse_csv_env_or(
             "APP_METRICS_ALLOWLIST",
             vec![
@@ -425,7 +420,6 @@ pub fn agent_configured_env(values: &BTreeMap<String, String>) -> Vec<KV> {
 
 fn runtime_env_value(cfg: &Config, key: &str) -> Option<String> {
     match key {
-        "ACTIONS_ENABLED" => Some(bool_string(cfg.actions_enabled)),
         "ACTION_OPERATOR_ENABLED" => Some(bool_string(cfg.action_operator_enabled)),
         "ACTION_OPERATOR_POLL_INTERVAL_SECS" => {
             Some(cfg.action_operator_poll_interval.as_secs().to_string())
@@ -433,7 +427,7 @@ fn runtime_env_value(cfg: &Config, key: &str) -> Option<String> {
         "ACTION_OPERATOR_EXCLUDED_NAMESPACES" => {
             Some(yaml_list_string(&cfg.action_operator_excluded_namespaces))
         }
-        "READONLY_COMMANDS_ENABLED" => Some(bool_string(cfg.readonly_commands_enabled)),
+        "POSTGRESQL_READONLY_COMMANDS_ENABLED" => Some(bool_string(cfg.readonly_commands_enabled)),
         "AGENT_HTTP_DEBUG" => Some(bool_string(cfg.http_debug)),
         "AGENT_HTTP_DEBUG_BODIES" => Some(bool_string(cfg.http_debug_bodies)),
         "AGENT_LOG" => Some(cfg.agent_log.clone()),
@@ -463,21 +457,17 @@ fn runtime_env_value(cfg: &Config, key: &str) -> Option<String> {
             .map(|value| value.to_string()),
         "POSTGRESQL_MONITORING_ENABLED" => Some(bool_string(cfg.postgresql_monitoring_enabled)),
         "POSTGRESQL_MONITORING_SECRET_NAME" => cfg.postgresql_monitoring_secret_name.clone(),
-        "POSTGRESQL_MONITORING_NAMESPACES" => {
-            Some(yaml_list_string(&cfg.postgresql_monitoring_namespaces))
-        }
+        "POSTGRESQL_MONITORING_NAMESPACES" => Some(cfg.postgresql_monitoring_namespaces.join(",")),
         "POSTGRESQL_MONITORING_SSLMODE" => cfg.postgresql_monitoring_sslmode.clone(),
         "POSTGRESQL_MONITORING_USER" => cfg.postgresql_monitoring_user.clone(),
         "APP_METRICS_ENABLED" => Some(bool_string(cfg.app_metrics_enabled)),
         "APP_METRICS_DISCOVERY_ENABLED" => Some(bool_string(cfg.app_metrics_discovery_enabled)),
-        "APP_METRICS_NAMESPACES" => Some(yaml_list_string(&cfg.app_metrics_namespaces)),
+        "APP_METRICS_NAMESPACES" => Some(cfg.app_metrics_namespaces.join(",")),
         "APP_METRICS_ALLOWLIST" => Some(cfg.app_metrics_allowlist.join(",")),
         "APP_METRICS_TIMEOUT_SECS" => Some(cfg.app_metrics_timeout.as_secs().to_string()),
         "APP_METRICS_MAX_SAMPLES" => Some(cfg.app_metrics_max_samples.to_string()),
         "WORKLOAD_MONITORING_ENABLED" => Some(bool_string(cfg.workload_monitoring_enabled)),
-        "WORKLOAD_MONITORING_NAMESPACES" => {
-            Some(yaml_list_string(&cfg.workload_monitoring_namespaces))
-        }
+        "WORKLOAD_MONITORING_NAMESPACES" => Some(cfg.workload_monitoring_namespaces.join(",")),
         "WORKLOAD_MONITORING_TARGETS" => Some(cfg.workload_monitoring_targets.join(",")),
         _ => None,
     }
@@ -486,8 +476,7 @@ fn runtime_env_value(cfg: &Config, key: &str) -> Option<String> {
 fn configured_env_value(key: &str, value: &str) -> Option<String> {
     let trimmed = value.trim();
     match key {
-        "ACTIONS_ENABLED"
-        | "ACTION_OPERATOR_ENABLED"
+        "ACTION_OPERATOR_ENABLED"
         | "ACTION_OPERATOR_EXCLUDED_NAMESPACES"
         | "AGENT_HTTP_DEBUG"
         | "AGENT_HTTP_DEBUG_BODIES"
@@ -495,7 +484,7 @@ fn configured_env_value(key: &str, value: &str) -> Option<String> {
         | "TETRAGON_ENDPOINT_DISCOVERY_ENABLED"
         | "COLLECT_SECRETS"
         | "FULL_DEBUG"
-        | "READONLY_COMMANDS_ENABLED"
+        | "POSTGRESQL_READONLY_COMMANDS_ENABLED"
         | "POSTGRESQL_MONITORING_ENABLED"
         | "APP_METRICS_ENABLED"
         | "APP_METRICS_DISCOVERY_ENABLED"
@@ -579,6 +568,13 @@ fn parse_csv_env(var: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn parse_csv_values(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
 fn parse_yaml_list_env(var: &str) -> Vec<String> {
     let Some(raw) = env::var(var).ok() else {
         return Vec::new();
@@ -591,13 +587,6 @@ fn parse_yaml_list_env(var: &str) -> Vec<String> {
     serde_yaml::from_str::<Vec<String>>(trimmed)
         .ok()
         .unwrap_or_else(|| parse_csv_values(trimmed))
-}
-
-fn parse_csv_values(raw: &str) -> Vec<String> {
-    raw.split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect()
 }
 
 fn yaml_list_string(values: &[String]) -> String {
@@ -659,7 +648,6 @@ mod tests {
             "FULL_DEBUG",
             "AGENT_HTTP_DEBUG",
             "AGENT_HTTP_DEBUG_BODIES",
-            "ACTIONS_ENABLED",
             "COLLECT_SECRETS",
             "COLLECT_DEPENDENCIES_TETRAGON",
             "TETRAGON_REQUIRED_FOR_READINESS",
@@ -848,27 +836,28 @@ mod tests {
     }
 
     #[test]
-    fn actions_enabled_true_values() {
+    fn action_operator_enabled_true_values() {
         let _lock = ENV_LOCK.lock().unwrap();
         unsafe {
             reset_env();
             set_required("https://hub.example.com", "cluster-1");
             for val in ["true", "1"] {
-                env::set_var("ACTIONS_ENABLED", val);
+                env::set_var("ACTION_OPERATOR_ENABLED", val);
                 let cfg = Config::from_env().unwrap();
                 assert!(
                     cfg.actions_enabled,
-                    "expected true for ACTIONS_ENABLED={val}"
+                    "expected true for ACTION_OPERATOR_ENABLED={val}"
                 );
+                assert!(cfg.action_operator_enabled);
                 assert!(!cfg.collect_secrets);
             }
-            env::remove_var("ACTIONS_ENABLED");
+            env::remove_var("ACTION_OPERATOR_ENABLED");
             clear_required();
         }
     }
 
     #[test]
-    fn actions_enabled_defaults_false() {
+    fn action_operator_enabled_defaults_false() {
         let _lock = ENV_LOCK.lock().unwrap();
         unsafe {
             reset_env();
@@ -907,14 +896,14 @@ mod tests {
             reset_env();
             set_required("https://hub.example.com", "cluster-1");
             for val in ["true", "1"] {
-                env::set_var("READONLY_COMMANDS_ENABLED", val);
+                env::set_var("POSTGRESQL_READONLY_COMMANDS_ENABLED", val);
                 let cfg = Config::from_env().unwrap();
                 assert!(
                     cfg.readonly_commands_enabled,
-                    "expected true for READONLY_COMMANDS_ENABLED={val}"
+                    "expected true for POSTGRESQL_READONLY_COMMANDS_ENABLED={val}"
                 );
             }
-            env::remove_var("READONLY_COMMANDS_ENABLED");
+            env::remove_var("POSTGRESQL_READONLY_COMMANDS_ENABLED");
             clear_required();
         }
     }
@@ -987,7 +976,7 @@ mod tests {
             collect_interval: Duration::from_secs(60),
             poll_wait: Duration::from_secs(30),
             actions_enabled: true,
-            action_operator_enabled: false,
+            action_operator_enabled: true,
             action_operator_poll_interval: Duration::from_secs(60),
             action_operator_excluded_namespaces: vec![],
             readonly_commands_enabled: true,
@@ -1043,7 +1032,7 @@ mod tests {
         assert!(!keys.contains(&"NODE_NAME"));
         assert_eq!(
             env.iter()
-                .find(|entry| entry.key == "ACTIONS_ENABLED")
+                .find(|entry| entry.key == "ACTION_OPERATOR_ENABLED")
                 .unwrap()
                 .value,
             "true"
@@ -1189,33 +1178,30 @@ mod tests {
     }
 
     #[test]
-    fn workload_monitoring_parses_yaml_list_values() {
+    fn monitoring_namespaces_parse_csv_values() {
         let _lock = ENV_LOCK.lock().unwrap();
         unsafe {
             reset_env();
             set_required("https://hub.example.com", "cluster-1");
-            env::set_var("WORKLOAD_MONITORING_ENABLED", "true");
             env::set_var(
                 "WORKLOAD_MONITORING_NAMESPACES",
-                "- customer-app\n- customer-db\n",
+                "customer-app, customer-db",
             );
-            env::set_var("WORKLOAD_MONITORING_TARGETS", "angular,spring_boot");
+            env::set_var("APP_METRICS_NAMESPACES", "metrics-a,metrics-b");
+            env::set_var("POSTGRESQL_MONITORING_NAMESPACES", "db-a, db-b");
             let cfg = Config::from_env().unwrap();
-            assert!(cfg.workload_monitoring_enabled);
             assert_eq!(
                 cfg.workload_monitoring_namespaces,
                 vec!["customer-app", "customer-db"]
             );
-            assert_eq!(
-                cfg.workload_monitoring_targets,
-                vec!["angular", "spring_boot"]
-            );
+            assert_eq!(cfg.app_metrics_namespaces, vec!["metrics-a", "metrics-b"]);
+            assert_eq!(cfg.postgresql_monitoring_namespaces, vec!["db-a", "db-b"]);
             clear_required();
         }
     }
 
     #[test]
-    fn workload_monitoring_runtime_env_serializes_yaml_list() {
+    fn workload_monitoring_runtime_env_serializes_csv_list() {
         let cfg = Config {
             hub_url: "https://hub.example.com".into(),
             cluster_id: "cluster-1".into(),
@@ -1273,11 +1259,11 @@ mod tests {
             .iter()
             .find(|entry| entry.key == "WORKLOAD_MONITORING_NAMESPACES")
             .unwrap();
-        assert_eq!(namespaces.value, "- customer-app\n- customer-db");
+        assert_eq!(namespaces.value, "customer-app,customer-db");
     }
 
     #[test]
-    fn postgresql_monitoring_runtime_env_serializes_yaml_list() {
+    fn postgresql_monitoring_runtime_env_serializes_csv_list() {
         let cfg = Config {
             hub_url: "https://hub.example.com".into(),
             cluster_id: "cluster-1".into(),
@@ -1335,15 +1321,15 @@ mod tests {
             .iter()
             .find(|entry| entry.key == "POSTGRESQL_MONITORING_NAMESPACES")
             .unwrap();
-        assert_eq!(namespaces.value, "- customer-db\n- analytics");
+        assert_eq!(namespaces.value, "customer-db,analytics");
     }
 
     #[test]
-    fn agent_configured_env_preserves_yaml_list_values() {
+    fn agent_configured_env_preserves_csv_list_values() {
         let values = BTreeMap::from([
             (
                 "WORKLOAD_MONITORING_NAMESPACES".to_string(),
-                "- customer-app\n- customer-db\n".to_string(),
+                "customer-app, customer-db".to_string(),
             ),
             (
                 "WORKLOAD_MONITORING_ENABLED".to_string(),
@@ -1361,7 +1347,7 @@ mod tests {
                 },
                 KV {
                     key: "WORKLOAD_MONITORING_NAMESPACES".into(),
-                    value: "- customer-app\n- customer-db".into(),
+                    value: "customer-app, customer-db".into(),
                 },
             ]
         );

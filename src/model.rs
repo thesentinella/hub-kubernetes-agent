@@ -1254,7 +1254,7 @@ pub struct UpdateAgentSpec {
 /// - `ok` — handler ran successfully (for previews this means the dry-run
 ///   completed, not that anything was changed).
 /// - `error` — handler failed; `message` carries the cause.
-/// - `skipped` — agent refused to execute (e.g. `ACTIONS_ENABLED=false`,
+/// - `skipped` — agent refused to execute (e.g. `ACTION_OPERATOR_ENABLED=false`,
 ///   safety guard tripped, target controlled by HPA/VPA).
 /// - `not_implemented` — the command kind is recognized but its handler is
 ///   not yet wired up. Distinct from "unknown" so the Hub can tell the

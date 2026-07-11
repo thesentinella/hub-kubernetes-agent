@@ -40,8 +40,8 @@
 | `AGENT_HTTP_DEBUG_BODIES` | no | `false` | Enables bounded (`200` chars) HTTP response body previews and POST request body previews in debug/error logs. |
 | `LEASE_TTL_SECS` | no | `30` | Lease validity window; renew interval is `ttl / 3`. |
 | `LEASE_NAME` | no | `sentinella-hub-k8s-agent-leader` | Lease object name. |
-| `ACTIONS_ENABLED` | no | `false` | Only `true` or `1` enables action dispatch. |
-| `READONLY_COMMANDS_ENABLED` | no | `false` | Enables read-only commands such as `diagnose_postgresql` without enabling mutating actions. |
+| `ACTION_OPERATOR_ENABLED` | no | `false` | When `true`, the agent leader dynamically creates and manages the operator `Deployment` and `ServiceAccount` and enables mutating actions; when `false`, they are removed and mutating actions are skipped. |
+| `POSTGRESQL_READONLY_COMMANDS_ENABLED` | no | `false` | Enables the read-only PostgreSQL diagnostic command `diagnose_postgresql` without enabling mutating actions. |
 | `ACTION_OPERATOR_ENABLED` | no | `false` | When `true`, the agent leader dynamically creates and manages the operator `Deployment` and `ServiceAccount`; when `false`, they are removed. |
 | `ACTION_OPERATOR_POLL_INTERVAL_SECS` | no | `60` | Reconciler poll interval. |
 | `ACTION_OPERATOR_EXCLUDED_NAMESPACES` | no | `[]` | YAML list of additional namespaces excluded from action RoleBinding reconciliation. |
@@ -49,7 +49,7 @@
 | `COLLECT_DEPENDENCIES_TETRAGON` | no | `false` | When `true`, collect dependency edges from Tetragon gRPC. |
 | `APP_METRICS_ENABLED` | no | `false` | Collect app Prometheus samples from annotated Services. |
 | `APP_METRICS_DISCOVERY_ENABLED` | no | `true` | Discover targets from Service annotations. |
-| `APP_METRICS_NAMESPACES` | no | `[]` | YAML allowlist for discovery. |
+| `APP_METRICS_NAMESPACES` | no | `""` | Comma-separated allowlist for discovery. |
 | `APP_METRICS_ALLOWLIST` | no | bundled demo + Spring/JVM/Hikari/Tomcat allowlist | Metric name allowlist. |
 | `APP_METRICS_TIMEOUT_SECS` | no | `3` | Per-target scrape timeout. |
 | `APP_METRICS_MAX_SAMPLES` | no | `500` | Max samples per target. |
@@ -72,7 +72,7 @@
 - If configured, Secret keys are `host`, `port`, `user`, `password`, `database`, `sslmode`, and `sslrootcert`.
 - Missing probe values fall back to the discovered Service DNS name, discovered Service port, `postgres` user, `postgres` database, and `sslmode=disable`.
 - `sslmode=disable` uses `NoTls`; any other `sslmode` value enables TLS with `native-tls`.
-- `diagnose_postgresql` is a separate read-only command. It reuses the PostgreSQL discovery/probe path, returns a structured diagnostic payload, and only runs when `READONLY_COMMANDS_ENABLED=true`.
+- `diagnose_postgresql` is a separate read-only command. It reuses the PostgreSQL discovery/probe path, returns a structured diagnostic payload, and only runs when `POSTGRESQL_READONLY_COMMANDS_ENABLED=true`.
 
 ## Agent Endpoints
 
@@ -711,7 +711,7 @@ Known command kinds:
 
 ## Action Execution Contract
 
-- `ACTIONS_ENABLED=false` keeps the agent in read-only mode and is the default. Mutating commands are skipped before parsing `spec`, but `get_resource_yaml` remains available.
+- `ACTION_OPERATOR_ENABLED=false` keeps the agent in read-only mode and is the default. Mutating commands are skipped before parsing `spec`, but `get_resource_yaml` remains available.
 - Unknown command kinds return `status: "unknown"` when actions are enabled.
 - Recognized command kinds are `preview_workload_resources`, `apply_workload_resources`, `get_resource_yaml`, `rollout_restart`, `scale`, `delete_pod`, `cordon_node`, `uncordon_node`, `drain_node`, `apply_manifest`, `rollout_undo`, `self_update`, and `update_agent`.
 - `get_resource_yaml` reads an allowlisted Kubernetes object, returns manifest-like YAML with server-managed metadata stripped, and rejects `Secret` requests.
@@ -770,7 +770,7 @@ Known command kinds:
 - Behavioral equivalent: `kubectl delete pod {name} -n {namespace} --grace-period={grace_period_seconds} [--force]`
 - Validation: `grace_period_seconds >= 0`, `name` required, `namespace` required.
 - When `force=true`, the request semantics must be explicit and must not be silently converted to a graceful deletion.
-- Safety requirement: this command should require an explicit destructive-action opt-in beyond `ACTIONS_ENABLED=true` before it is enabled in the Hub.
+- Safety requirement: this command should require an explicit destructive-action opt-in beyond `ACTION_OPERATOR_ENABLED=true` before it is enabled in the Hub.
 - Required permissions: `get`, `delete` on `core/pods`.
 
 ### 7.4 `cordon_node`
@@ -796,7 +796,7 @@ Known command kinds:
 - Behavioral equivalent: cordon the node, then evict eligible pods on the node.
 - Required behavior: cordon the node, identify pods scheduled there, skip mirror and DaemonSet-managed pods, reject unmanaged pods, evict the eligible pods, and return a summarized result.
 - Validation: `nodeName` is required and must be non-empty; `timeoutSeconds` defaults to `300`, must be greater than `0` when provided, and is capped at `3600`; `force` defaults to `false` and, when `true`, allows unmanaged Pods to be evicted through the eviction API.
-- Safety requirement: this command requires `ACTIONS_ENABLED=true` and a Ready `SentinellaHubActionPolicy` that allows `drain_node`.
+- Safety requirement: this command requires `ACTION_OPERATOR_ENABLED=true` and a Ready `SentinellaHubActionPolicy` that allows `drain_node`.
 - Required permissions: `patch` on `core/nodes`; `create` on `core/pods/eviction`. Read permissions on pods are already covered by the bundled reader role. If `gracePeriodSeconds` is set, it is passed to the eviction delete options and must be greater than `0`.
 
 ### 7.7 `apply_manifest`
@@ -822,12 +822,12 @@ Known command kinds:
 ## Deployment Manifest
 
 - The deploy manifest is root `agent.yaml`.
-- The install bundle also includes `sentinella-dev-operator-policy.yaml` so the default action policy ships with the agent.
+- The install bundle also includes `sentinella-default-action-policy.yaml` so the default action policy ships with the agent.
 - Installer validation uses server-side dry-run on the rendered workload manifest; avoid client-side dry-run against the full bundle because the CRD path is brittle.
 - Action Mode eligibility is policy-driven: the operator reconciles namespace RoleBindings for namespaces that are not in the fixed or configured exclude list, and the executor only allows commands in namespaces present in a `Ready` policy's `effectiveNamespaces`.
 - `ACTION_OPERATOR_ENABLED` controls whether the agent leader dynamically creates the operator `Deployment`/`ServiceAccount` (when `true`) or removes them (when `false`); `ACTION_OPERATOR_POLL_INTERVAL_SECS` sets the operator's reconciler poll interval; `ACTION_OPERATOR_EXCLUDED_NAMESPACES` adds YAML-list exclusions to the fixed namespace denylist.
 - The `agent` container image is `us-east1-docker.pkg.dev/sentinella-hub/kubernetes-agent/sentinella-hub-k8s-agent:<tag>`.
-- `agent.yaml` stores runtime config in ConfigMap `sentinella-hub-k8s-agent-config` and auth in Secret `sentinella-hub-k8s-agent-auth` key `api-key`.
+- `agent.yaml` stores core runtime config in ConfigMap `sentinella-hub-k8s-agent-config`, app-metrics config in `sentinella-hub-app-metrics-config`, workload-monitoring config in `sentinella-hub-workload-monitoring-config`, and auth in Secret `sentinella-hub-k8s-agent-auth` key `api-key`.
 - The DaemonSet injects `HUB_API_KEY` from Secret key `api-key`, optionally.
 - The pod runs as non-root UID/GID `65532`, with `readOnlyRootFilesystem: true`, no privilege escalation, all capabilities dropped, and `RuntimeDefault` seccomp.
 - The DaemonSet tolerates all `NoSchedule` and `NoExecute` taints, so it schedules on control-plane and tainted nodes by default.
@@ -836,7 +836,7 @@ Known command kinds:
 - `configmaps`: array of `ConfigMapInfo`.
 - `secrets`: array of `SecretInfo`.
 - `agent_runtime_env`: array of `KV` entries representing the running agent's applied non-secret config values.
-- `agent_configured_env`: array of `KV` entries representing allowlisted non-secret values from `sentinella-hub-k8s-agent-config`.
+- `agent_configured_env`: array of `KV` entries representing allowlisted non-secret values from `sentinella-hub-k8s-agent-config`, `sentinella-hub-app-metrics-config`, and `sentinella-hub-workload-monitoring-config`.
 
 `agent_runtime_env` and `agent_configured_env` are intentionally limited to the agent config allowlist:
 
@@ -849,7 +849,6 @@ Known command kinds:
 - `ACTION_OPERATOR_ENABLED`
 - `ACTION_OPERATOR_POLL_INTERVAL_SECS`
 - `ACTION_OPERATOR_EXCLUDED_NAMESPACES`
-- `ACTIONS_ENABLED`
 - `COLLECT_SECRETS`
 - `COLLECT_DEPENDENCIES_TETRAGON`
 - `TETRAGON_REQUIRED_FOR_READINESS`

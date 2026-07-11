@@ -18,7 +18,7 @@ Inventory collector and (future) action executor for Kubernetes and OpenShift cl
   - **Dependencies (optional)**: bounded pod/service dependency edges derived from Tetragon gRPC (`source=tetragon_grpc`), including unresolved `unknown` edges when endpoint mapping is unavailable.
   - **Storage**: StorageClasses (name/provisioner/safe parameter subset), PersistentVolumes, PersistentVolumeClaims, VolumeSnapshotClasses, and VolumeSnapshots.
   - **Events**: Kubernetes `Warning` and `Normal` events with bounded payload (max 500 events per snapshot, event message truncated to 500 chars).
-- Maintains an open long-poll against the Hub for command delivery. **Action execution is disabled by default** (`ACTIONS_ENABLED=false`); the agent replies with `skipped` and an explanatory message to any command received. When actions are explicitly enabled, the agent can preview workload resource patches with a Kubernetes server-side dry-run.
+- Maintains an open long-poll against the Hub for command delivery. **Action execution is disabled by default** (`ACTION_OPERATOR_ENABLED=false`); the agent replies with `skipped` and an explanatory message to any command received. When actions are explicitly enabled, the agent can preview workload resource patches with a Kubernetes server-side dry-run.
 - Snapshot agent metadata includes whether actions are enabled (`agent.actions_enabled`) and whether Tetragon dependency collection is enabled (`agent.collect_dependencies_tetragon`) so the Hub can accurately reflect agent execution capability.
 
 ## Architecture
@@ -158,7 +158,7 @@ Example snapshot payload:
 
 ### Actions — designed for gradual rollout
 
-`src/executor.rs` keeps the agent in read-only mode while `ACTIONS_ENABLED=false`: mutating commands are skipped before parsing the command spec, but `get_resource_yaml` remains available as a read-only fetch. When actions are enabled, `preview_workload_resources` performs a server-side dry-run, `apply_workload_resources` performs a live strategic-merge patch, `drain_node` cordons a node and evicts eligible pods after action-policy approval, `self_update` triggers an immediate agent restart, and `update_agent` updates the fixed agent DaemonSet image.
+`src/executor.rs` keeps the agent in read-only mode while `ACTION_OPERATOR_ENABLED=false`: mutating commands are skipped before parsing the command spec, but `get_resource_yaml` remains available as a read-only fetch. When actions are enabled, `preview_workload_resources` performs a server-side dry-run, `apply_workload_resources` performs a live strategic-merge patch, `drain_node` cordons a node and evicts eligible pods after action-policy approval, `self_update` triggers an immediate agent restart, and `update_agent` updates the fixed agent DaemonSet image.
 
 The binary now supports `--mode agent|operator`. The default is `agent`. The DaemonSet runs `--mode agent`. The operator Deployment is **not** installed statically — the agent leader dynamically creates and removes it based on `ACTION_OPERATOR_ENABLED` in the ConfigMap. When the flag is `true`, the leader creates the operator `ServiceAccount` and `Deployment` (running `--mode operator`); when `false`, it removes them. The operator is fully independent of Hub connectivity.
 
@@ -250,9 +250,9 @@ Warning strings use stable code prefixes for Hub-side grouping:
   verbs: ["get", "patch"]
 ```
 
-This must be a separate ClusterRole/Binding applied only when `ACTIONS_ENABLED=true`. The read-only ClusterRole stays untouched. **No `*` on `*/*`**. The root `agent.yaml` does not grant this workload patch RBAC by default. Eligible namespaces must also be labeled `sentinella.io/action-mode=enabled`; the agent checks that label before patching.
+This must be a separate ClusterRole/Binding applied only when `ACTION_OPERATOR_ENABLED=true`. The read-only ClusterRole stays untouched. **No `*` on `*/*`**. The root `agent.yaml` does not grant this workload patch RBAC by default. Eligible namespaces must also be labeled `sentinella.io/action-mode=enabled`; the agent checks that label before patching.
 
-`drain_node` is a separate apply-only command. It requires `ACTIONS_ENABLED=true`, a Ready `SentinellaHubActionPolicy` that allows `drain_node`, and its own cluster-wide node plus pod-eviction RBAC. The spec supports `timeoutSeconds` (default `300`, max `3600`), optional `gracePeriodSeconds` for pod eviction, and `force` to allow unmanaged pods while still using the eviction API.
+`drain_node` is a separate apply-only command. It requires `ACTION_OPERATOR_ENABLED=true`, a Ready `SentinellaHubActionPolicy` that allows `drain_node`, and its own cluster-wide node plus pod-eviction RBAC. The spec supports `timeoutSeconds` (default `300`, max `3600`), optional `gracePeriodSeconds` for pod eviction, and `force` to allow unmanaged pods while still using the eviction API.
 
 Pre-flight warning checks are also best-effort. With the bundled reader RBAC, HPAs, VPAs, LimitRanges, ResourceQuotas, and PDBs are evaluated; preview still succeeds but may include `preflight.check.unavailable` warnings when a checked resource type is absent or unreadable.
 
@@ -287,7 +287,7 @@ On successful inventory ingest, when the Hub responds with `{"already_existed":t
 
 `InventorySnapshot.configuration` includes `configmaps` and `secrets` entries. Secret entries are populated only when `COLLECT_SECRETS=true`. Secret and generic ConfigMap payloads include metadata and key names only; values are intentionally excluded.
 
-`InventorySnapshot.configuration.agent_runtime_env` and `InventorySnapshot.configuration.agent_configured_env` are special-case allowlisted views for the agent's own non-secret configuration only. They are used to compare the running agent's applied settings against values present in `sentinella-hub-k8s-agent-config`. They do not expose arbitrary ConfigMap values.
+`InventorySnapshot.configuration.agent_runtime_env` and `InventorySnapshot.configuration.agent_configured_env` are special-case allowlisted views for the agent's own non-secret configuration only. They are used to compare the running agent's applied settings against values present in `sentinella-hub-k8s-agent-config`, `sentinella-hub-app-metrics-config`, and `sentinella-hub-workload-monitoring-config`. They do not expose arbitrary ConfigMap values.
 
 `InventorySnapshot.security` includes summarized `NetworkPolicy` coverage, non-`system:*` `ClusterRoleBinding` summaries, and Pod Security Admission posture derived from namespace labels. The agent does not export full RBAC rule bodies, excludes well-known `system:*` ClusterRole bindings from the summary, and still reports namespaces with missing PSA labels.
 
@@ -304,16 +304,16 @@ When enabled, workload monitoring can also scrape app metrics from annotated Ser
 | Variable | Default | Notes |
 |---|---|---|
 | `WORKLOAD_MONITORING_ENABLED` | `false` | Master switch. When `false`, the plugin block is omitted. |
-| `WORKLOAD_MONITORING_NAMESPACES` | `[]` | YAML list allowlist. Empty disables the plugin regardless of `ENABLED`. |
+| `WORKLOAD_MONITORING_NAMESPACES` | `""` | Comma-separated allowlist. Empty disables the plugin regardless of `ENABLED`. |
 | `WORKLOAD_MONITORING_TARGETS` | `angular,spring_boot,oracle_database` | Tech detection targets enabled for the plugin. |
 | `APP_METRICS_ENABLED` | `false` | Master switch for app metrics. |
 | `APP_METRICS_DISCOVERY_ENABLED` | `true` | Service annotation discovery. |
-| `APP_METRICS_NAMESPACES` | `[]` | YAML allowlist for discovery. |
+| `APP_METRICS_NAMESPACES` | `""` | Comma-separated allowlist for discovery. |
 | `APP_METRICS_ALLOWLIST` | demo + Spring/JVM/Hikari/Tomcat allowlist | Metric name allowlist. |
 | `APP_METRICS_TIMEOUT_SECS` | `3` | Per-target scrape timeout. |
 | `APP_METRICS_MAX_SAMPLES` | `500` | Max samples per target. |
 | `POSTGRESQL_MONITORING_ENABLED` | `false` | Master switch. When `false`, the plugin block is omitted. |
-| `POSTGRESQL_MONITORING_NAMESPACES` | `[]` | YAML list allowlist. Empty disables the plugin regardless of `ENABLED`. |
+| `POSTGRESQL_MONITORING_NAMESPACES` | `""` | Comma-separated allowlist. Empty disables the plugin regardless of `ENABLED`. |
 
 When enabled with a non-empty allowlist, the snapshot gains:
 
@@ -350,14 +350,14 @@ The PostgreSQL plugin is opt-in, namespace-scoped, and discovery-first. It deriv
 | Variable | Default | Notes |
 |---|---|---|
 | `POSTGRESQL_MONITORING_ENABLED` | `false` | Master switch. When `false`, the plugin block is omitted. |
-| `POSTGRESQL_MONITORING_NAMESPACES` | `[]` | YAML list allowlist. Empty disables the plugin regardless of `ENABLED`. |
+| `POSTGRESQL_MONITORING_NAMESPACES` | `""` | Comma-separated allowlist. Empty disables the plugin regardless of `ENABLED`. |
 | `POSTGRESQL_MONITORING_SECRET_NAME` | empty | Optional Secret name to read in the discovered service namespace. |
 | `POSTGRESQL_MONITORING_HOST` | empty | Env fallback host override. Defaults to the discovered Service DNS name. |
 | `POSTGRESQL_MONITORING_PORT` | empty | Env fallback port override. Defaults to the discovered PostgreSQL port. |
 | `POSTGRESQL_MONITORING_USER` | empty | Env fallback user override. Defaults to `postgres`. |
 | `POSTGRESQL_MONITORING_DATABASE` | empty | Env fallback database override. Defaults to `postgres`. |
-| `POSTGRESQL_MONITORING_SSLMODE` | `disable` | Env fallback TLS mode. `disable` skips TLS; any other value enables TLS. |
-| `READONLY_COMMANDS_ENABLED` | `false` | Enables read-only Hub commands such as `diagnose_postgresql` without enabling mutating actions. |
+| `POSTGRESQL_MONITORING_SSLMODE` | `require` | Env fallback TLS mode. `disable` skips TLS; any other value enables TLS. |
+| `POSTGRESQL_READONLY_COMMANDS_ENABLED` | `false` | Enables the read-only PostgreSQL diagnostic command `diagnose_postgresql` without enabling mutating actions. |
 
 When a Secret is configured, the probe reads `host`, `port`, `user`, `password`, `database`, `sslmode`, and `sslrootcert`. Env vars fill gaps.
 
@@ -487,22 +487,22 @@ Recommended `HUB_URL` is `https://api.hub.sentinel.la`.
 | `HTTP_TIMEOUT_SECS` | ConfigMap | `20` |
 | `LEASE_TTL_SECS` | ConfigMap | `30` |
 | `LEASE_NAME` | ConfigMap | `sentinella-hub-k8s-agent-leader` |
-| `ACTIONS_ENABLED` | ConfigMap | `false` |
+| `ACTION_OPERATOR_ENABLED` | ConfigMap | `false` |
 | `COLLECT_SECRETS` | ConfigMap | `false` |
 | `COLLECT_DEPENDENCIES_TETRAGON` | ConfigMap | `false` |
 | `TETRAGON_REQUIRED_FOR_READINESS` | ConfigMap | `true` |
 | `TETRAGON_GRPC_ADDRESS` | ConfigMap | when `COLLECT_DEPENDENCIES_TETRAGON=true`, default `tetragon-grpc.tetragon.svc.cluster.local:54321` |
 | `WORKLOAD_MONITORING_ENABLED` | ConfigMap | `false` |
-| `WORKLOAD_MONITORING_NAMESPACES` | ConfigMap | empty YAML list (`[]`) |
+| `WORKLOAD_MONITORING_NAMESPACES` | ConfigMap | empty string (`""`) |
 | `WORKLOAD_MONITORING_TARGETS` | ConfigMap | `angular,spring_boot,oracle_database` |
 | `APP_METRICS_ENABLED` | ConfigMap | `false` |
 | `APP_METRICS_DISCOVERY_ENABLED` | ConfigMap | `true` |
-| `APP_METRICS_NAMESPACES` | ConfigMap | empty YAML list (`[]`) |
+| `APP_METRICS_NAMESPACES` | ConfigMap | empty string (`""`) |
 | `APP_METRICS_ALLOWLIST` | ConfigMap | `process_.*` |
 | `APP_METRICS_TIMEOUT_SECS` | ConfigMap | `3` |
 | `APP_METRICS_MAX_SAMPLES` | ConfigMap | `500` |
 | `POSTGRESQL_MONITORING_ENABLED` | ConfigMap | `false` |
-| `POSTGRESQL_MONITORING_NAMESPACES` | ConfigMap | empty YAML list (`[]`) |
+| `POSTGRESQL_MONITORING_NAMESPACES` | ConfigMap | empty string (`""`) |
 | `FULL_DEBUG` | ConfigMap | `false` |
 | `AGENT_HTTP_DEBUG` | ConfigMap | `false` |
 | `AGENT_HTTP_DEBUG_BODIES` | ConfigMap | `false` |
@@ -535,7 +535,7 @@ podman push ghcr.io/sentinella/sentinella-hub-k8s-agent:0.1.0
      | CLUSTER_ID="my-cluster" HUB_API_KEY="shub_..." bash
    ```
 
-   The installer creates the auth Secret from `HUB_API_KEY`, validates the workload with server-side dry-run, applies `agent.yaml` plus `sentinella-dev-operator-policy.yaml`, and auto-detects the platform.
+   The installer creates the auth Secret from `HUB_API_KEY`, validates the workload with server-side dry-run, applies `agent.yaml` plus `sentinella-default-action-policy.yaml`, and auto-detects the platform.
    - Force a platform when needed:
      ```bash
      curl -sfL https://raw.githubusercontent.com/thesentinella/hub-kubernetes-agent/main/install.sh \
@@ -563,11 +563,11 @@ podman push ghcr.io/sentinella/sentinella-hub-k8s-agent:0.1.0
       - `image:` for the `agent` container pointing to your Rust agent image.
       - For dependency collection: set `COLLECT_DEPENDENCIES_TETRAGON=true`. The default `TETRAGON_GRPC_ADDRESS` in that mode is `tetragon-grpc.tetragon.svc.cluster.local:54321`. Set `TETRAGON_REQUIRED_FOR_READINESS=false` for dev clusters or nodes that cannot run Tetragon.
       - Toleration block — current value runs on every node including control plane; trim if you want a smaller footprint.
-    - Apply `sentinella-dev-operator-policy.yaml` alongside `agent.yaml` so the operator policy ships with the install bundle.
+    - Apply `sentinella-default-action-policy.yaml` alongside `agent.yaml` so the operator policy ships with the install bundle.
     - Apply:
       ```bash
       kubectl apply -f agent.yaml
-      kubectl apply -f sentinella-dev-operator-policy.yaml
+      kubectl apply -f sentinella-default-action-policy.yaml
       ```
 
 4. Verify:
