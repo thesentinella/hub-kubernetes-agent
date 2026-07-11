@@ -325,8 +325,6 @@ fn desired_operator_deployment(namespace: &str, image: &str) -> Result<Deploymen
                     "serviceAccountName": OPERATOR_NAME,
                     "securityContext": {
                         "runAsNonRoot": true,
-                        "runAsUser": 65532,
-                        "runAsGroup": 65532,
                         "seccompProfile": { "type": "RuntimeDefault" }
                     },
                     "containers": [{
@@ -503,7 +501,8 @@ mod tests {
 
         let sc = template_spec.security_context.as_ref().unwrap();
         assert!(sc.run_as_non_root == Some(true));
-        assert_eq!(sc.run_as_user, Some(65532));
+        assert_eq!(sc.run_as_user, None);
+        assert_eq!(sc.run_as_group, None);
 
         let container = template_spec.containers.first().unwrap();
         assert!(container.startup_probe.is_some());
