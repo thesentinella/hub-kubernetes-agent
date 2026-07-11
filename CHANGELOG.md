@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.1](https://github.com/thesentinella/hub-kubernetes-agent/compare/v1.5.0...v1.5.1) (2026-07-11)
+
+
+### Bug Fixes
+
+* split agent configmaps ([#188](https://github.com/thesentinella/hub-kubernetes-agent/issues/188)) ([6b324f2](https://github.com/thesentinella/hub-kubernetes-agent/commit/6b324f2591131f985c5d1790f921b9f8f90f678d))
+
 ## [1.5.0](https://github.com/thesentinella/hub-kubernetes-agent/compare/v1.4.4...v1.5.0) (2026-07-10)
 
 
