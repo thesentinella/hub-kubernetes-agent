@@ -1,0 +1,42 @@
+name: Sync Release Checksums
+
+on:
+  push:
+    branches:
+      - 'release-please--branches--main'
+      - 'release-please--branches--main--components--**'
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    name: Sync installer checksums
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout release branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+
+      - name: Update installer checksums
+        run: ./scripts/update-installer-checksums.sh
+
+      - name: Commit checksum updates
+        shell: bash
+        run: |
+          if git diff --quiet -- install.sh; then
+            echo "Installer checksums are already synchronized."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add install.sh
+          git commit -m "chore: sync installer checksums"
+          git push
