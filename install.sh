@@ -3,9 +3,9 @@ set -euo pipefail
 
 NAMESPACE="sentinella"
 MANIFEST_URL="https://raw.githubusercontent.com/thesentinella/hub-kubernetes-agent/main/agent.yaml"
-MANIFEST_SHA256="82ea2b350181d2d25639a4d2ac1eb65c8502814d9016381b8d8a596704e32331"
+MANIFEST_SHA256="c0bd3ea2a607d23863f85f15bb4023cf0c9cc9b3fee5fe64d3034df0959721db"
 POLICY_URL="https://raw.githubusercontent.com/thesentinella/hub-kubernetes-agent/main/sentinella-default-action-policy.yaml"
-POLICY_SHA256="db6945c787735cac6d2d1809cb01bf599a43ca8b9f75fe76d2f48847e05f7235"
+POLICY_SHA256="b49a116c05a12e268174218b14030f20bdde8e4e899c2f0e0720bbdb82c968d1"
 HUB_URL="https://api.hub.sentinel.la"
 
 # Public GHCR image repository.
