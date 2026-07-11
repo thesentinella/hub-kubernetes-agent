@@ -3,7 +3,7 @@ set -euo pipefail
 
 NAMESPACE="sentinella"
 MANIFEST_URL="https://raw.githubusercontent.com/thesentinella/hub-kubernetes-agent/main/agent.yaml"
-MANIFEST_SHA256="c0bd3ea2a607d23863f85f15bb4023cf0c9cc9b3fee5fe64d3034df0959721db"
+MANIFEST_SHA256="1d9f27bd2202039a726ed107c2359cc69b24409b5eebce49aee391e53e7b134a"
 POLICY_URL="https://raw.githubusercontent.com/thesentinella/hub-kubernetes-agent/main/sentinella-default-action-policy.yaml"
 POLICY_SHA256="b49a116c05a12e268174218b14030f20bdde8e4e899c2f0e0720bbdb82c968d1"
 HUB_URL="https://api.hub.sentinel.la"
