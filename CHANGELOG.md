@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.3](https://github.com/thesentinella/hub-kubernetes-agent/compare/v1.5.2...v1.5.3) (2026-07-11)
+
+
+### Bug Fixes
+
+* support openshift security contexts ([#193](https://github.com/thesentinella/hub-kubernetes-agent/issues/193)) ([2de9e85](https://github.com/thesentinella/hub-kubernetes-agent/commit/2de9e8514e0ee3d83e95cdd81b5cc0863998930c))
+
 ## [1.5.2](https://github.com/thesentinella/hub-kubernetes-agent/compare/v1.5.1...v1.5.2) (2026-07-11)
 
 
