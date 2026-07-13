@@ -423,7 +423,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: agent
-          image: us-east1-docker.pkg.dev/sentinella-hub/kubernetes-agent/sentinella-hub-k8s-agent:v1.5.3  # x-release-please-version
+          image: us-east1-docker.pkg.dev/sentinella-hub/kubernetes-agent/sentinella-hub-k8s-agent:v1.5.4  # x-release-please-version
           imagePullPolicy: IfNotPresent
           args: ["--mode", "agent"]
           envFrom:
