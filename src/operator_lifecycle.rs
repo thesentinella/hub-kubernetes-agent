@@ -3,21 +3,30 @@
 //! The agent leader watches the `sentinella-hub-k8s-agent-config` ConfigMap
 //! for changes to `ACTION_OPERATOR_ENABLED`. When the flag is `true`, the
 //! leader creates the operator `ServiceAccount` and `Deployment` in the
-//! agent's namespace. When the flag is `false` (or the ConfigMap is
-//! deleted), the leader removes them.
+//! agent's namespace, ensures the default action policy exists, and stamps
+//! `sentinella.io/action-mode=true` onto eligible namespaces. When the flag
+//! is `false` (or the ConfigMap is deleted), the leader removes those
+//! operator-owned resources and clears the labels it previously added.
 //!
 //! This replaces the static operator Deployment that used to live in the
 //! install manifest, so that `kubectl get pods` shows no operator pod while
 //! the feature is disabled.
 
+use crate::executor::{ACTION_MODE_NAMESPACE_LABEL, ACTION_MODE_NAMESPACE_LABEL_ENABLED};
 use crate::leader::LeaderState;
+use crate::operator::{combined_excluded_namespaces, namespace_is_excluded};
 use anyhow::{Context, Result};
 use futures::StreamExt;
 use k8s_openapi::api::apps::v1::Deployment;
-use k8s_openapi::api::core::v1::{ConfigMap, Pod, ServiceAccount};
+use k8s_openapi::api::core::v1::{ConfigMap, Namespace, Pod, ServiceAccount};
 use kube::Client;
-use kube::api::{Api, DeleteParams, Patch, PatchParams, PostParams, WatchEvent, WatchParams};
+use kube::api::{
+    Api, ApiResource, DeleteParams, DynamicObject, Patch, PatchParams, PostParams, WatchEvent,
+    WatchParams,
+};
+use kube::core::GroupVersionKind;
 use serde_json::json;
+use std::collections::HashSet;
 use std::time::Duration;
 use tokio::time::{MissedTickBehavior, interval};
 use tracing::{debug, info, warn};
@@ -26,6 +35,10 @@ const CONFIG_MAP_NAME: &str = "sentinella-hub-k8s-agent-config";
 const OPERATOR_NAME: &str = "sentinella-hub-k8s-operator";
 const ACTION_OPERATOR_ENABLED_KEY: &str = "ACTION_OPERATOR_ENABLED";
 const RECONCILE_TICK_SECS: u64 = 60;
+const ACTION_POLICY_GROUP: &str = "sentinella.io";
+const ACTION_POLICY_VERSION: &str = "v1alpha1";
+const ACTION_POLICY_KIND: &str = "SentinellaHubActionPolicy";
+const DEFAULT_ACTION_POLICY_NAME: &str = "sentinella-default-action-policy";
 
 /// Run the operator lifecycle watcher. Only the leader performs reconciliation;
 /// non-leader pods watch silently and act when they acquire leadership.
@@ -38,6 +51,7 @@ pub async fn run_operator_lifecycle(
     info!(namespace = %namespace, "starting operator lifecycle watcher");
 
     let mut last_enabled: Option<bool> = None;
+    let mut last_excluded: HashSet<String> = HashSet::new();
 
     // Initial reconcile from a direct GET so we converge immediately on
     // startup without waiting for the watch to deliver the first event.
@@ -45,10 +59,17 @@ pub async fn run_operator_lifecycle(
     match cm_api.get(CONFIG_MAP_NAME).await {
         Ok(cm) => {
             let enabled = is_operator_enabled(&cm);
+            last_excluded = action_operator_excluded_namespaces(&cm);
             last_enabled = Some(enabled);
             if leader.is_leader() {
-                if let Err(e) =
-                    reconcile_operator_workload(&client, &namespace, &pod_name, enabled).await
+                if let Err(e) = reconcile_operator_workload(
+                    &client,
+                    &namespace,
+                    &pod_name,
+                    enabled,
+                    &last_excluded,
+                )
+                .await
                 {
                     warn!(error = %e, "initial operator lifecycle reconcile failed");
                 }
@@ -95,6 +116,7 @@ pub async fn run_operator_lifecycle(
                                 resource_version = rv.to_string();
                             }
                             let enabled = is_operator_enabled(&cm);
+                            last_excluded = action_operator_excluded_namespaces(&cm);
                             let changed = last_enabled != Some(enabled);
                             last_enabled = Some(enabled);
                             if changed {
@@ -102,18 +124,31 @@ pub async fn run_operator_lifecycle(
                             }
                             if leader.is_leader() {
                                 if let Err(e) = reconcile_operator_workload(
-                                    &client, &namespace, &pod_name, enabled,
-                                ).await {
+                                    &client,
+                                    &namespace,
+                                    &pod_name,
+                                    enabled,
+                                    &last_excluded,
+                                )
+                                .await
+                                {
                                     warn!(error = %e, "operator lifecycle reconcile failed");
                                 }
                             }
                         }
                         Ok(WatchEvent::Deleted(_)) => {
                             last_enabled = Some(false);
+                            last_excluded = HashSet::new();
                             if leader.is_leader() {
                                 if let Err(e) = reconcile_operator_workload(
-                                    &client, &namespace, &pod_name, false,
-                                ).await {
+                                    &client,
+                                    &namespace,
+                                    &pod_name,
+                                    false,
+                                    &last_excluded,
+                                )
+                                .await
+                                {
                                     warn!(error = %e, "operator lifecycle reconcile failed after ConfigMap deletion");
                                 }
                             }
@@ -136,8 +171,14 @@ pub async fn run_operator_lifecycle(
                     if let Some(enabled) = last_enabled {
                         if leader.is_leader() {
                             if let Err(e) = reconcile_operator_workload(
-                                &client, &namespace, &pod_name, enabled,
-                            ).await {
+                                &client,
+                                &namespace,
+                                &pod_name,
+                                enabled,
+                                &last_excluded,
+                            )
+                            .await
+                            {
                                 warn!(error = %e, "periodic operator lifecycle reconcile failed");
                             }
                         } else if !enabled {
@@ -155,11 +196,16 @@ async fn reconcile_operator_workload(
     namespace: &str,
     agent_pod_name: &str,
     enabled: bool,
+    excluded_namespaces: &HashSet<String>,
 ) -> Result<()> {
     if enabled {
         ensure_operator_resources(client, namespace, agent_pod_name).await?;
+        ensure_default_action_policy(client).await?;
+        reconcile_action_mode_namespaces(client, true, excluded_namespaces).await?;
         info!("operator workload ensured (ACTION_OPERATOR_ENABLED=true)");
     } else {
+        reconcile_action_mode_namespaces(client, false, excluded_namespaces).await?;
+        remove_default_action_policy(client).await?;
         remove_operator_resources(client, namespace).await?;
         info!("operator workload removed (ACTION_OPERATOR_ENABLED=false)");
     }
@@ -245,6 +291,159 @@ async fn remove_operator_resources(client: &Client, namespace: &str) -> Result<(
     Ok(())
 }
 
+async fn reconcile_action_mode_namespaces(
+    client: &Client,
+    enabled: bool,
+    excluded_namespaces: &HashSet<String>,
+) -> Result<()> {
+    let api: Api<Namespace> = Api::all(client.clone());
+    let namespaces = api.list(&Default::default()).await?.items;
+
+    for namespace in namespaces {
+        let Some(name) = namespace.metadata.name.as_deref() else {
+            continue;
+        };
+
+        if namespace_is_excluded(name, excluded_namespaces) {
+            if namespace_action_mode_value(&namespace) != Some("false")
+                && namespace_action_mode_value(&namespace).is_some()
+            {
+                remove_action_mode_label(client, name).await?;
+            }
+            continue;
+        }
+
+        match (enabled, namespace_action_mode_value(&namespace)) {
+            (true, Some(ACTION_MODE_NAMESPACE_LABEL_ENABLED)) => continue,
+            (true, Some("false")) => continue,
+            (true, _) => set_action_mode_label(client, name).await?,
+            (false, Some(ACTION_MODE_NAMESPACE_LABEL_ENABLED)) => {
+                remove_action_mode_label(client, name).await?
+            }
+            (false, _) => continue,
+        }
+    }
+
+    Ok(())
+}
+
+fn namespace_action_mode_value(namespace: &Namespace) -> Option<&str> {
+    namespace
+        .metadata
+        .labels
+        .as_ref()
+        .and_then(|labels| labels.get(ACTION_MODE_NAMESPACE_LABEL))
+        .map(String::as_str)
+}
+
+async fn set_action_mode_label(client: &Client, namespace: &str) -> Result<()> {
+    let api: Api<Namespace> = Api::all(client.clone());
+    let patch = json!({
+        "metadata": {
+            "labels": {
+                ACTION_MODE_NAMESPACE_LABEL: ACTION_MODE_NAMESPACE_LABEL_ENABLED,
+            }
+        }
+    });
+
+    api.patch(namespace, &PatchParams::default(), &Patch::Merge(&patch))
+        .await
+        .with_context(|| format!("set action-mode label on namespace {namespace}"))?;
+    Ok(())
+}
+
+async fn remove_action_mode_label(client: &Client, namespace: &str) -> Result<()> {
+    let api: Api<Namespace> = Api::all(client.clone());
+    let patch = json!({
+        "metadata": {
+            "labels": {
+                ACTION_MODE_NAMESPACE_LABEL: serde_json::Value::Null,
+            }
+        }
+    });
+
+    api.patch(namespace, &PatchParams::default(), &Patch::Merge(&patch))
+        .await
+        .with_context(|| format!("remove action-mode label from namespace {namespace}"))?;
+    Ok(())
+}
+
+async fn ensure_default_action_policy(client: &Client) -> Result<()> {
+    let gvk = GroupVersionKind::gvk(
+        ACTION_POLICY_GROUP,
+        ACTION_POLICY_VERSION,
+        ACTION_POLICY_KIND,
+    );
+    let ar = ApiResource::from_gvk(&gvk);
+    let api: Api<DynamicObject> = Api::all_with(client.clone(), &ar);
+    let desired = desired_default_action_policy()?;
+
+    match api.get_opt(DEFAULT_ACTION_POLICY_NAME).await? {
+        Some(_) => {
+            let patch = serde_json::to_value(&desired)?;
+            api.patch(
+                DEFAULT_ACTION_POLICY_NAME,
+                &PatchParams::default(),
+                &Patch::Merge(&patch),
+            )
+            .await
+            .context("patch default action policy")?;
+        }
+        None => {
+            api.create(&PostParams::default(), &desired)
+                .await
+                .context("create default action policy")?;
+        }
+    }
+
+    Ok(())
+}
+
+async fn remove_default_action_policy(client: &Client) -> Result<()> {
+    let gvk = GroupVersionKind::gvk(
+        ACTION_POLICY_GROUP,
+        ACTION_POLICY_VERSION,
+        ACTION_POLICY_KIND,
+    );
+    let ar = ApiResource::from_gvk(&gvk);
+    let api: Api<DynamicObject> = Api::all_with(client.clone(), &ar);
+
+    if api.get_opt(DEFAULT_ACTION_POLICY_NAME).await?.is_some() {
+        api.delete(DEFAULT_ACTION_POLICY_NAME, &DeleteParams::default())
+            .await
+            .context("delete default action policy")?;
+    }
+
+    Ok(())
+}
+
+fn desired_default_action_policy() -> Result<DynamicObject> {
+    Ok(serde_json::from_value(json!({
+        "apiVersion": "sentinella.io/v1alpha1",
+        "kind": "SentinellaHubActionPolicy",
+        "metadata": {
+            "name": DEFAULT_ACTION_POLICY_NAME,
+            "labels": {
+                "app.kubernetes.io/part-of": "sentinella",
+                "sentinella.io/managed-by": "sentinella-hub-k8s-agent"
+            }
+        },
+        "spec": {
+            "allowedActions": [
+                "diagnose_postgresql",
+                "preview_workload_resources",
+                "apply_workload_resources",
+                "get_resource_yaml",
+                "rollout_restart",
+                "scale",
+                "self_update",
+                "update_agent"
+            ],
+            "allowedResources": ["Deployment", "StatefulSet", "DaemonSet"]
+        }
+    }))?)
+}
+
 async fn resolve_operator_image(
     client: &Client,
     namespace: &str,
@@ -270,6 +469,17 @@ fn is_operator_enabled(cm: &ConfigMap) -> bool {
             trimmed == "true" || trimmed == "1"
         })
         .unwrap_or(false)
+}
+
+fn action_operator_excluded_namespaces(cm: &ConfigMap) -> HashSet<String> {
+    let extra = cm
+        .data
+        .as_ref()
+        .and_then(|data| data.get("ACTION_OPERATOR_EXCLUDED_NAMESPACES"))
+        .and_then(|value| serde_yaml::from_str::<Vec<String>>(value).ok())
+        .unwrap_or_default();
+
+    combined_excluded_namespaces(&extra)
 }
 
 fn desired_operator_service_account(namespace: &str) -> ServiceAccount {
@@ -525,5 +735,40 @@ mod tests {
         assert_eq!(env_from.len(), 1);
         let cm_ref = env_from[0].config_map_ref.as_ref().unwrap();
         assert_eq!(cm_ref.name, CONFIG_MAP_NAME);
+    }
+
+    #[test]
+    fn desired_default_action_policy_has_default_scope_and_actions() {
+        let policy = desired_default_action_policy().unwrap();
+        let value = serde_json::to_value(&policy).unwrap();
+
+        assert_eq!(value["metadata"]["name"], DEFAULT_ACTION_POLICY_NAME);
+        assert!(value["spec"]["namespaceSelector"].is_null());
+        assert_eq!(
+            value["spec"]["allowedActions"],
+            json!([
+                "diagnose_postgresql",
+                "preview_workload_resources",
+                "apply_workload_resources",
+                "get_resource_yaml",
+                "rollout_restart",
+                "scale",
+                "self_update",
+                "update_agent"
+            ])
+        );
+    }
+
+    #[test]
+    fn action_operator_excluded_namespaces_parses_yaml_list() {
+        let cm = configmap_with_data(json!({
+            "ACTION_OPERATOR_EXCLUDED_NAMESPACES": "- kube-system\n- openshift-*\n- custom-ns"
+        }));
+
+        let excluded = action_operator_excluded_namespaces(&cm);
+
+        assert!(excluded.contains("kube-system"));
+        assert!(excluded.contains("openshift-*"));
+        assert!(excluded.contains("custom-ns"));
     }
 }

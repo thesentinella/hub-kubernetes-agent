@@ -4,7 +4,7 @@
 
 - The binary supports `--mode agent|operator`; the default is `agent`.
 - `agent` mode runs as a Kubernetes `DaemonSet` using the `sentinella-hub-k8s-agent` `ServiceAccount` in namespace `sentinella`.
-- `operator` mode runs as a dynamically-created `Deployment` using the `sentinella-hub-k8s-operator` `ServiceAccount` in namespace `sentinella`. The agent leader creates this Deployment when `ACTION_OPERATOR_ENABLED=true` and removes it when `false`.
+- `operator` mode runs as a dynamically-created `Deployment` using the `sentinella-hub-k8s-operator` `ServiceAccount` in namespace `sentinella`. The agent leader creates this Deployment, the default `SentinellaHubActionPolicy`, and action-mode namespace labels when `ACTION_OPERATOR_ENABLED=true`, and removes them when `false`.
 - `agent` mode starts health/metrics, leader election, inventory collection, and command polling.
 - `operator` mode starts health/metrics and the action-policy reconciler loop only; it does not talk to Hub.
 - Inventory collection is leader-only. Non-leader pods skip collection but still poll commands.
@@ -40,11 +40,10 @@
 | `AGENT_HTTP_DEBUG_BODIES` | no | `false` | Enables bounded (`200` chars) HTTP response body previews and POST request body previews in debug/error logs. |
 | `LEASE_TTL_SECS` | no | `30` | Lease validity window; renew interval is `ttl / 3`. |
 | `LEASE_NAME` | no | `sentinella-hub-k8s-agent-leader` | Lease object name. |
-| `ACTION_OPERATOR_ENABLED` | no | `false` | When `true`, the agent leader dynamically creates and manages the operator `Deployment` and `ServiceAccount` and enables mutating actions; when `false`, they are removed and mutating actions are skipped. |
+| `ACTION_OPERATOR_ENABLED` | no | `false` | When `true`, the agent leader dynamically creates and manages the operator `Deployment`, `ServiceAccount`, default `SentinellaHubActionPolicy`, and action-mode namespace labels; when `false`, they are removed and mutating actions are skipped. |
 | `POSTGRESQL_READONLY_COMMANDS_ENABLED` | no | `false` | Enables the read-only PostgreSQL diagnostic command `diagnose_postgresql` without enabling mutating actions. |
-| `ACTION_OPERATOR_ENABLED` | no | `false` | When `true`, the agent leader dynamically creates and manages the operator `Deployment` and `ServiceAccount`; when `false`, they are removed. |
 | `ACTION_OPERATOR_POLL_INTERVAL_SECS` | no | `60` | Reconciler poll interval. |
-| `ACTION_OPERATOR_EXCLUDED_NAMESPACES` | no | `[]` | YAML list of additional namespaces excluded from action RoleBinding reconciliation. |
+| `ACTION_OPERATOR_EXCLUDED_NAMESPACES` | no | `[]` | YAML list of additional namespaces excluded from action-mode reconciliation. Built-in exclusions already include `kube-system`, `kube-public`, `kube-node-lease`, `sentinella`, `tetragon`, and `openshift-*`. |
 | `COLLECT_SECRETS` | no | `false` | When `true`, collect Secret metadata and key names only; requires separate `secrets` read RBAC. |
 | `COLLECT_DEPENDENCIES_TETRAGON` | no | `false` | When `true`, collect dependency edges from Tetragon gRPC. |
 | `APP_METRICS_ENABLED` | no | `false` | Collect app Prometheus samples from annotated Services. |
@@ -822,10 +821,10 @@ Known command kinds:
 ## Deployment Manifest
 
 - The deploy manifest is root `agent.yaml`.
-- The install bundle also includes `sentinella-default-action-policy.yaml` so the default action policy ships with the agent.
+- The install bundle does not bootstrap the default action policy anymore; the agent leader creates and deletes it when `ACTION_OPERATOR_ENABLED` changes. The lifecycle ClusterRole/Binding is shipped in `sentinella-action-operator-lifecycle.yaml` and is only applied when the base manifest enables action mode.
 - Installer validation uses server-side dry-run on the rendered workload manifest; avoid client-side dry-run against the full bundle because the CRD path is brittle.
-- Action Mode eligibility is policy-driven: the operator reconciles namespace RoleBindings for namespaces that are not in the fixed or configured exclude list, and the executor only allows commands in namespaces present in a `Ready` policy's `effectiveNamespaces`.
-- `ACTION_OPERATOR_ENABLED` controls whether the agent leader dynamically creates the operator `Deployment`/`ServiceAccount` (when `true`) or removes them (when `false`); `ACTION_OPERATOR_POLL_INTERVAL_SECS` sets the operator's reconciler poll interval; `ACTION_OPERATOR_EXCLUDED_NAMESPACES` adds YAML-list exclusions to the fixed namespace denylist.
+- Action Mode is operator-managed: the operator reconciles namespace RoleBindings and `sentinella.io/action-mode=true` labels for namespaces that are not in the fixed or configured exclude list, respects `sentinella.io/action-mode=false` opt-outs, and the executor only allows commands in namespaces present in a `Ready` policy's `effectiveNamespaces`.
+- `ACTION_OPERATOR_ENABLED` controls whether the agent leader dynamically creates the operator `Deployment`/`ServiceAccount`, the default action policy, and action-mode namespace labels (when `true`) or removes them (when `false`); `ACTION_OPERATOR_POLL_INTERVAL_SECS` sets the operator's reconciler poll interval; `ACTION_OPERATOR_EXCLUDED_NAMESPACES` adds YAML-list exclusions to the fixed namespace denylist on top of the built-in `kube-system`, `kube-public`, `kube-node-lease`, `sentinella`, `tetragon`, and `openshift-*` exclusions.
 - The `agent` container image is `us-east1-docker.pkg.dev/sentinella-hub/kubernetes-agent/sentinella-hub-k8s-agent:<tag>`.
 - `agent.yaml` stores core runtime config in ConfigMap `sentinella-hub-k8s-agent-config`, app-metrics config in `sentinella-hub-app-metrics-config`, workload-monitoring config in `sentinella-hub-workload-monitoring-config`, and auth in Secret `sentinella-hub-k8s-agent-auth` key `api-key`.
 - The DaemonSet injects `HUB_API_KEY` from Secret key `api-key`, optionally.

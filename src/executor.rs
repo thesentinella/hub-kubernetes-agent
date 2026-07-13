@@ -49,7 +49,7 @@ const RESOURCE_YAML_FORMAT: &str = "yaml";
 const RESOURCE_YAML_MODE: &str = "manifest";
 const RESOURCE_YAML_MAX_BYTES: usize = 512 * 1024;
 pub(crate) const ACTION_MODE_NAMESPACE_LABEL: &str = "sentinella.io/action-mode";
-pub(crate) const ACTION_MODE_NAMESPACE_LABEL_ENABLED: &str = "enabled";
+pub(crate) const ACTION_MODE_NAMESPACE_LABEL_ENABLED: &str = "true";
 
 #[derive(Default)]
 struct CommandDedupState {
@@ -3160,7 +3160,7 @@ mod tests {
     #[test]
     fn namespace_action_mode_enabled_accepts_enabled_label() {
         let namespace = namespace_spec(Some(json!({
-            "sentinella.io/action-mode": "enabled"
+            "sentinella.io/action-mode": "true"
         })));
 
         assert_eq!(namespace_action_mode_enabled(&namespace), Ok(()));
@@ -3174,21 +3174,21 @@ mod tests {
 
         assert_eq!(
             err,
-            "namespace app-prod is not enabled for Sentinella action mode: add label sentinella.io/action-mode=enabled"
+            "namespace app-prod is not enabled for Sentinella action mode: add label sentinella.io/action-mode=true"
         );
     }
 
     #[test]
     fn namespace_action_mode_enabled_rejects_wrong_label_value() {
         let namespace = namespace_spec(Some(json!({
-            "sentinella.io/action-mode": "disabled"
+            "sentinella.io/action-mode": "false"
         })));
 
         let err = namespace_action_mode_enabled(&namespace).unwrap_err();
 
         assert_eq!(
             err,
-            "namespace app-prod is not enabled for Sentinella action mode: label sentinella.io/action-mode=disabled is required"
+            "namespace app-prod is not enabled for Sentinella action mode: label sentinella.io/action-mode=false is required"
         );
     }
 

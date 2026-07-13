@@ -22,10 +22,10 @@ sha256_file() {
 }
 
 MANIFEST_HASH="$(sha256_file agent.yaml)"
-POLICY_HASH="$(sha256_file sentinella-default-action-policy.yaml)"
+LIFECYCLE_HASH="$(sha256_file sentinella-action-operator-lifecycle.yaml)"
 
 MANIFEST_HASH="$MANIFEST_HASH" \
-POLICY_HASH="$POLICY_HASH" \
+LIFECYCLE_HASH="$LIFECYCLE_HASH" \
 python3 <<'PY'
 import os
 import re
@@ -41,21 +41,21 @@ content, manifest_count = re.subn(
     flags=re.MULTILINE,
 )
 
-content, policy_count = re.subn(
-    r'^POLICY_SHA256="[^"]*"$',
-    f'POLICY_SHA256="{os.environ["POLICY_HASH"]}"',
-    content,
-    flags=re.MULTILINE,
-)
-
 if manifest_count != 1:
     raise SystemExit(
         f"Expected exactly one MANIFEST_SHA256 entry, found {manifest_count}"
     )
 
-if policy_count != 1:
+content, lifecycle_count = re.subn(
+    r'^ACTION_OPERATOR_LIFECYCLE_SHA256="[^"]*"$',
+    f'ACTION_OPERATOR_LIFECYCLE_SHA256="{os.environ["LIFECYCLE_HASH"]}"',
+    content,
+    flags=re.MULTILINE,
+)
+
+if lifecycle_count != 1:
     raise SystemExit(
-        f"Expected exactly one POLICY_SHA256 entry, found {policy_count}"
+        f"Expected exactly one ACTION_OPERATOR_LIFECYCLE_SHA256 entry, found {lifecycle_count}"
     )
 
 path.write_text(content)
@@ -63,4 +63,4 @@ PY
 
 echo "Installer checksums synchronized."
 echo "MANIFEST_SHA256=$MANIFEST_HASH"
-echo "POLICY_SHA256=$POLICY_HASH"
+echo "ACTION_OPERATOR_LIFECYCLE_SHA256=$LIFECYCLE_HASH"

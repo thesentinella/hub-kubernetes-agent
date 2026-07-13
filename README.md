@@ -160,17 +160,17 @@ Example snapshot payload:
 
 `src/executor.rs` keeps the agent in read-only mode while `ACTION_OPERATOR_ENABLED=false`: mutating commands are skipped before parsing the command spec, but `get_resource_yaml` remains available as a read-only fetch. When actions are enabled, `preview_workload_resources` performs a server-side dry-run, `apply_workload_resources` performs a live strategic-merge patch, `drain_node` cordons a node and evicts eligible pods after action-policy approval, `self_update` triggers an immediate agent restart, and `update_agent` updates the fixed agent DaemonSet image.
 
-The binary now supports `--mode agent|operator`. The default is `agent`. The DaemonSet runs `--mode agent`. The operator Deployment is **not** installed statically — the agent leader dynamically creates and removes it based on `ACTION_OPERATOR_ENABLED` in the ConfigMap. When the flag is `true`, the leader creates the operator `ServiceAccount` and `Deployment` (running `--mode operator`); when `false`, it removes them. The operator is fully independent of Hub connectivity.
+The binary now supports `--mode agent|operator`. The default is `agent`. The DaemonSet runs `--mode agent`. The operator Deployment is **not** installed statically — the agent leader dynamically creates and removes it based on `ACTION_OPERATOR_ENABLED` in the ConfigMap. When the flag is `true`, the leader creates the operator `ServiceAccount`, `Deployment`, and default `SentinellaHubActionPolicy`, then labels eligible namespaces with `sentinella.io/action-mode=true`. When `false`, it removes the operator, the default policy, and the labels it previously added. The operator is fully independent of Hub connectivity. The leader-only lifecycle RBAC lives in `sentinella-action-operator-lifecycle.yaml` and is applied only when the base manifest has `ACTION_OPERATOR_ENABLED=true`.
 
-For Action Mode, the target namespace must also carry the label `sentinella.io/action-mode=enabled`; the executor rejects workload patch commands when the label is missing or set to another value.
+For Action Mode, the executor still requires `sentinella.io/action-mode=true` on the target namespace. The operator manages that label automatically for eligible namespaces, skips namespaces in `ACTION_OPERATOR_EXCLUDED_NAMESPACES`, and respects user opt-outs via `sentinella.io/action-mode=false`.
 
-The Phase 3 operator path runs in a dynamically-created Deployment using `--mode operator`. That workload reconciles namespace-scoped `RoleBinding`s and updates policy status for namespaces that are both labeled `sentinella.io/action-mode=enabled` and selected by a matching cluster-scoped `SentinellaHubActionPolicy`. The operator pod only exists while `ACTION_OPERATOR_ENABLED=true`; changing the ConfigMap to `false` causes the agent leader to delete it.
+The Phase 3 operator path runs in a dynamically-created Deployment using `--mode operator`. That workload reconciles namespace-scoped `RoleBinding`s and updates policy status for namespaces that are labeled `sentinella.io/action-mode=true` and selected by a matching cluster-scoped `SentinellaHubActionPolicy`. The operator pod only exists while `ACTION_OPERATOR_ENABLED=true`; changing the ConfigMap to `false` causes the agent leader to delete it.
 
 `HUB_URL`, `CLUSTER_ID`, and `HUB_API_KEY` are required only in `--mode agent`. `--mode operator` is fully Hub-independent.
 
 The operator manifest must include the `sentinellahubactionpolicies/status` subresource permission; without it, status freshness cannot be written and the operator will fail closed.
 
-`SentinellaHubActionPolicy` uses `namespaceSelector` for eligibility and now enforces `allowedActions`, `allowedResources`, and `limits` as part of the action policy gate. Policies are also treated as stale when their freshness timestamp is missing or too old.
+The operator-managed default `SentinellaHubActionPolicy` uses default scope and enforces `allowedActions`, `allowedResources`, and `limits` as part of the action policy gate. Policies are also treated as stale when their freshness timestamp is missing or too old.
 
 #### Commands: setting requests and limits
 
@@ -250,7 +250,7 @@ Warning strings use stable code prefixes for Hub-side grouping:
   verbs: ["get", "patch"]
 ```
 
-This must be a separate ClusterRole/Binding applied only when `ACTION_OPERATOR_ENABLED=true`. The read-only ClusterRole stays untouched. **No `*` on `*/*`**. The root `agent.yaml` does not grant this workload patch RBAC by default. Eligible namespaces must also be labeled `sentinella.io/action-mode=enabled`; the agent checks that label before patching.
+This must be a separate ClusterRole/Binding applied only when `ACTION_OPERATOR_ENABLED=true`. The read-only ClusterRole stays untouched. **No `*` on `*/*`**. The root `agent.yaml` does not grant this workload patch RBAC by default. Eligible namespaces are labeled by the operator; `sentinella.io/action-mode=false` is treated as a user opt-out.
 
 `drain_node` is a separate apply-only command. It requires `ACTION_OPERATOR_ENABLED=true`, a Ready `SentinellaHubActionPolicy` that allows `drain_node`, and its own cluster-wide node plus pod-eviction RBAC. The spec supports `timeoutSeconds` (default `300`, max `3600`), optional `gracePeriodSeconds` for pod eviction, and `force` to allow unmanaged pods while still using the eviction API.
 
@@ -535,7 +535,7 @@ podman push ghcr.io/sentinella/sentinella-hub-k8s-agent:0.1.0
      | CLUSTER_ID="my-cluster" HUB_API_KEY="shub_..." bash
    ```
 
-   The installer creates the auth Secret from `HUB_API_KEY`, validates the workload with server-side dry-run, applies `agent.yaml` plus `sentinella-default-action-policy.yaml`, and auto-detects the platform.
+    The installer creates the auth Secret from `HUB_API_KEY`, validates the workload with server-side dry-run, applies `agent.yaml`, and auto-detects the platform. The operator creates the default action policy later when `ACTION_OPERATOR_ENABLED=true`.
    - Force a platform when needed:
      ```bash
      curl -sfL https://raw.githubusercontent.com/thesentinella/hub-kubernetes-agent/main/install.sh \
@@ -558,17 +558,16 @@ podman push ghcr.io/sentinella/sentinella-hub-k8s-agent:0.1.0
        --from-file=api-key=/dev/stdin \
        --dry-run=client -o yaml | kubectl apply -f -
      ```
-    - Edit `agent.yaml`:
-      - `CLUSTER_ID` unique per cluster.
-      - `image:` for the `agent` container pointing to your Rust agent image.
-      - For dependency collection: set `COLLECT_DEPENDENCIES_TETRAGON=true`. The default `TETRAGON_GRPC_ADDRESS` in that mode is `tetragon-grpc.tetragon.svc.cluster.local:54321`. Set `TETRAGON_REQUIRED_FOR_READINESS=false` for dev clusters or nodes that cannot run Tetragon.
-      - Toleration block — current value runs on every node including control plane; trim if you want a smaller footprint.
-    - Apply `sentinella-default-action-policy.yaml` alongside `agent.yaml` so the operator policy ships with the install bundle.
-    - Apply:
-      ```bash
-      kubectl apply -f agent.yaml
-      kubectl apply -f sentinella-default-action-policy.yaml
-      ```
+     - Edit `agent.yaml`:
+       - `CLUSTER_ID` unique per cluster.
+       - `image:` for the `agent` container pointing to your Rust agent image.
+       - For dependency collection: set `COLLECT_DEPENDENCIES_TETRAGON=true`. The default `TETRAGON_GRPC_ADDRESS` in that mode is `tetragon-grpc.tetragon.svc.cluster.local:54321`. Set `TETRAGON_REQUIRED_FOR_READINESS=false` for dev clusters or nodes that cannot run Tetragon.
+       - Toleration block: current value runs on every node including control plane; trim if you want a smaller footprint.
+       - If you want to enable action mode later, set `ACTION_OPERATOR_ENABLED=true` in `agent.yaml` and the operator will create the default policy and manage action-mode labels.
+     - Apply:
+       ```bash
+       kubectl apply -f agent.yaml
+       ```
 
 4. Verify:
    ```bash
