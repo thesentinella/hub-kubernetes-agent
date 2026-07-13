@@ -3,9 +3,6 @@ kind: SentinellaHubActionPolicy
 metadata:
   name: sentinella-default-action-policy
 spec:
-  namespaceSelector:
-    matchLabels:
-      app.kubernetes.io/part-of: sentinella
   allowedActions:
     - diagnose_postgresql
     - preview_workload_resources

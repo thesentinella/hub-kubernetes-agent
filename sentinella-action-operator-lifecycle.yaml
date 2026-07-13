@@ -1,0 +1,26 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sentinella-hub-k8s-agent-action-operator-lifecycle
+rules:
+  - apiGroups: [""]
+    resources:
+      - namespaces
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: ["sentinella.io"]
+    resources:
+      - sentinellahubactionpolicies
+    verbs: ["get", "list", "watch", "create", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: sentinella-hub-k8s-agent-action-operator-lifecycle
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: sentinella-hub-k8s-agent-action-operator-lifecycle
+subjects:
+  - kind: ServiceAccount
+    name: sentinella-hub-k8s-agent
+    namespace: sentinella

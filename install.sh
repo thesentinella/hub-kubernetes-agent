@@ -3,9 +3,9 @@ set -euo pipefail
 
 NAMESPACE="sentinella"
 MANIFEST_URL="https://raw.githubusercontent.com/thesentinella/hub-kubernetes-agent/main/agent.yaml"
-MANIFEST_SHA256="0bbdd33a0f6030c7e8ed86e0bb530fd28aab43bc65a2ffc5748b9343499918d4"
-POLICY_URL="https://raw.githubusercontent.com/thesentinella/hub-kubernetes-agent/main/sentinella-default-action-policy.yaml"
-POLICY_SHA256="b49a116c05a12e268174218b14030f20bdde8e4e899c2f0e0720bbdb82c968d1"
+MANIFEST_SHA256="22fc7067df5518567e82beabc710e47dca866a9e13be45fa712bdbbe72c04cb4"
+ACTION_OPERATOR_LIFECYCLE_URL="https://raw.githubusercontent.com/thesentinella/hub-kubernetes-agent/main/sentinella-action-operator-lifecycle.yaml"
+ACTION_OPERATOR_LIFECYCLE_SHA256="27ed6199092dac6b0798f8c1213b23de6f51b676d92b17b77416d03ba111ecc5"
 HUB_URL="https://api.hub.sentinel.la"
 
 # Public GHCR image repository.
@@ -30,7 +30,7 @@ Usage: install.sh [--platform kubernetes|openshift]
 
 Environment:
   INSTALL_PLATFORM   Override platform detection (kubernetes|openshift)
-  VERIFY_MANIFEST_CHECKSUM  Set to true/1 to verify downloaded agent.yaml and policy manifest
+  VERIFY_MANIFEST_CHECKSUM  Set to true/1 to verify the downloaded agent.yaml
   COLLECT_DEPENDENCIES_TETRAGON  Set to true/1 when the Tetragon gRPC service is installed
   IMAGE_REPOSITORY   Container repository (default: ghcr.io/thesentinella/sentinella-hub-k8s-agent)
   IMAGE_TAG          Optional image tag override (default: derive from agent.yaml)
@@ -129,7 +129,7 @@ BASE_MANIFEST="$TMPDIR/agent.yaml"
 RENDERED_MANIFEST="$TMPDIR/agent.rendered.yaml"
 NAMESPACE_MANIFEST="$TMPDIR/agent.namespace.yaml"
 WORKLOAD_MANIFEST="$TMPDIR/agent.workload.yaml"
-POLICY_MANIFEST="$TMPDIR/sentinella-default-action-policy.yaml"
+ACTION_OPERATOR_LIFECYCLE_MANIFEST="$TMPDIR/sentinella-action-operator-lifecycle.yaml"
 
 split_namespace_manifest() {
   awk -v ns="$NAMESPACE_MANIFEST" -v rest="$WORKLOAD_MANIFEST" '
@@ -226,9 +226,8 @@ case "$VERIFY_MANIFEST_CHECKSUM" in
     ;;
 esac
 
-# Apply manifests (namespace + RBAC + ConfigMap + DaemonSet + action policy)
+# Apply manifests (namespace + RBAC + ConfigMap + DaemonSet)
 curl -sfL "$MANIFEST_URL" > "$BASE_MANIFEST"
-curl -sfL "$POLICY_URL" > "$POLICY_MANIFEST"
 
 case "$VERIFY_MANIFEST_CHECKSUM" in
   true|1)
@@ -238,10 +237,6 @@ case "$VERIFY_MANIFEST_CHECKSUM" in
     fi
     if ! echo "${MANIFEST_SHA256}  ${BASE_MANIFEST}" | $SHA256_CMD -c - >/dev/null 2>&1; then
       echo "Error: downloaded manifest checksum mismatch (expected ${MANIFEST_SHA256})." >&2
-      exit 1
-    fi
-    if ! echo "${POLICY_SHA256}  ${POLICY_MANIFEST}" | $SHA256_CMD -c - >/dev/null 2>&1; then
-      echo "Error: downloaded policy checksum mismatch (expected ${POLICY_SHA256})." >&2
       exit 1
     fi
     ;;
@@ -290,6 +285,42 @@ AGENT_IMAGE="${IMAGE_REPOSITORY}:${IMAGE_TAG}"
 
 echo "Resolved image: $AGENT_IMAGE"
 echo ""
+
+ACTION_OPERATOR_ENABLED_RENDERED=$(
+  awk '
+    $1 == "ACTION_OPERATOR_ENABLED:" {
+      value=$2
+      gsub(/"/, "", value)
+      print value
+      exit
+    }
+  ' "$BASE_MANIFEST"
+)
+
+case "$ACTION_OPERATOR_ENABLED_RENDERED" in
+  true|1)
+    curl -sfL "$ACTION_OPERATOR_LIFECYCLE_URL" > "$ACTION_OPERATOR_LIFECYCLE_MANIFEST"
+
+    if [ -n "$ACTION_OPERATOR_LIFECYCLE_SHA256" ]; then
+      if ! resolve_sha256_cmd; then
+        echo "Error: no SHA-256 tool found (need shasum or sha256sum)." >&2
+        exit 1
+      fi
+      if ! echo "${ACTION_OPERATOR_LIFECYCLE_SHA256}  ${ACTION_OPERATOR_LIFECYCLE_MANIFEST}" | $SHA256_CMD -c - >/dev/null 2>&1; then
+        echo "Error: downloaded action-operator lifecycle checksum mismatch (expected ${ACTION_OPERATOR_LIFECYCLE_SHA256})." >&2
+        exit 1
+      fi
+    fi
+
+    kubectl apply -f "$ACTION_OPERATOR_LIFECYCLE_MANIFEST"
+    ;;
+  false|0|"")
+    ;;
+  *)
+    echo "Error: ACTION_OPERATOR_ENABLED must be true, 1, false, 0, or empty." >&2
+    exit 1
+    ;;
+esac
 
 # Render CLUSTER_ID and replace all agent/operator image references with GHCR.
 awk -v cluster_id="$CLUSTER_ID" -v agent_image="$AGENT_IMAGE" '
@@ -348,8 +379,6 @@ if ! kubectl apply --dry-run=server -f "$WORKLOAD_MANIFEST" >/dev/null; then
 fi
 
 kubectl apply -f "$WORKLOAD_MANIFEST"
-
-kubectl apply -f "$POLICY_MANIFEST"
 
 # Create secret separately (not in agent.yaml)
 printf '%s' "$HUB_API_KEY" | kubectl create secret generic sentinella-hub-k8s-agent-auth \

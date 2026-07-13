@@ -33,6 +33,7 @@ const SYSTEM_EXCLUDED_NAMESPACES: &[&str] = &[
     "kube-node-lease",
     "sentinella",
     "tetragon",
+    "openshift-*",
 ];
 
 pub async fn run_action_operator(cfg: Config, client: Client) {
@@ -79,7 +80,7 @@ async fn reconcile_action_policies(cfg: &Config, client: &Client) -> Result<()> 
     .await
 }
 
-fn combined_excluded_namespaces(extra: &[String]) -> HashSet<String> {
+pub(crate) fn combined_excluded_namespaces(extra: &[String]) -> HashSet<String> {
     SYSTEM_EXCLUDED_NAMESPACES
         .iter()
         .map(|value| (*value).to_string())
@@ -206,7 +207,9 @@ fn effective_namespaces(
 
     for namespace in namespaces {
         if let Some(name) = namespace.metadata.name.as_ref() {
-            if !namespace_is_excluded(name, excluded_namespaces) {
+            if !namespace_is_excluded(name, excluded_namespaces)
+                && namespace_action_mode_enabled(namespace)
+            {
                 effective.push(name.clone());
             }
         }
@@ -215,8 +218,21 @@ fn effective_namespaces(
     effective.sort();
     effective
 }
-fn namespace_is_excluded(name: &str, excluded_namespaces: &HashSet<String>) -> bool {
-    excluded_namespaces.contains(name)
+pub(crate) fn namespace_is_excluded(name: &str, excluded_namespaces: &HashSet<String>) -> bool {
+    excluded_namespaces
+        .iter()
+        .any(|pattern| namespace_matches_pattern(name, pattern))
+}
+
+fn namespace_matches_pattern(name: &str, pattern: &str) -> bool {
+    if let Some(prefix) = pattern.strip_suffix('*') {
+        if prefix.is_empty() {
+            return false;
+        }
+        name.starts_with(prefix)
+    } else {
+        name == pattern
+    }
 }
 
 struct BindingReconcileOutcome {
@@ -458,11 +474,11 @@ fn build_policy_conditions(
             },
             if namespaces_eligible {
                 Some(
-                    "At least one namespace is eligible after applying the operator exclude list"
+                    "At least one namespace is enabled for action mode after applying the operator exclude list"
                         .into(),
                 )
             } else {
-                Some("All namespaces are excluded from action-mode reconciliation".into())
+                Some("No namespaces are enabled for action-mode reconciliation".into())
             },
             observed_generation,
             now_ms,
@@ -471,7 +487,7 @@ fn build_policy_conditions(
             "PolicyMatched",
             policy_matched,
             Some("global_exclude_list_active"),
-            Some("Policy is evaluated under the global namespace exclude-list model".into()),
+            Some("Policy is evaluated under the operator-managed action-mode model".into()),
             observed_generation,
             now_ms,
         ),
@@ -1124,19 +1140,42 @@ mod tests {
 
     #[test]
     fn namespace_is_excluded_matches_additive_denylist() {
-        let excluded_namespaces =
-            HashSet::from(["app-prod".to_string(), "kube-system".to_string()]);
+        let excluded_namespaces = HashSet::from([
+            "app-prod".to_string(),
+            "kube-system".to_string(),
+            "openshift-*".to_string(),
+        ]);
 
         assert!(namespace_is_excluded("app-prod", &excluded_namespaces));
         assert!(namespace_is_excluded("kube-system", &excluded_namespaces));
+        assert!(namespace_is_excluded(
+            "openshift-monitoring",
+            &excluded_namespaces
+        ));
         assert!(!namespace_is_excluded("app-qa", &excluded_namespaces));
+        assert!(!namespace_is_excluded(
+            "app-prod",
+            &HashSet::from(["*".to_string()])
+        ));
     }
 
     #[test]
     fn effective_namespaces_excludes_blocked_namespaces() {
         let namespaces = vec![
-            namespace_with_name("app-prod", Some(json!({"environment": "prod"}))),
-            namespace_with_name("app-qa", Some(json!({"environment": "qa"}))),
+            namespace_with_name(
+                "app-prod",
+                Some(json!({
+                    ACTION_MODE_NAMESPACE_LABEL: ACTION_MODE_NAMESPACE_LABEL_ENABLED,
+                    "environment": "prod"
+                })),
+            ),
+            namespace_with_name(
+                "app-qa",
+                Some(json!({
+                    ACTION_MODE_NAMESPACE_LABEL: ACTION_MODE_NAMESPACE_LABEL_ENABLED,
+                    "environment": "qa"
+                })),
+            ),
         ];
         let excluded_namespaces = HashSet::from(["app-qa".to_string()]);
 
