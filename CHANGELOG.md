@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.4](https://github.com/thesentinella/hub-kubernetes-agent/compare/v1.5.3...v1.5.4) (2026-07-13)
+
+
+### Bug Fixes
+
+* gate action-operator lifecycle RBAC ([#195](https://github.com/thesentinella/hub-kubernetes-agent/issues/195)) ([309b25d](https://github.com/thesentinella/hub-kubernetes-agent/commit/309b25d806519f1762be1fefb34e5ebd46b241d4))
+
 ## [1.5.3](https://github.com/thesentinella/hub-kubernetes-agent/compare/v1.5.2...v1.5.3) (2026-07-11)
 
 
