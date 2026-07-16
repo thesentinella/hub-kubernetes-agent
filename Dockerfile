@@ -32,6 +32,6 @@ RUN cargo build --release && \
 
 FROM gcr.io/distroless/cc-debian12:nonroot AS agent-runtime
 COPY --from=builder /build/target/release/sentinella-hub-k8s-agent /usr/local/bin/sentinella-hub-k8s-agent
-USER nonroot:nonroot
+USER 65532:65532
 EXPOSE 9090
 ENTRYPOINT ["/usr/local/bin/sentinella-hub-k8s-agent"]
