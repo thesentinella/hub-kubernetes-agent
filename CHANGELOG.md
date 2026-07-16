@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.7](https://github.com/thesentinella/hub-kubernetes-agent/compare/v1.5.6...v1.5.7) (2026-07-16)
+
+
+### Bug Fixes
+
+* action operator lifecycle rbac([#201](https://github.com/thesentinella/hub-kubernetes-agent/issues/201)) ([e8e9682](https://github.com/thesentinella/hub-kubernetes-agent/commit/e8e9682ddefee00869f1787cec4c40b0168b4066))
+
 ## [1.5.6](https://github.com/thesentinella/hub-kubernetes-agent/compare/v1.5.5...v1.5.6) (2026-07-16)
 
 
