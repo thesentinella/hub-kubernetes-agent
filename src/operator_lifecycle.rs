@@ -456,7 +456,13 @@ fn action_operator_excluded_namespaces(cm: &ConfigMap) -> HashSet<String> {
         .data
         .as_ref()
         .and_then(|data| data.get("ACTION_OPERATOR_EXCLUDED_NAMESPACES"))
-        .and_then(|value| serde_yaml::from_str::<Vec<String>>(value).ok())
+        .map(|value| {
+            value
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<String>>()
+        })
         .unwrap_or_default();
 
     combined_excluded_namespaces(&extra)
@@ -740,9 +746,9 @@ mod tests {
     }
 
     #[test]
-    fn action_operator_excluded_namespaces_parses_yaml_list() {
+    fn action_operator_excluded_namespaces_parses_csv_list() {
         let cm = configmap_with_data(json!({
-            "ACTION_OPERATOR_EXCLUDED_NAMESPACES": "- kube-system\n- openshift-*\n- custom-ns"
+            "ACTION_OPERATOR_EXCLUDED_NAMESPACES": "kube-system, openshift-*, custom-ns"
         }));
 
         let excluded = action_operator_excluded_namespaces(&cm);

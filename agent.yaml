@@ -330,13 +330,7 @@ data:
   LEASE_TTL_SECS: "30"
   ACTION_OPERATOR_ENABLED: "false"    # when true, the agent leader dynamically creates the operator Deployment and enables mutating actions
   ACTION_OPERATOR_POLL_INTERVAL_SECS: "60"  # reconcile interval when operator mode is enabled
-  ACTION_OPERATOR_EXCLUDED_NAMESPACES: |-
-    - kube-system
-    - kube-public
-    - kube-node-lease
-    - sentinella
-    - tetragon
-    - openshift-*
+  ACTION_OPERATOR_EXCLUDED_NAMESPACES: ""  # comma-separated extra namespaces; built-in exclusions are always applied in code
   POSTGRESQL_READONLY_COMMANDS_ENABLED: "false"  # opt-in; enables read-only PostgreSQL diagnostics
   COLLECT_SECRETS: "false"           # requires separate secrets-reader RBAC when true
   COLLECT_DEPENDENCIES_TETRAGON: "false"  # opt-in; requires Tetragon with gRPC enabled
