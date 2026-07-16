@@ -5,8 +5,8 @@
 //! leader creates the operator `ServiceAccount` and `Deployment` in the
 //! agent's namespace, ensures the default action policy exists, and stamps
 //! `sentinella.io/action-mode=true` onto eligible namespaces. When the flag
-//! is `false` (or the ConfigMap is deleted), the leader removes those
-//! operator-owned resources and clears the labels it previously added.
+//! is `false` (or the ConfigMap is deleted), the leader removes only the
+//! operator workload so the extra policy/namespace RBAC is not required.
 //!
 //! This replaces the static operator Deployment that used to live in the
 //! install manifest, so that `kubectl get pods` shows no operator pod while
@@ -204,8 +204,6 @@ async fn reconcile_operator_workload(
         reconcile_action_mode_namespaces(client, true, excluded_namespaces).await?;
         info!("operator workload ensured (ACTION_OPERATOR_ENABLED=true)");
     } else {
-        reconcile_action_mode_namespaces(client, false, excluded_namespaces).await?;
-        remove_default_action_policy(client).await?;
         remove_operator_resources(client, namespace).await?;
         info!("operator workload removed (ACTION_OPERATOR_ENABLED=false)");
     }
@@ -394,24 +392,6 @@ async fn ensure_default_action_policy(client: &Client) -> Result<()> {
                 .await
                 .context("create default action policy")?;
         }
-    }
-
-    Ok(())
-}
-
-async fn remove_default_action_policy(client: &Client) -> Result<()> {
-    let gvk = GroupVersionKind::gvk(
-        ACTION_POLICY_GROUP,
-        ACTION_POLICY_VERSION,
-        ACTION_POLICY_KIND,
-    );
-    let ar = ApiResource::from_gvk(&gvk);
-    let api: Api<DynamicObject> = Api::all_with(client.clone(), &ar);
-
-    if api.get_opt(DEFAULT_ACTION_POLICY_NAME).await?.is_some() {
-        api.delete(DEFAULT_ACTION_POLICY_NAME, &DeleteParams::default())
-            .await
-            .context("delete default action policy")?;
     }
 
     Ok(())

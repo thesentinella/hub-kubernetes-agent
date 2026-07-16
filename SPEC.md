@@ -4,7 +4,7 @@
 
 - The binary supports `--mode agent|operator`; the default is `agent`.
 - `agent` mode runs as a Kubernetes `DaemonSet` using the `sentinella-hub-k8s-agent` `ServiceAccount` in namespace `sentinella`.
-- `operator` mode runs as a dynamically-created `Deployment` using the `sentinella-hub-k8s-operator` `ServiceAccount` in namespace `sentinella`. The agent leader creates this Deployment, the default `SentinellaHubActionPolicy`, and action-mode namespace labels when `ACTION_OPERATOR_ENABLED=true`, and removes them when `false`.
+- `operator` mode runs as a dynamically-created `Deployment` using the `sentinella-hub-k8s-operator` `ServiceAccount` in namespace `sentinella`. The agent leader creates this Deployment, the default `SentinellaHubActionPolicy`, and action-mode namespace labels when `ACTION_OPERATOR_ENABLED=true`, and removes only the operator workload when `false`.
 - `agent` mode starts health/metrics, leader election, inventory collection, and command polling.
 - `operator` mode starts health/metrics and the action-policy reconciler loop only; it does not talk to Hub.
 - Inventory collection is leader-only. Non-leader pods skip collection but still poll commands.
