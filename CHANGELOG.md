@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.5](https://github.com/thesentinella/hub-kubernetes-agent/compare/v1.5.4...v1.5.5) (2026-07-16)
+
+
+### Bug Fixes
+
+* use numeric uid in runtime image ([#197](https://github.com/thesentinella/hub-kubernetes-agent/issues/197)) ([57c20be](https://github.com/thesentinella/hub-kubernetes-agent/commit/57c20be6d0baded6c7b48d6886a3c59ada5cb7c6))
+
 ## [1.5.4](https://github.com/thesentinella/hub-kubernetes-agent/compare/v1.5.3...v1.5.4) (2026-07-13)
 
 
